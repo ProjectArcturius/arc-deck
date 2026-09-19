@@ -1,0 +1,29 @@
+# Contrast probe regions for a 1550x830 Arc Deck capture, maximised window.
+# label,x,y,w,h   ('#' starts a comment)
+#
+# Crop tightly around ACTUAL glyphs. A window that is mostly background measures the
+# background, not the text -- and then reports a misleading 1.00 ratio.
+
+# ── 会话页 ───────────────────────────────────────────────────────────
+titlePage,430,118,140,44
+titleCount,432,158,240,20
+sess1Title,530,240,300,26
+sess1Sub,530,272,300,20
+sess5Title,530,600,300,26
+sess5Sub,530,632,300,20
+lastTimestamp,1400,240,140,20
+
+# ── 工具页 ───────────────────────────────────────────────────────────
+toolsTitle,430,60,120,44
+toolsCount,432,112,340,20
+toolsRow,480,185,260,26
+detailName,866,80,300,40
+detailSummary,866,118,500,26
+detailValue,1000,168,400,22
+detailNote,866,275,520,60
+
+# ── 对话页 ───────────────────────────────────────────────────────────
+chatTitle,430,62,420,28
+chatMeta,430,92,300,20
+chatPara,430,222,900,26
+chatCodeLine,430,320,400,22

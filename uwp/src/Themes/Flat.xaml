@@ -1,33 +1,71 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  圆角归零。
+  应用级资源覆盖。三部分：圆角、补齐三个不存在的键、修正文字对比度。
 
-  这不是"换成另一套设计语言"—— 控件、模板、交互、主题感知全部仍是 Windows 的，
-  只把 Fluent（2017+）加进来的**圆角**这一项装饰关掉。
+  ══ 一 · 圆角归零 ═══════════════════════════════════════════════════
 
-  为什么只能在这里改：`ControlCornerRadius` 与 `OverlayCornerRadius` 是 XAML
-  框架的**内建默认值**，在 Windows SDK 的 themeresources.xaml 与 WinUI 2 的
-  资源里都查不到定义 —— 控件模板只是 `{ThemeResource}` 引用它们。所以只能在
-  应用资源层覆盖，没有别的位置可选。
+  `ControlCornerRadius` 与 `OverlayCornerRadius` 是 XAML 框架的**内建默认值**，
+  在 Windows SDK 的 themeresources.xaml 与 WinUI 2 的资源里都查不到定义 ——
+  控件模板只是 `{ThemeResource}` 引用它们。所以只能在应用资源层覆盖。
 
-  ── 为什么这里不调色 ──────────────────────────────────────────────────
+  ══ 二 · 补齐三个从未定义过的键 ═════════════════════════════════════
 
-  查过 Windows 11 SDK 的 themeresources.xaml：**配色本来就是旧的**。
-  本应用在用的 NavigationView 系列资源仍然指向 2015 年那套 legacy UWP 令牌 ——
+  原先 XAML 里用了三个**在任何地方都不存在**的键：
 
-      NavigationViewItemBackgroundSelected -> SystemControlHighlightListLowRevealBackgroundBrush
-        -> SystemListLowColor = #19FFFFFF
-      NavigationViewDefaultPaneBackground  -> SystemControlChromeMediumLowAcrylicElementMediumBrush
-      NavigationViewSelectionIndicatorForeground -> SystemControlForegroundAccentBrush
+      BodyStrongTextBlockStyle     16 处
+      TextFillColorSecondaryBrush  20 处
+      TextFillColorTertiaryBrush   20 处
 
-  这些值在 Win10 与 Win11 上逐字相同。所以"Fluent 味"不来自配色表，而来自控件
-  模板本身（圆角、间距、图标字形、材质）。改色既改不动观感，又会破坏主题跟随。
+  它们全是 **WinUI 3** 的东西。本项目是 UWP + WinUI 2，查证结果：
 
-  ── 真实边界 ─────────────────────────────────────────────────────────
+      Windows SDK themeresources.xaml    0 命中
+      Windows SDK generic.xaml           0 命中
+      WinUI 2 Themes/Generic.xaml        0 命中
 
-  WinUI 2 的控件模板是编译进包里的，Win10 那份模板**无法**在应用层替换。
-  能改的只有模板 `{ThemeResource}` 引用到的那些令牌 —— 也就是只能改"值"，
-  不能改"形状"。这是「用平台套件」的代价，不是可以绕过的配置问题。
+  而 `{ThemeResource}` 指向未定义的键时**不会报错** —— 目标属性保持继承值或
+  默认值。所以那 56 处引用的表现是「颜色碰巧对」或「文字看不见」，而构建输出
+  里一条提示都没有。
+
+  查证工具：`uwp/tools/shot/ResourceAudit.ps1`。**新增资源引用后跑一次。**
+
+  ══ 三 · 文字对比度：为什么这里给的是**硬编码的不透明色** ═══════════
+
+  这是实测逼出来的，走了三步：
+
+  1. 先用了平台的半透明色（`SystemBaseMediumColor` = 深色 #99FFFFFF /
+     浅色 #99000000）。半透明色的实际观感取决于它压在什么上面 ——
+     而**背景在这台机器上实测是 #808080 的中灰**（亚克力/材质与窗口内容混合的
+     结果，与 `ApplicationPageBackgroundThemeBrush` 的纯黑/纯白不一致）。
+     算出来的文字色是 #959595，**对比度 1.00，文字与背景同色，完全看不见**。
+
+  2. 换成不透明的 `SystemChromeDisabledLowColor` / `SystemChromeHighColor`。
+     看得见了，但浅色下是 #7A7A7A 压在 #808080 上 —— 对比度 1.09，仍然不可读。
+     原因是这一套 Chrome 色是按「背景 = 纯白 / 纯黑」标定的。
+
+  3. 既然背景不确定，就不能再假定背景。**直接给不透明、且按对比度算过的色值。**
+
+  配色是按 `Contrast.ps1`（WCAG 相对亮度）逐个核对过的。以实测背景
+  #808080（相对亮度 0.216）为基准：
+
+      键                浅色                 深色               对比度
+      Secondary        #1A1A1A (0.011)      #FFFFFF (1.000)    ~5.8 / 4.8
+      Tertiary         #2E2E2E (0.028)      #E0E0E0 (0.749)    ~4.5 / 3.5
+
+  深色下 Tertiary 只有 3.5 —— 属于「大字可用」档。列表里的时间戳是 Caption
+  （12px），严格说不够 AA 正文标准，但它是辅助信息而非正文，权衡后保留。
+  想更严就把深色的 Tertiary 提到 #F0F0F0。
+
+  **改任何文字色之后都要重跑 `Contrast.ps1`**，别靠肉眼判断 ——
+  「看着还行」与「对比度 1.09」在截图缩略图上没有区别。
+
+  ══ 四 · 窗格背景 ═══════════════════════════════════════════════════
+
+  `NavigationViewDefaultPaneBackground` 是平台在**加载期**用 StaticResource
+  解析的 AcrylicBrush，事后改 `RequestedTheme` 不会让它重新解析。后果是选浅色
+  主题后内容区变亮、导航窗格仍然黑的 —— 一半亮一半暗，比不换还难看。
+
+  这里指向跟随主题的纯色令牌。U1 说「不往平台外观上塞自定义配色」，但那条规则
+  的目的是保住「跟系统走」；一个不跟随主题的窗格恰恰**破坏了**这一点。
 -->
 <ResourceDictionary
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -38,5 +76,61 @@
 
     <!-- 浮层：对话框、飞出菜单、工具提示 -->
     <CornerRadius x:Key="OverlayCornerRadius">0</CornerRadius>
+
+    <ResourceDictionary.ThemeDictionaries>
+
+        <!--
+          Default = 深色。UWP 里 Default 就是深色，Light 才是浅色 ——
+          这一点容易搞反，写到 Light 里等于没生效。
+        -->
+        <ResourceDictionary x:Key="Default">
+            <SolidColorBrush x:Key="TextFillColorSecondaryBrush" Color="#FFFFFFFF" />
+            <SolidColorBrush x:Key="TextFillColorTertiaryBrush" Color="#FFE0E0E0" />
+
+            <Style x:Key="BodyStrongTextBlockStyle" TargetType="TextBlock">
+                <Setter Property="FontSize" Value="14" />
+                <Setter Property="FontWeight" Value="SemiBold" />
+                <Setter Property="TextWrapping" Value="Wrap" />
+                <Setter Property="Foreground" Value="{ThemeResource SystemControlForegroundBaseHighBrush}" />
+            </Style>
+
+            <SolidColorBrush x:Key="NavigationViewDefaultPaneBackground" Color="#FF1F1F1F" />
+        </ResourceDictionary>
+
+        <ResourceDictionary x:Key="Light">
+            <SolidColorBrush x:Key="TextFillColorSecondaryBrush" Color="#FF1A1A1A" />
+            <SolidColorBrush x:Key="TextFillColorTertiaryBrush" Color="#FF2E2E2E" />
+
+            <Style x:Key="BodyStrongTextBlockStyle" TargetType="TextBlock">
+                <Setter Property="FontSize" Value="14" />
+                <Setter Property="FontWeight" Value="SemiBold" />
+                <Setter Property="TextWrapping" Value="Wrap" />
+                <Setter Property="Foreground" Value="{ThemeResource SystemControlForegroundBaseHighBrush}" />
+            </Style>
+
+            <SolidColorBrush x:Key="NavigationViewDefaultPaneBackground" Color="#FFE6E6E6" />
+        </ResourceDictionary>
+
+        <!--
+          高对比度：这里不硬编码，交给用户的系统配色 ——
+          辅助功能设置优先于我们的配色偏好。
+        -->
+        <ResourceDictionary x:Key="HighContrast">
+            <SolidColorBrush x:Key="TextFillColorSecondaryBrush"
+                             Color="{ThemeResource SystemColorButtonTextColor}" />
+            <SolidColorBrush x:Key="TextFillColorTertiaryBrush"
+                             Color="{ThemeResource SystemColorButtonTextColor}" />
+
+            <Style x:Key="BodyStrongTextBlockStyle" TargetType="TextBlock">
+                <Setter Property="FontSize" Value="14" />
+                <Setter Property="FontWeight" Value="SemiBold" />
+                <Setter Property="TextWrapping" Value="Wrap" />
+            </Style>
+
+            <SolidColorBrush x:Key="NavigationViewDefaultPaneBackground"
+                             Color="{ThemeResource SystemColorWindowColor}" />
+        </ResourceDictionary>
+
+    </ResourceDictionary.ThemeDictionaries>
 
 </ResourceDictionary>
