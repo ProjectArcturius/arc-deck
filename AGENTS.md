@@ -11,7 +11,7 @@ uwp/        C# + WinUI 2（Windows 专属）              用微软自家的接�
 
 | | `kanesumi/` | `uwp/` |
 |---|---|---|
-| 外观 | 自定 —— Kanesumi Design | **跟系统走**，不覆盖任何主题资源 |
+| 外观 | 自定 —— Kanesumi Design | **跟系统走**（唯一例外：圆角归零，见 U3） |
 | 理由 | 跨平台一致性 | 用平台现成的基础设施 |
 
 产品名 **Arc Deck**，仓名 `arc-deck`。
@@ -147,16 +147,17 @@ Cargo 的 git 依赖天然**按 crate 选择**且支持 `subdirectory`。submodu
 这是一个**普通、地道的 UWP 应用**：C# + XAML，WinUI 2 控件，
 外观完全交给 Windows。
 
-**`App.xaml` 只合并 WinUI 2 的控件资源，不覆盖任何主题资源。**
-控件长什么样由系统决定 —— 用户换了主题或强调色，应用跟着变。
+**`App.xaml` 只合并 WinUI 2 的控件资源 + 一个 `Themes/Flat.xaml`。**
+`Flat.xaml` 只做一件事：把 `ControlCornerRadius` / `OverlayCornerRadius` 归零。
+这是**唯一**允许的外观覆盖，理由见 U3。
 
 **不要做的事**（都曾短暂做过，已移除）：
 
 | 不做 | 为什么 |
 |---|---|
-| 覆盖 `SystemControl*` 画刷 | 那是往平台外观上塞自定义配色，与「跟系统走」矛盾 |
-| 覆盖 `ControlCornerRadius` / `OverlayCornerRadius` | 圆角由系统主题决定 |
+| 覆盖 `SystemControl*` 画刷 | 那是往平台外观上塞自定义配色，与「跟系统走」矛盾。也别拿 Acrylic 换纯色 —— 那是在放弃平台材质，方向正好反了 |
 | 重写 `ListViewItem` 模板 | 平台模板自带虚拟化、选中态、键盘导航、无障碍 —— 重写要自己维护这些 |
+| 覆盖图标字体 | 码点语义不通用，只会让写死的字形指错图。见 U3 |
 | 构建脚本合成彩色图标 | 图标是设计资产，不该由脚本生成 |
 
 ### U2 · 用 WinUI 2，不用 WinUI 3
@@ -165,7 +166,46 @@ Cargo 的 git 依赖天然**按 crate 选择**且支持 `subdirectory`。submodu
 而引入 Windows App SDK —— 那是另一套东西，会带来 `dotnet build`、
 无 `XamlRoot` 兼容层、不同的打包模型等一系列连锁变化。
 
-### U3 · 控件命名空间：新增控件走 `muxc:`，系统控件走默认
+### U3 · 外观的边界是「令牌值」—— 不是「模板形状」
+
+这一条是实测出来的，写下来省得下次再试一遍。
+
+**能改的**：控件模板通过 `{ThemeResource}` 引用到的那些令牌。把
+`ControlCornerRadius` / `OverlayCornerRadius` 归零就属于这一类 —— 它们是
+XAML 框架的**内建默认值**，在 Windows SDK 的 `themeresources.xaml` 与 WinUI 2
+的资源里都**查不到定义**，模板只是引用它们，所以只能在应用资源层覆盖。
+
+**改不了的**：WinUI 2 的控件模板本身。它编译进包里，Win10 那份无法在应用层
+替换。能改的只有模板引用的令牌 —— **只能改「值」，不能改「形状」**。
+
+**反直觉的一条实测**：Windows 11 SDK 的 `themeresources.xaml` 里配色
+**本来就是旧的**。`NavigationView` 系列仍指向 2015 年那套 legacy UWP 令牌：
+
+```
+NavigationViewItemBackgroundSelected -> SystemControlHighlightListLowRevealBackgroundBrush
+  -> SystemListLowColor = #19FFFFFF
+NavigationViewDefaultPaneBackground  -> SystemControlChromeMediumLowAcrylicElementMediumBrush
+NavigationViewSelectionIndicatorForeground -> SystemControlForegroundAccentBrush
+```
+
+这些值在 Win10 与 Win11 上**逐字相同**。所以「Fluent 味」不来自配色表，
+而来自控件模板本身（圆角、间距、图标字形、材质）。**改色改不动观感**，
+还会破坏主题跟随 —— 不要往这个方向做。
+
+**图标字体也不能覆盖。** 曾把 `SymbolThemeFontFamily` 改成
+`"Segoe MDL2 Assets"`（Win10 图标字体），是**错的**，已撤销：
+
+- 两套字体的**码点语义不通用**。实测 U+E8B7 在 Segoe Fluent Icons 里是
+  「标签文件夹」，在 Segoe MDL2 Assets 里**不是文件夹**。一旦换字体，
+  代码里每个写死的 `Glyph="&#xE8NN;"` 都会悄悄指向另一张图
+- `SymbolIcon Symbol="Back"` 由框架在运行时解析码点，字体只是渲染层，
+  覆盖 `SymbolThemeFontFamily` 对它们**无效**。即使覆盖生效也只能改到一部分
+  图标，结果是两套字形混在一起，比不覆盖更难看
+
+**据此的写法约定**：图标优先用 `SymbolIcon` + 枚举名（`Symbol="Folder"`），
+**不要**用 `FontIcon` + 码点 —— 前者与字体解耦，后者换字体就指错图。
+
+### U4 · 控件命名空间：新增控件走 `muxc:`，系统控件走默认
 
 | 类别 | 命名空间 | 例子 |
 |---|---|---|
@@ -178,7 +218,7 @@ Cargo 的 git 依赖天然**按 crate 选择**且支持 `subdirectory`。submodu
 **同类陷阱**：`NavigationView` 在两个命名空间里都有，事件处理器参数必须
 完全限定用 `Microsoft.UI.Xaml.Controls`，否则报「没有与委托匹配的重载」。
 
-### U4 · 用平台现成的控制件，不自造
+### U5 · 用平台现成的控制件，不自造
 
 对话页用 `CommandBar` 而不是自己摆按钮；对话框用 `ContentDialog` 而不是
 自己拼浮层；列表用 `ListView` + `DataTemplateSelector` 而不是手写分派逻辑。
@@ -186,7 +226,7 @@ Cargo 的 git 依赖天然**按 crate 选择**且支持 `subdirectory`。submodu
 **理由**：这些控件自带溢出菜单、键盘提示、焦点管理、无障碍语义与触摸手势。
 自己重造要维护的正是这些东西 —— 而「用平台套件」的全部好处就在这里。
 
-### U5 · 用 Release 配置构建
+### U6 · 用 Release 配置构建
 
 Debug 的 .NET Native 依赖 `Microsoft.NET.Native.Framework.**Debug**.2.2`
 （调试运行时通常未预装）。Release 才是 UWP 的发布形态。
@@ -194,14 +234,14 @@ Debug 的 .NET Native 依赖 `Microsoft.NET.Native.Framework.**Debug**.2.2`
 csproj 里两个非默认项**不要删**：`<LangVersion>10.0</LangVersion>`
 （UWP 默认 C# 7.3）与 `<UseDotNetNativeToolchain>`（让应用自包含）。
 
-### U6 · UWP 不能直接运行 exe
+### U7 · UWP 不能直接运行 exe
 
 必须经包注册/安装后由 Activator 启动。排查启动失败时用
 `IApplicationActivationManager.ActivateApplication` 的 COM 接口拿真实 HRESULT ——
 `Start-Process shell:appsFolder\...` 只说「已请求启动」，失败时给不出原因；
 事件日志的 `.NET Runtime` 条目也不含异常消息。
 
-### U7 · 本目录与 Kanesumi 无关
+### U8 · 本目录与 Kanesumi 无关
 
 UWP 版**不是** Kanesumi Design 的实现。它用微软的控件、微软的配色
 （系统主题 + 强调色）、微软的排版刻度。
@@ -224,8 +264,11 @@ UWP 版**不是** Kanesumi Design 的实现。它用微软的控件、微软的�
 | `kanesumi/` 无障碍 | ❌ 完全没有（`Scene` 是纯绘制命令，没有无障碍树） |
 | `uwp/` 完整应用（5 页 + NavigationView） | ✅ 编译通过，产出 MSIX |
 | `uwp/` 启动运行 | ✅ **已跑通**（签名 → 安装 → 启动，约 81 MB） |
+| `uwp/` 对话页块渲染（段落/代码/工具卡） | ✅ 已跑通并逐块截图核对 |
+| `uwp/` 外观 | ⚠️ 只做到圆角归零。图标字形与控件模板形状改不动，见 U3 |
 | 无障碍 | `kanesumi/` ❌ 没有（自绘路线最大缺口）· `uwp/` ✅ 平台免费提供 |
 | `arc-deck-dsh`（协议客户端） | ❌ 未建立 |
+| `uwp/` 数据 | ⚠️ 全部是示例数据（`Models/Store.cs`），未接协议 |
 
 ## 构建
 
@@ -245,7 +288,18 @@ $msbuild = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBui
 # 部署：建证书 → 信任 → 签名 → 验证，一条命令给明确结论
 dotnet run --project uwp\tools\deploy-check
 Add-AppxPackage -Path uwp\src\AppPackages\**\*_x64.msix
+
+# 看界面：驱动 + 截图（必须用 Windows PowerShell 5.1，不是 pwsh）
+$ps5 = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+& $ps5 -File uwp\tools\shot\Ui.ps1  -Max -Out shot.png
+& $ps5 -File uwp\tools\shot\Uia.ps1 -List
+& $ps5 -File uwp\tools\shot\Uia.ps1 -Invoke "会话" -Out shot.png
 ```
+
+**别用肉眼判断界面改没改。** `uwp/tools/shot/` 下的脚本是为了把这类判断做成
+可测量的：`ImgDiff.ps1` 做对照实验的差异分布，`GlyphDiff.ps1` 比字形，
+`ZoomRect.ps1` 放大真实像素。这一轮的教训是：我曾在 14px 图标上看走眼，
+据此下了错误结论并白绕很久。**声明「改好了」之前先出证据。**
 
 **别用 `Add-AppxPackage -Register` 装松散文件** —— 能注册成功但启动报
 `0x8027025B`。走「签名 MSIX → 安装」才是正路。
