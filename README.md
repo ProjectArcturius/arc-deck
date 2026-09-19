@@ -1,20 +1,21 @@
 # Arc Deck
 
-> **based on [Kanesumi Design](https://github.com/ProjectArcturius/Ether/blob/main/docs/KANESUMI_DESIGN.md)** —— 以直角丈量边缘。
-
 DeepSeek Harness 的**原生**桌面客户端。**两个实现并列：**
 
 | | `kanesumi/` | `uwp/` |
 |---|---|---|
 | 语言 | **Rust**（edition 2024） | **C# + XAML** |
 | 界面 | 自绘 `Scene` 渲染命令 | **WinUI 2** 控件 |
+| 外壳 | 自研 Win32 事件循环 | UWP AppContainer |
 | 平台 | Windows 优先，随后 Linux | **Windows 专属** |
 | 构建 | `cargo` | **MSBuild** |
-| 外壳 | 自研事件循环（无 winit） | UWP AppContainer |
+| 外观 | 自定（`based on Kanesumi Design`） | **跟系统走** |
 | 状态 | 骨架 + IME 实测通过 | 完整应用，构建通过 |
 
-两者**共享设计正典、控件规格、Sokuou 曲线与命名惯例，不共享一行实现代码** ——
-这是 Kanesumi 的扇区模型：各平台为扇区，共圆心。
+**两者是同一个客户端的两条实现路线，代码不共享。**
+
+- `kanesumi/` —— 自绘渲染，为跨平台一致性。（`based on [Kanesumi Design](https://github.com/ProjectArcturius/Ether/blob/main/docs/KANESUMI_DESIGN.md)`）
+- `uwp/` —— 用微软自家的接口与套件。外观完全交给 Windows，不覆盖任何主题资源。
 
 ## 为什么两个都做
 
@@ -26,11 +27,11 @@ DeepSeek Harness 的**原生**桌面客户端。**两个实现并列：**
 | 无障碍 | **完全没有** ← 最大缺口 | **平台免费给** |
 | IME | 自己实现（**已实测通过**） | 平台免费给 |
 | 跨平台 | ✅ 同一套 App 逻辑换外壳 | ❌ 只在 Windows |
-| 设计语言保真 | 类型级强制 | 覆盖系统资源，需纪律维持 |
+| 外观控制 | 类型级强制 | 跟系统走（刻意不做覆盖） |
 | 分发 | 裸 exe，随便发 | MSIX + 签名 |
 
-**结论**：要跨平台一致性走 `kanesumi/`；只要 Windows 且想省掉那三项基础设施，
-走 `uwp/`。
+**结论**：要跨平台一致性走 `kanesumi/`；只要 Windows、且想用平台现成的
+基础设施，走 `uwp/`。
 
 ## 共同的出发点：不用 WebView
 
@@ -121,13 +122,19 @@ arc-deck/
 │       ├── ime-probe/             IMM32 探针 + 输入链路验证 + 窗口截图
 │       └── layout-bench/          流式排版性能
 ├── uwp/                           C# + WinUI 2 版本
-│   ├── src/Kanesumi.SecW/         UWP 应用（5 页 + NavigationView 外壳）
-│   └── tools/make-icons/          图标生成（正典配色）
+│   └── src/                       UWP 应用（ArcDeck.csproj）
+│       ├── ShellPage.xaml         NavigationView 外壳（响应式窗格 + 搜索框）
+│       ├── SessionsPage.xaml      会话列表
+│       ├── ChatPage.xaml          对话页（CommandBar / 消息模板分派 / 工具卡片）
+│       ├── WorkspacesPage.xaml    工作区归类
+│       ├── ToolsPage.xaml         WinUI 2 控件一览
+│       ├── SettingsPage.xaml      设置
+│       └── Models/                数据与模板选择器
 ├── docs/
 │   ├── ARCHITECTURE.md            Rust 侧架构与 winit 决策依据
-│   ├── DESIGN_SYSTEM.md           正典落地取值与已核实落差
+│   ├── DESIGN_SYSTEM.md           正典落地取值（**只与 kanesumi/ 相关**）
 │   └── PERF_FINDINGS.md           流式排版实测
-└── AGENTS.md                      两个版本共同遵守的铁律
+└── AGENTS.md                      协作约定：通用 + kanesumi 侧 K1–K9 + uwp 侧 U1–U7
 ```
 
 ### 构建 Rust 版本
@@ -146,7 +153,8 @@ cargo run -p layout-bench --release
 
 ```powershell
 $msbuild = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
-& $msbuild uwp\src\Kanesumi.SecW\Kanesumi.SecW.csproj /p:Configuration=Release /p:Platform=x64
+& $msbuild uwp\src\ArcDeck.csproj /t:Restore /p:Configuration=Release /p:Platform=x64
+& $msbuild uwp\src\ArcDeck.csproj /p:Configuration=Release /p:Platform=x64
 ```
 
 ## Rust 侧的探针

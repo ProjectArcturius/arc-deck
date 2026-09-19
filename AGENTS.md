@@ -3,15 +3,23 @@
 Arc Deck 是 DeepSeek Harness 的原生桌面客户端，有**两个并列实现**。
 
 ```
-kanesumi/   Rust + 自绘 Scene（跨平台，无 WebView）
-uwp/        C# + WinUI 2（Windows 专属）
+kanesumi/   Rust + 自绘 Scene（跨平台，无 WebView）   based on Kanesumi Design
+uwp/        C# + WinUI 2（Windows 专属）              用微软自家的接口与套件
 ```
 
-**共享**：设计正典 · 控件规格 · Sokuou 曲线 · 命名与 API 惯例。
-**不共享**：任何一行实现代码。这是 Kanesumi 的扇区模型 —— 各平台为扇区，共圆心。
+**两者代码不共享，外观也不共享。** 它们是同一个客户端的两条实现路线：
 
-设计正典：[Ether `docs/KANESUMI_DESIGN.md`](https://github.com/ProjectArcturius/Ether/blob/main/docs/KANESUMI_DESIGN.md)。
-产品名 **Arc Deck**，仓名 `arc-deck`，附文 `based on Kanesumi Design`。
+| | `kanesumi/` | `uwp/` |
+|---|---|---|
+| 外观 | 自定 —— Kanesumi Design | **跟系统走**，不覆盖任何主题资源 |
+| 理由 | 跨平台一致性 | 用平台现成的基础设施 |
+
+产品名 **Arc Deck**，仓名 `arc-deck`。
+设计正典（**只与 `kanesumi/` 相关**）：
+[Ether `docs/KANESUMI_DESIGN.md`](https://github.com/ProjectArcturius/Ether/blob/main/docs/KANESUMI_DESIGN.md)。
+
+> 不要把 Kanesumi 的东西搬进 `uwp/`，也不要拿 `uwp/` 的平台行为去改
+> Kanesumi 的规格。两者的**唯一**交集是「同一个客户端」这个目标。
 
 ## 提交规范
 
@@ -23,46 +31,27 @@ uwp/        C# + WinUI 2（Windows 专属）
 **提交 ≠ 推送** —— 推送必须等用户明确指示。
 
 正文惯用标点：`——` 引出根因或理由，`·` 分隔同一提交内的独立改动。
-交叉引用用 `参 <doc> §N`，两个版本各自的规则加前缀（如 `参 kanesumi/AGENTS.md`）。
+交叉引用用 `参 <doc> §N`。
 
 **scope 用版本名或子系统**：`feat(kanesumi):` / `feat(uwp):` / `docs(perf):`。
 
 ## 通用铁律
 
-### 1 · 配色与几何从正典取值，不在控件里散写
-
-**注意一处平台分歧，必须显式记录**：正典写「OLED 纯黑 `#000000`」，
-Android 扇区严格遵守，而 Ether 桌面扇区用 `#1A1A1A`；强调色 likewise
-（`#2E67B5` 蓝 vs `#E57812` 橙金）。**没有任何文档解释这个分歧。**
-
-Arc Deck 两个版本都跟随**桌面扇区**（`#1A1A1A` / `#E57812`）——
-一致比各自为政重要。参 `docs/DESIGN_SYSTEM.md`。
-
-### 2 · 正典未覆盖的规格，实测后补进正典
-
-两个版本都会发现正典没写的东西（如 IME 组合串的视觉规格）。
-**发现即记录**，落到 `kanesumi/docs/CONTROL_SPEC.md` / `ANIMATION_SPEC.md`，
-而不是留在各自的实现里。
-
-### 3 · 处置分歧时以正典为准，不以平台默认为准
-
-平台的默认观感带 Fluent 时代残留，而 Kanesumi 与它的偏离是**刻意**的。
-差异分两种，处置不同：
-
-- **正典刻意偏离平台** → 保留正典取值，**补一句偏离理由**
-- **正典未覆盖** → 采用平台实测值
-
-> 第一类差异若没有记录，半年后会被当成笔误改掉。
-
-### 4 · 注释写 why，不写 what
+### 1 · 注释写 why，不写 what
 
 关键决策的注释要记录**促成它的那个 bug 或那次实测**，而不是复述代码。
 中英混合可接受；标识符、类型、API 一律英文。
 
-### 5 · 不假装做了
+### 2 · 不假装做了
 
 未实现的部分（缺的渲染命令、空的裁剪、占位的排版器、跑不起来的部署）
 **必须显式记录**。缺失的诚实记录好过假装完整。
+
+### 3 · 两条路线的取舍要如实写出来
+
+写文档时不要把 `kanesumi/` 说成「更正统」或把 `uwp/` 说成「临时方案」。
+它们各有明确的适用面：**跨平台一致性** vs **平台现成基础设施**。
+
 
 ---
 
@@ -153,55 +142,73 @@ Cargo 的 git 依赖天然**按 crate 选择**且支持 `subdirectory`。submodu
 
 ## `uwp/` —— C# + WinUI 2 版本
 
-### U1 · 用 WinUI 2，不用 WinUI 3
+### U1 · 用微软自家的接口与套件 —— 不往平台外观上动手
 
-WinUI 3 是 **Fluent** —— 圆角、Mica/Acrylic、阴影，与 Kanesumi Design **对立**
-（正典原话：Fluent 仅作反面教材）。Kanesumi 的技术参考是 **Metro / UWP 时代
-（Win8 – Win10 1709）**，对应的是 **WinUI 2**。
+这是一个**普通、地道的 UWP 应用**：C# + XAML，WinUI 2 控件，
+外观完全交给 Windows。
 
-若某个控件只在 WinUI 3 里存在，**不要为了它引入 WinUI 3** —— 按 Kanesumi 的
-方式自己实现，并把规格记进 `CONTROL_SPEC.md`。
+**`App.xaml` 只合并 WinUI 2 的控件资源，不覆盖任何主题资源。**
+控件长什么样由系统决定 —— 用户换了主题或强调色，应用跟着变。
 
-### U2 · 圆角归零在 `App.xaml` 完成，不在控件级零散处理
+**不要做的事**（都曾短暂做过，已移除）：
 
-`ControlCornerRadius` + `OverlayCornerRadius` 在 `App.xaml` 一次性归零。
-逐控件设 `CornerRadius="0"` 是重复劳动且必然遗漏 —— 新增控件时会忘。
+| 不做 | 为什么 |
+|---|---|
+| 覆盖 `SystemControl*` 画刷 | 那是往平台外观上塞自定义配色，与「跟系统走」矛盾 |
+| 覆盖 `ControlCornerRadius` / `OverlayCornerRadius` | 圆角由系统主题决定 |
+| 重写 `ListViewItem` 模板 | 平台模板自带虚拟化、选中态、键盘导航、无障碍 —— 重写要自己维护这些 |
+| 构建脚本合成彩色图标 | 图标是设计资产，不该由脚本生成 |
 
-### U3 · 覆盖系统画刷，而不是另起一套让控件去引用
+### U2 · 用 WinUI 2，不用 WinUI 3
 
-这样系统控件默认就长成 Kanesumi 的样子，不需要给每个控件写 Style ——
-对应正典铁律 1「默认即语言」。键名从 Windows SDK 的 `themeresources.xaml` 查
-（`SystemControl*` 系列，**不是** WinUI 3 的 `ControlFillColor*`）。
+本应用是 UWP 应用，对应 **WinUI 2**。不要为了某个只有 WinUI 3 才有的控件
+而引入 Windows App SDK —— 那是另一套东西，会带来 `dotnet build`、
+无 `XamlRoot` 兼容层、不同的打包模型等一系列连锁变化。
 
-`ThemeDictionaries` 必须为**每个存在的主题**给出同一组键（深 / 浅 / 高对比），
-缺一个会在 XAML 解析期抛异常，表现为启动即崩且日志无消息。
-**高对比度刻意不覆盖** —— 那是无障碍设置，优先于视觉一致性。
-
-### U4 · WinUI 2 新增控件走 `muxc:`，系统控件走默认命名空间
+### U3 · 控件命名空间：新增控件走 `muxc:`，系统控件走默认
 
 | 类别 | 命名空间 | 例子 |
 |---|---|---|
-| UWP 系统控件 | 默认 | `Button` `TextBox` `ListView` **`AutoSuggestBox`** `Slider` |
-| WinUI 2 新增 | `muxc:` | `InfoBar` `Expander` `DropDownButton` `NumberBox` `PipsPager` `NavigationView` |
+| UWP 系统控件 | 默认 | `Button` `TextBox` `ListView` `AutoSuggestBox` `Slider` `CommandBar` |
+| WinUI 2 新增 | `muxc:` | `InfoBar` `Expander` `DropDownButton` `NumberBox` `RatingControl` `PipsPager` `NavigationView` `TeachingTip` |
 
-**分界线只能靠编译器确认**，两个方向的错法都存在。
+**分界线只能靠编译器确认**，两个方向的错法都存在（给系统控件加 `muxc:`
+会报错，给新增控件用默认命名空间也会报错）。
 
-**另一处同类陷阱**：`NavigationView` 在两个命名空间里都有，事件处理器参数
-必须完全限定用 `Microsoft.UI.Xaml.Controls`，否则报「没有与委托匹配的重载」。
+**同类陷阱**：`NavigationView` 在两个命名空间里都有，事件处理器参数必须
+完全限定用 `Microsoft.UI.Xaml.Controls`，否则报「没有与委托匹配的重载」。
+
+### U4 · 用平台现成的控制件，不自造
+
+对话页用 `CommandBar` 而不是自己摆按钮；对话框用 `ContentDialog` 而不是
+自己拼浮层；列表用 `ListView` + `DataTemplateSelector` 而不是手写分派逻辑。
+
+**理由**：这些控件自带溢出菜单、键盘提示、焦点管理、无障碍语义与触摸手势。
+自己重造要维护的正是这些东西 —— 而「用平台套件」的全部好处就在这里。
 
 ### U5 · 用 Release 配置构建
 
 Debug 的 .NET Native 依赖 `Microsoft.NET.Native.Framework.**Debug**.2.2`
 （调试运行时通常未预装）。Release 才是 UWP 的发布形态。
 
-平台清单里的两个非默认项**不要删**：`<LangVersion>10.0</LangVersion>`
-（UWP 默认 7.3）与 `<UseDotNetNativeToolchain>`（让应用自包含）。
+csproj 里两个非默认项**不要删**：`<LangVersion>10.0</LangVersion>`
+（UWP 默认 C# 7.3）与 `<UseDotNetNativeToolchain>`（让应用自包含）。
 
 ### U6 · UWP 不能直接运行 exe
 
 必须经包注册/安装后由 Activator 启动。排查启动失败时用
 `IApplicationActivationManager.ActivateApplication` 的 COM 接口拿真实 HRESULT ——
-`Start-Process shell:appsFolder\...` 只说「已请求启动」，失败时给不出原因。
+`Start-Process shell:appsFolder\...` 只说「已请求启动」，失败时给不出原因；
+事件日志的 `.NET Runtime` 条目也不含异常消息。
+
+### U7 · 本目录与 Kanesumi 无关
+
+UWP 版**不是** Kanesumi Design 的实现。它用微软的控件、微软的配色
+（系统主题 + 强调色）、微软的排版刻度。
+
+`../kanesumi/` 才是 `based on Kanesumi Design` 的那一支。
+两者的关系只是「同一个客户端的两条实现路线」，**代码与外观都不共享**。
+不要把 Kanesumi 的色值、圆角策略、控件规格搬到这里来。
 
 ---
 
@@ -232,7 +239,8 @@ cargo run -p layout-bench --release
 ```powershell
 # UWP 版本（必须 MSBuild + Release）
 $msbuild = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
-& $msbuild uwp\src\Kanesumi.SecW\Kanesumi.SecW.csproj /p:Configuration=Release /p:Platform=x64
+& $msbuild uwp\src\ArcDeck.csproj /t:Restore /p:Configuration=Release /p:Platform=x64
+& $msbuild uwp\src\ArcDeck.csproj /p:Configuration=Release /p:Platform=x64
 ```
 
 工具链注意：**Rust 默认工具链是 `gnu`**，而 `--target x86_64-pc-windows-msvc`
