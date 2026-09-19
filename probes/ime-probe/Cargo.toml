@@ -8,7 +8,18 @@ authors.workspace = true
 
 [dependencies]
 windows-sys.workspace = true
+# PNG 编码需要 DEFLATE。自写 PNG 编码器而不引图像库：本工具的职责是
+# 「抓像素并落成可检视的文件」，引入完整图像栈是过度依赖。
+flate2 = "1"
 
 [[bin]]
 name = "ime-probe"
-path = "src/main.rs"
+path = "src/bin/ime-probe.rs"
+
+[[bin]]
+name = "input-probe"
+path = "src/bin/input-probe.rs"
+
+[[bin]]
+name = "window-shot"
+path = "src/bin/window-shot.rs"
