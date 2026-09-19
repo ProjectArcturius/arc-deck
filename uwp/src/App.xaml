@@ -5,18 +5,34 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
     <!--
-      UWP 应用的标准资源装配。
+      资源装配。
 
-      **有意为之的克制**：这里只合并 WinUI 2 的控件资源，不覆盖任何外观。
-      控件长什么样由 Windows 决定 —— 主题、强调色、圆角、动效全部跟系统走，
-      用户换了系统主题或强调色，应用跟着变。
+      用 Windows 自己的东西：WinUI 2 的控件 + 系统主题 + 系统强调色 + 系统图标字体。
+      主题、配色、排版刻度、动效全部跟系统走 —— 用户换了主题，应用跟着变。
 
-      这是 UWP 应用该有的样子：用平台的接口、平台的套件。
+      覆盖只有一处：Themes/Flat.xaml（圆角归零）。合并顺序有讲究 —— 它必须排在
+      XamlControlsResources **之后**，否则盖不住后者定义的键。
+
+      ── 为什么不覆盖图标字体 ────────────────────────────────────────────
+
+      试过把 `SymbolThemeFontFamily` 覆盖成 "Segoe MDL2 Assets"（Win10 的图标字体），
+      结果是**错的**，已撤销。原因：两套图标字体的码点**语义不通用**。
+
+      实证：U+E8B7 在 Fluent 里是「标签文件夹」，在 MDL2 里**不是文件夹**。
+      所以一旦换字体，代码里每一个写死的 `Glyph="&#xE8NN;"` 都会悄悄指向另一张图。
+      要换字体就必须逐个核对全部码点 —— 代价远大于收益。
+
+      另外 `SymbolIcon Symbol="Back"` 这类写法由框架在运行时解析码点，字体只是渲染层，
+      覆盖 `SymbolThemeFontFamily` 对它们无效。也就是说：即使覆盖生效，也只能改到
+      一部分图标，剩下的一部分照旧 —— 结果是两套字形混在一起，比不覆盖更难看。
+
+      结论：图标跟随系统。这是「用平台套件」的应有之义。
     -->
     <Application.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
+                <ResourceDictionary Source="Themes/Flat.xaml" />
             </ResourceDictionary.MergedDictionaries>
         </ResourceDictionary>
     </Application.Resources>

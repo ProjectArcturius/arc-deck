@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  圆角归零。
+
+  这不是"换成另一套设计语言"—— 控件、模板、交互、主题感知全部仍是 Windows 的，
+  只把 Fluent（2017+）加进来的**圆角**这一项装饰关掉。
+
+  为什么只能在这里改：`ControlCornerRadius` 与 `OverlayCornerRadius` 是 XAML
+  框架的**内建默认值**，在 Windows SDK 的 themeresources.xaml 与 WinUI 2 的
+  资源里都查不到定义 —— 控件模板只是 `{ThemeResource}` 引用它们。所以只能在
+  应用资源层覆盖，没有别的位置可选。
+
+  ── 为什么这里不调色 ──────────────────────────────────────────────────
+
+  查过 Windows 11 SDK 的 themeresources.xaml：**配色本来就是旧的**。
+  本应用在用的 NavigationView 系列资源仍然指向 2015 年那套 legacy UWP 令牌 ——
+
+      NavigationViewItemBackgroundSelected -> SystemControlHighlightListLowRevealBackgroundBrush
+        -> SystemListLowColor = #19FFFFFF
+      NavigationViewDefaultPaneBackground  -> SystemControlChromeMediumLowAcrylicElementMediumBrush
+      NavigationViewSelectionIndicatorForeground -> SystemControlForegroundAccentBrush
+
+  这些值在 Win10 与 Win11 上逐字相同。所以"Fluent 味"不来自配色表，而来自控件
+  模板本身（圆角、间距、图标字形、材质）。改色既改不动观感，又会破坏主题跟随。
+
+  ── 真实边界 ─────────────────────────────────────────────────────────
+
+  WinUI 2 的控件模板是编译进包里的，Win10 那份模板**无法**在应用层替换。
+  能改的只有模板 `{ThemeResource}` 引用到的那些令牌 —— 也就是只能改"值"，
+  不能改"形状"。这是「用平台套件」的代价，不是可以绕过的配置问题。
+-->
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- 控件：按钮、文本框、下拉、列表行选中背板 -->
+    <CornerRadius x:Key="ControlCornerRadius">0</CornerRadius>
+
+    <!-- 浮层：对话框、飞出菜单、工具提示 -->
+    <CornerRadius x:Key="OverlayCornerRadius">0</CornerRadius>
+
+</ResourceDictionary>

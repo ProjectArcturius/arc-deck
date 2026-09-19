@@ -11,84 +11,163 @@
 
     <Page.Resources>
         <!--
-          两条消息模板：自己的靠右、对方的靠左。
-          用 DataTemplateSelector 分派是 UWP 的标准做法 —— 比在单一模板里
-          写一堆绑定转换器清楚得多。
+          内容块模板。
+
+          一条消息由若干块组成（段落 / 代码 / 工具调用），用 DataTemplateSelector
+          分派 —— 比在单一模板里堆可见性判断清楚，也让每块的排版独立可调。
         -->
-        <DataTemplate x:Key="MineTemplate" x:DataType="local:ChatMessage">
-            <Grid HorizontalAlignment="Right" MaxWidth="520" Margin="48,4,24,4">
-                <Border
-                    Background="{ThemeResource SystemControlBackgroundAccentBrush}"
-                    CornerRadius="8"
-                    Padding="14,10">
-                    <StackPanel Spacing="6">
-                        <TextBlock
-                            Text="{x:Bind Author}"
-                            Style="{StaticResource CaptionTextBlockStyle}"
-                            Foreground="{ThemeResource SystemControlForegroundChromeWhiteBrush}"
-                            Opacity="0.85" />
+
+        <!-- 段落 -->
+        <DataTemplate x:Key="ParaTemplate" x:DataType="local:ChatBlock">
+            <TextBlock
+                Text="{x:Bind Text}"
+                TextWrapping="Wrap"
+                IsTextSelectionEnabled="True"
+                Margin="0,0,0,8" />
+        </DataTemplate>
+
+        <!--
+          代码块：等宽 + 语言标签。
+
+          ── 两处踩过的坑 ──────────────────────────────────────────────
+
+          1) 底色踩过两次坑，都是"半透明"引起的：
+
+             先用 SystemControlBackgroundBaseMediumLowBrush —— 那是 40% 白，
+             垫在深色页面上变成浅灰，浅色文字压上去几乎读不出来。
+
+             再换 SystemControlBackgroundBaseLowBrush —— 20% 白，好一些但仍然
+             是"页面深色 + 白"的中灰，对比度依旧不够。
+
+             正解是用**不透明**的深灰 SystemChromeMediumLowColor（#FF2B2B2B），
+             它自己带 Alpha，不依赖底下是什么。代码块本该是"凹进去的表面"，
+             这个语义也对。
+
+          2) 边框设 Stretch 会让短代码也撑满整行，看起来像一条横幅。代码块
+             应该贴合内容，所以用 Left。
+        -->
+        <DataTemplate x:Key="CodeTemplate" x:DataType="local:ChatBlock">
+            <Border
+                HorizontalAlignment="Left"
+                Background="{ThemeResource SystemControlBackgroundChromeMediumLowBrush}"
+                BorderBrush="{ThemeResource SystemControlForegroundBaseLowBrush}"
+                BorderThickness="1"
+                CornerRadius="0"
+                Margin="0,0,0,8">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <TextBlock
+                        Grid.Row="0"
+                        Visibility="{x:Bind HasLanguage}"
+                        Text="{x:Bind Language}"
+                        Style="{StaticResource CaptionTextBlockStyle}"
+                        Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                        Margin="12,8,12,0" />
+
+                    <!-- 代码不折行，折了就没法读；超出部分横向滚动 -->
+                    <ScrollViewer
+                        Grid.Row="1"
+                        MaxWidth="640"
+                        HorizontalScrollBarVisibility="Auto"
+                        VerticalScrollBarVisibility="Disabled"
+                        Padding="12,8,12,10">
                         <TextBlock
                             Text="{x:Bind Text}"
-                            Style="{StaticResource BodyTextBlockStyle}"
-                            Foreground="{ThemeResource SystemControlForegroundChromeWhiteBrush}"
-                            TextWrapping="Wrap"
+                            FontFamily="Consolas"
+                            Style="{StaticResource CaptionTextBlockStyle}"
+                            TextWrapping="NoWrap"
                             IsTextSelectionEnabled="True" />
+                    </ScrollViewer>
+                </Grid>
+            </Border>
+        </DataTemplate>
+
+        <!-- 工具调用：可展开看输出 -->
+        <DataTemplate x:Key="ToolTemplate" x:DataType="local:ChatBlock">
+            <muxc:Expander
+                HorizontalAlignment="Stretch"
+                HorizontalContentAlignment="Stretch"
+                Margin="0,0,0,8">
+                <muxc:Expander.Header>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <!-- 同 WorkspacesPage：用枚举名而非码点 -->
+                        <SymbolIcon Symbol="Setting"
+                                    Foreground="{ThemeResource SystemControlForegroundAccentBrush}" />
+                        <TextBlock Text="{x:Bind ToolHeader}"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                    </StackPanel>
+                </muxc:Expander.Header>
+
+                <ScrollViewer
+                    HorizontalScrollBarVisibility="Auto"
+                    VerticalScrollBarVisibility="Disabled"
+                    Padding="0,4,0,8">
+                    <TextBlock
+                        Text="{x:Bind Text}"
+                        FontFamily="Consolas"
+                        Style="{StaticResource CaptionTextBlockStyle}"
+                        TextWrapping="NoWrap"
+                        IsTextSelectionEnabled="True" />
+                </ScrollViewer>
+            </muxc:Expander>
+        </DataTemplate>
+
+        <local:BlockTemplateSelector
+            x:Key="BlockSelector"
+            Para="{StaticResource ParaTemplate}"
+            Code="{StaticResource CodeTemplate}"
+            Tool="{StaticResource ToolTemplate}" />
+
+        <!--
+          消息模板。
+
+          自己的：靠右 + 强调色底 —— 唯一用底色的消息，一眼分得清。
+          对方的：靠左 + **无底色**。早先给助手消息也铺了一层灰底，结果是
+          灰色气泡里再套灰色的代码块与工具卡，嵌套两层同色，看起来像排版事故。
+          助手消息本来就是页面主体，不需要底色来强调。
+        -->
+        <DataTemplate x:Key="MineTemplate" x:DataType="local:ChatMessage">
+            <Grid HorizontalAlignment="Right" MaxWidth="560" Margin="56,6,20,6">
+                <Border
+                    Background="{ThemeResource SystemControlBackgroundAccentBrush}"
+                    CornerRadius="0"
+                    Padding="14,10,10,10">
+                    <StackPanel>
+                        <ItemsControl
+                            ItemsSource="{x:Bind Blocks}"
+                            ItemTemplateSelector="{StaticResource BlockSelector}" />
+                        <!--
+                          元信息在强调色底上。用 ChromeDisabledLow（实测为明确的
+                          浅灰 #FF858585 / #FF7A7A7A），不用 ChromeWhite + Opacity ——
+                          后者在实机上是暗灰，压在蓝色气泡上读不出来。
+                        -->
+                        <TextBlock
+                            Text="{x:Bind Meta}"
+                            Style="{StaticResource CaptionTextBlockStyle}"
+                            Foreground="{ThemeResource SystemControlForegroundChromeDisabledLowBrush}"
+                            HorizontalAlignment="Right"
+                            Margin="0,4,0,0" />
                     </StackPanel>
                 </Border>
             </Grid>
         </DataTemplate>
 
         <DataTemplate x:Key="TheirsTemplate" x:DataType="local:ChatMessage">
-            <Grid HorizontalAlignment="Left" MaxWidth="640" Margin="24,4,48,4">
-                <StackPanel Spacing="6">
+            <Grid HorizontalAlignment="Left" MaxWidth="760" Margin="20,8,56,8">
+                <StackPanel>
+                    <!-- 助手的元信息在上方，像一条注解，而不是塞进气泡里 -->
                     <TextBlock
-                        Text="{x:Bind Author}"
+                        Text="{x:Bind Meta}"
                         Style="{StaticResource CaptionTextBlockStyle}"
-                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-
-                    <Border
-                        Background="{ThemeResource SystemControlBackgroundBaseLowBrush}"
-                        CornerRadius="8"
-                        Padding="14,10">
-                        <TextBlock
-                            Text="{x:Bind Text}"
-                            Style="{StaticResource BodyTextBlockStyle}"
-                            TextWrapping="Wrap"
-                            IsTextSelectionEnabled="True" />
-                    </Border>
-
-                    <!-- 工具调用卡片：非空才显示。
-                         用默认的 OneTime 绑定 —— HasTool 在模板加载后不会变，
-                         声明 OneWay 会触发 WMC1506（没有变更通知可依赖）。 -->
-                    <Border
-                        Visibility="{x:Bind HasTool}"
-                        Background="{ThemeResource SystemControlBackgroundAltMediumLowBrush}"
-                        BorderBrush="{ThemeResource SystemControlForegroundBaseLowBrush}"
-                        BorderThickness="1"
-                        CornerRadius="8"
-                        Padding="14,12">
-                        <StackPanel Spacing="8">
-                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                <FontIcon Glyph="&#xE756;" FontSize="14"
-                                          Foreground="{ThemeResource SystemControlForegroundAccentBrush}" />
-                                <TextBlock Text="{x:Bind ToolName}"
-                                           Style="{StaticResource BodyStrongTextBlockStyle}" />
-                            </StackPanel>
-                            <TextBlock Text="{x:Bind ToolDetail}"
-                                       Style="{StaticResource CaptionTextBlockStyle}"
-                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                       TextWrapping="Wrap" />
-                            <Border Background="{ThemeResource SystemControlBackgroundChromeMediumLowBrush}"
-                                    CornerRadius="6"
-                                    Padding="12,10">
-                                <TextBlock Text="{x:Bind ToolOutput}"
-                                           FontFamily="Consolas"
-                                           Style="{StaticResource CaptionTextBlockStyle}"
-                                           TextWrapping="Wrap"
-                                           IsTextSelectionEnabled="True" />
-                            </Border>
-                        </StackPanel>
-                    </Border>
+                        Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                        Margin="0,0,0,6" />
+                    <ItemsControl
+                        ItemsSource="{x:Bind Blocks}"
+                        ItemTemplateSelector="{StaticResource BlockSelector}" />
                 </StackPanel>
             </Grid>
         </DataTemplate>
@@ -106,15 +185,17 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <!--
-          顶部用 CommandBar —— UWP 的标准命令栏。返回键是它的成员，
-          而不是自己摆一个按钮。CommandBar 自带溢出菜单、键盘提示与无障碍。
-        -->
-        <CommandBar Grid.Row="0" DefaultLabelPosition="Right" IsOpen="False">
+        <!-- 顶部命令栏。
+             DefaultLabelPosition="Collapsed" 是必须的：默认 Right 会让四个按钮
+             各占「图标+文字」，窄窗口下装不下，平台就把后两个折叠成「文字﹀」和
+             「⋯」—— 一行带省略号的文字，比没有标签还难认。收起标签后按钮变成
+             纯图标，tooltip 与无障碍名称仍由 Label 提供。 -->
+        <CommandBar Grid.Row="0" DefaultLabelPosition="Collapsed" IsOpen="False">
             <AppBarButton Icon="Back" Label="返回" Click="OnBackClick" />
             <AppBarButton x:Name="FavoriteButton" Icon="Favorite" Label="收藏" Click="OnFavoriteClick" />
             <AppBarSeparator />
             <AppBarButton Icon="Copy" Label="复制路径" Click="OnCopyPathClick" />
+            <AppBarButton Icon="Refresh" Label="重载" Click="OnReloadClick" />
             <CommandBar.Content>
                 <StackPanel Margin="0,8,0,10" Spacing="2">
                     <TextBlock
@@ -142,8 +223,8 @@
             <ListView.ItemContainerStyle>
                 <Style TargetType="ListViewItem">
                     <!--
-                      对话气泡不该有行的 hover/选中反馈 —— 它不是可选中的列表项。
-                      只关掉这两项，其余（虚拟化、无障碍容器）保留。
+                      对话气泡不是可选中项 —— 关掉行的 hover/选中反馈与最小高度。
+                      其余（虚拟化、无障碍容器）保留。
                     -->
                     <Setter Property="HorizontalContentAlignment" Value="Stretch" />
                     <Setter Property="Padding" Value="0" />
@@ -152,12 +233,7 @@
             </ListView.ItemContainerStyle>
         </ListView>
 
-        <!--
-          输入区。
-
-          用 TextBox + 发送按钮，键盘 Enter 提交。这里是验证中文输入法通路的地方 ——
-          UWP 的 TextBox 自带完整 IME 支持（组合、候选窗、提交），无需任何处理。
-        -->
+        <!-- 输入区。UWP 的 TextBox 自带完整 IME 支持，中文输入无需任何处理。 -->
         <Grid Grid.Row="2" Padding="16,12" ColumnSpacing="10"
               Background="{ThemeResource SystemControlBackgroundChromeMediumLowBrush}">
             <Grid.ColumnDefinitions>

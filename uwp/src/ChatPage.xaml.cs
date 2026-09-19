@@ -65,6 +65,15 @@ namespace ArcDeck
             Clipboard.SetContent(package);
         }
 
+        private void OnReloadClick(object sender, RoutedEventArgs e)
+        {
+            // 目前只是回到列表再进来 —— 重载真实会话要等协议客户端接上。
+            if (Frame.CanGoBack)
+            {
+                Frame.GoBack();
+            }
+        }
+
         private void OnComposerKeyDown(object sender, KeyRoutedEventArgs e)
         {
             if (e.Key == VirtualKey.Enter)
@@ -84,7 +93,8 @@ namespace ArcDeck
                 return;
             }
 
-            _session.Messages.Add(new ChatMessage { Author = "你", Text = text, IsMine = true });
+            _session.Messages.Add(ChatMessage.Mine(text)
+                .At(DateTime.Now.ToString("HH:mm")));
             Composer.Text = string.Empty;
 
             // 滚到底 —— 新消息在列表末尾。

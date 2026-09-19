@@ -39,9 +39,14 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
 
-                        <FontIcon Grid.Column="0" Glyph="&#xE8B7;" FontSize="20"
-                                  Foreground="{ThemeResource SystemControlForegroundAccentBrush}"
-                                  VerticalAlignment="Center" />
+                        <!--
+                          用 SymbolIcon + 枚举名，不用 FontIcon + 码点。
+                          码点在不同图标字体里语义不同（U+E8B7 在 Fluent 里是文件夹，
+                          在 MDL2 里不是），枚举名由框架解析，换字体也不会指错图。
+                        -->
+                        <SymbolIcon Grid.Column="0" Symbol="Folder"
+                                    Foreground="{ThemeResource SystemControlForegroundAccentBrush}"
+                                    VerticalAlignment="Center" />
 
                         <StackPanel Grid.Column="1" Spacing="2">
                             <TextBlock Text="{Binding Path}" Style="{StaticResource BodyStrongTextBlockStyle}" />
