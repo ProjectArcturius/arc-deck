@@ -178,7 +178,38 @@
             Theirs="{StaticResource TheirsTemplate}" />
     </Page.Resources>
 
-    <Grid>
+    <!--
+      ── 已知未解决的布局问题：输入区落在窗口底部之外 ────────────────
+
+      实测（`uwp/tools/shot/Geometry.ps1`，同一次进程内读窗口矩形与 UIA 矩形）：
+
+          实际窗口   rect=-7,-7  size=1550x830   dpi=120
+          UIA 窗口   -9,-9  1938x1038
+          消息列表   401,165  1519x784
+          输入框     421,964  1403x41      ← 964+41 = 1005 > 830
+
+      即应用的布局高度比窗口**真实可见高度**多出约 200px，底部那 75px 的输入区
+      被裁掉：**输入框和「发送」在屏幕上看不见、点不到**。
+
+      为什么自动化发现不了：输入框确实存在、能拿键盘焦点（实测
+      `HasKeyboardFocus=True`），UIA 也报 `visible`。只看自动化会判成正常，
+      必须量像素或看截图才能发现。
+
+      **试过四种办法，都无效**（都实测过坐标，没有改善）：
+
+        1. 根 `Grid` 加 `VerticalAlignment="Stretch"`
+        2. 根 `Grid` 加 `ScrollViewer.VerticalScrollBarVisibility="Disabled"`
+        3. 在 `NavigationView` 上关掉那层滚动
+        4. 用 `VisualTree.ps1` 排查祖先，内容区里并没有第二层 `ScrollViewer`
+
+      所以根因还没定位到。`Rows` 是 Auto/Auto/*/Auto，`*` 行拿到 784 ——
+      总高 1025，超出可用高度约 50 逻辑像素。这是**待解的缺陷，不是已完成的功能**，
+      记在 AGENTS.md U13。
+    -->
+    <Grid
+        VerticalAlignment="Stretch"
+        ScrollViewer.VerticalScrollBarVisibility="Disabled"
+        ScrollViewer.HorizontalScrollBarVisibility="Disabled">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />

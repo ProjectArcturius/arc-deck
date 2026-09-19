@@ -334,6 +334,38 @@ WPF 用 `Style` 的 `EventSetter` 解决，**UWP 不支持 `EventSetter`**。
 
 **写法**：`AutomationProperties.Name="返回会话列表"` 显式设上。图标按钮一律要加。
 
+### U13 · 未解决：对话页输入区落在窗口底部之外
+
+**这是当前唯一已知未修的缺陷**，写清楚现状供接手的人少走弯路。
+
+实测（`uwp/tools/shot/Geometry.ps1`，同一次进程内读窗口矩形与 UIA 矩形）：
+
+```
+实际窗口   rect=-7,-7  size=1550x830   dpi=120
+UIA 窗口   -9,-9  1938x1038
+消息列表   401,165  1519x784
+输入框     421,964  1403x41      ← 964+41 = 1005 > 830
+```
+
+应用的布局高度比窗口**真实可见高度**多出约 200px，底部 75px 的输入区被裁掉 ——
+**输入框与「发送」在屏幕上看不见也点不到**。`Rows` 是 Auto/Auto/*/Auto，
+`*` 行拿到 784，总高 1025，超出可用高度约 50 逻辑像素。
+
+**为什么自动化与文档都没早点发现**：输入框存在、能拿键盘焦点（实测
+`HasKeyboardFocus=True`），UIA 也报 `visible`。**只看 UIA 会判成正常**，
+必须量像素或看截图。这一条本身就是 U9 那条经验的第二次验证。
+
+**试过四种办法，都没有改善**（每种都实测过坐标）：
+
+1. 根 `Grid` 加 `VerticalAlignment="Stretch"`
+2. 根 `Grid` 加 `ScrollViewer.VerticalScrollBarVisibility="Disabled"`
+3. 在 `NavigationView` 上关掉它自带的那层滚动
+4. 用 `VisualTree.ps1` 查祖先链 —— 内容区里**没有**第二层 `ScrollViewer`，
+   所以「被无限高度测量」这个最初假设不成立
+
+**根因尚未定位。** 下一步值得试的方向：把消息列表从 `*` 行改成固定高度看总高是否
+随之收敛；或在 `SizeChanged` 里打印 `ActualHeight` 链，找出从哪一层开始偏大。
+
 ---
 
 ## 当前状态
@@ -349,7 +381,7 @@ WPF 用 `Style` 的 `EventSetter` 解决，**UWP 不支持 `EventSetter`**。
 | `kanesumi/` GDI 参考渲染器 | ⚠️ 缺 `Arc`/`Triangle`/`Image`，裁剪为空 |
 | `kanesumi/` 文本排版 | ⚠️ `HeuristicTextEngine` 是占位，不得用于最终排版决策 |
 | `kanesumi/` 无障碍 | ❌ 完全没有（`Scene` 是纯绘制命令，没有无障碍树） |
-| `uwp/` 编译与打包 | ✅ 从零 Rebuild 无错误无警告，产出 MSIX（0.1.5.0） |
+| `uwp/` 编译与打包 | ✅ 从零 Rebuild 无错误无警告，产出 MSIX（0.1.8.0） |
 | `uwp/` 启动运行 | ✅ **已实测**（签名 → 覆盖安装 → 启动，无 crash.log） |
 | `uwp/` 对话页块渲染（段落/代码/工具卡） | ✅ **已实测**，逐块截图核对 |
 | `uwp/` 会话列表 + 新建会话 | ✅ **已实测**（点「新会话」正确进入新会话，标题/轮数正确） |
