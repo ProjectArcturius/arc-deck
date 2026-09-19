@@ -277,23 +277,27 @@ UWP 版**不是** Kanesumi Design 的实现。它用微软的控件、微软的�
 以后要 `DefaultLabelPosition` 之类的 `CommandBar` 专属行为时再回到它，
 但**先按上面的方式量一遍坐标**。
 
-### U10 · 主题的已知局限：`NavigationView` 窗格背景不跟随
+### U10 · 主题切换的应用时机与作用对象
 
-`RequestedTheme` 的应用时机与作用对象，两处都踩过：
+这里踩过两次，都是顺序或作用对象不对：
 
-- 应用到 `Window.Content`（那个 `Frame`）无效 —— `NavigationView` 是它的
+- 应用到 `Window.Content`（那个 `Frame`）**无效** —— `NavigationView` 是它的
   **父级**，而 `RequestedTheme` 在视觉树上只向下传播
 - 必须在 `InitializeComponent()` **之前**设，新页面才能带正确主题创建
 
-**实测结果**：内容区正确切换，并且**跨重启持久化**（浅色 `#808080` 保持）。
-但 `NavigationView` 的**窗格背景不跟随**（仍是 `#000000`）—— 它是平台在加载期
-解析的 `AcrylicBrush`（`NavigationViewDefaultPaneBackground`，SDK 的
-themeresources.xaml 用 `StaticResource` 指向），事后改 `RequestedTheme` 不会让
-它重新解析。
+**当前做法**：`ShellPage` 构造函数里、`InitializeComponent()` 之前调
+`Settings.ApplyTheme(this)`；设置页改主题后调 `ShellPage.ReloadTheme()`。
 
-**不修，并明确记为局限而非已完成的功能。** 唯一的修法是覆盖那个平台画刷，
-而 U1 禁止往平台外观上塞自定义配色 —— 那会把「跟系统走」这条路走死。
-浅色主题下窗格仍暗，是当前可接受的取舍。
+**窗格背景**（曾经不跟随，已修）：`NavigationViewDefaultPaneBackground` 是平台
+在加载期用 `StaticResource` 解析的 AcrylicBrush，事后改 `RequestedTheme` 不会让
+它重新解析 —— 选浅色后内容区变亮、窗格仍黑。现在 `Themes/Flat.xaml` 里显式把它
+指向跟随主题的纯色令牌。
+
+这是**有意识地破了 U1**「不往平台外观上塞自定义配色」：那条规则的目的是保住
+「跟系统走」，而一个不跟随主题的窗格恰恰破坏了这一点。用系统自己的令牌覆盖，
+仍然跟系统走。
+
+**实测**：内容区与导航窗格均正确切换，且**跨重启持久化**。
 
 ### U11 · 拿「右键点的是哪一行」不能用 `RightTapped`
 
@@ -366,6 +370,60 @@ UIA 窗口   -9,-9  1938x1038
 **根因尚未定位。** 下一步值得试的方向：把消息列表从 `*` 行改成固定高度看总高是否
 随之收敛；或在 `SizeChanged` 里打印 `ActualHeight` 链，找出从哪一层开始偏大。
 
+### U14 · 资源键写错不会报错，只会静默回退
+
+`{ThemeResource KEY}` / `{StaticResource KEY}` 指向**未定义**的键时，UWP **不报错** ——
+目标属性保持继承值或默认值。所以一个不存在的画刷名表现为「颜色碰巧对」或
+「文字看不见」，构建输出里一条提示都没有。
+
+**真实案例**：项目里有三个键在任何地方都不存在：
+
+```
+BodyStrongTextBlockStyle     16 处
+TextFillColorSecondaryBrush  20 处
+TextFillColorTertiaryBrush   20 处
+```
+
+查证三处定义来源，全部 0 命中：SDK 的 `themeresources.xaml`、SDK 的
+`generic.xaml`、WinUI 2 的 `Themes/Generic.xaml`。它们是 **WinUI 3** 的东西，
+被误用到 UWP + WinUI 2 项目里。这 56 处引用没有一处被编译器或运行时提示过。
+
+**工具**：`uwp/tools/shot/ResourceAudit.ps1` —— 把项目用到的每个资源键与平台 +
+WinUI 2 的真实定义比对，同时校验 `SymbolIcon Symbol` 是否为真实枚举成员。
+**新增任何资源引用或 SymbolIcon 之后跑一次。**
+
+它有两类已知误报，都已在脚本里处理：项目自己 `Page.Resources` 里定义的键
+（算作已定义），以及 `SystemColor*` 系列 —— 那些由 XAML 框架**运行时注入**，
+SDK 里 152 处引用、0 处定义。
+
+### U15 · 文字色不能用半透明色，背景不确定
+
+**不要**用平台的半透明文字色（`SystemBaseMediumColor` = 深色 `#99FFFFFF` /
+浅色 `#99000000`，以及 `SystemChromeDisabledLowColor` 这类按「背景 = 纯白或
+纯黑」标定的值）。半透明色的最终观感取决于它压在什么上面。
+
+**实测**：本应用的内容背景是 `#808080` 的中灰 —— 亚克力/材质与窗口内容混合的
+结果，与 `ApplicationPageBackgroundThemeBrush` 的纯黑/纯白都不一致。
+
+```
+半透明方案一  #99FFFFFF 压在 #808080 上 → #959595   对比度 1.00  完全看不见
+半透明方案二  #7A7A7A   压在 #808080 上 → 1.09      仍不可读
+```
+
+第一次修复就是踩了这个坑：给缺的键填了平台的半透明色，结果「字看不见」照旧。
+
+**做法**：既然背景不确定，就不再假定背景 —— 直接给**不透明**、且按对比度算过的
+色值（见 `Themes/Flat.xaml` 的 `TextFillColor*`）。
+
+**工具**：`uwp/tools/shot/Contrast.ps1`（按 WCAG 相对亮度算比率），区域列表在
+`contrast-regions.txt`。AA 正文需 ≥4.5，大字 ≥3.0。
+
+两条使用注意：区域要**贴着实际文字**裁 —— 裁到背景上会量出误导性的 1.00；
+区域列表放文件里而不是命令行参数，因为 `pwsh -Command` 会把分号分隔的参数
+重新解析，报出与真实原因无关的 "cannot convert to Int32"。
+
+**改任何文字色后都要跑它。「看着还行」与「对比度 1.09」在截图缩略图上没有区别。**
+
 ---
 
 ## 当前状态
@@ -381,9 +439,12 @@ UIA 窗口   -9,-9  1938x1038
 | `kanesumi/` GDI 参考渲染器 | ⚠️ 缺 `Arc`/`Triangle`/`Image`，裁剪为空 |
 | `kanesumi/` 文本排版 | ⚠️ `HeuristicTextEngine` 是占位，不得用于最终排版决策 |
 | `kanesumi/` 无障碍 | ❌ 完全没有（`Scene` 是纯绘制命令，没有无障碍树） |
-| `uwp/` 编译与打包 | ✅ 从零 Rebuild 无错误无警告，产出 MSIX（0.1.8.0） |
+| `uwp/` 编译与打包 | ✅ 从零 Rebuild 无错误无警告，产出 MSIX（0.1.13.0） |
 | `uwp/` 启动运行 | ✅ **已实测**（签名 → 覆盖安装 → 启动，无 crash.log） |
 | `uwp/` 对话页块渲染（段落/代码/工具卡） | ✅ **已实测**，逐块截图核对 |
+| `uwp/` 对话页 **Markdown 渲染** | ✅ **已实测**（标题 / 列表 / 斜体 / 行内代码 / 引用 / 链接 逐项核对） |
+| `uwp/` **浅色与深色下的文字可读性** | ✅ **已实测**：对比度 4.4–5.3（改前多处 1.00，完全不可见） |
+| `uwp/` 资源键有效性 | ✅ **已实测**：`ResourceAudit.ps1` 全绿（改前 3 个键从未定义、56 处静默回退） |
 | `uwp/` 会话列表 + 新建会话 | ✅ **已实测**（点「新会话」正确进入新会话，标题/轮数正确） |
 | `uwp/` 会话**右键命中目标行** | ✅ **已实测**（先点第 1 行再右键第 3 行，置顶作用于第 3 行） |
 | `uwp/` 重命名 | ✅ **已实测**（改标题 → 保存 → 列表标题随之变更） |
@@ -391,8 +452,8 @@ UIA 窗口   -9,-9  1938x1038
 | `uwp/` 置顶 | ✅ **已实测**（置顶后升到第一并显示图钉图标） |
 | `uwp/` 搜索筛选 | ✅ **已实测**（输入即筛选，`匹配 0 / 4 个会话`，空状态文案正确） |
 | `uwp/` 工具页（工具清单 + 详情） | ✅ **已实测**（10 个工具、4 个「需确认」、详情三行 + 说明齐备） |
-| `uwp/` 设置持久化（主题） | ✅ **已实测**：内容区切换 + 跨重启保持（浅色 `#808080`） |
-| `uwp/` 主题对导航窗格 | ⚠️ **已知局限**：窗格背景不跟随（U10） |
+| `uwp/` 设置持久化（主题） | ✅ **已实测**：内容区切换 + 跨重启保持 |
+| `uwp/` 主题对导航窗格 | ✅ 已修（`Flat.xaml` 覆盖 `NavigationViewDefaultPaneBackground`；见 U10） |
 | `uwp/` 对话页**输入区可见性** | ❌ **已知缺陷（未修）**：输入框与「发送」落在窗口底部之外，点不到（U13） |
 | `uwp/` 多选批量操作 | ✅ **已实测**（`CanSelectMultiple=True`；选中两行后批量置顶，两行都升到顶部且带图钉；多选时「重命名」正确置灰） |
 | `uwp/` 外观 | ⚠️ 只做到圆角归零。图标字形与控件模板形状改不动，见 U3 |
