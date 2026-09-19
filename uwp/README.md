@@ -89,44 +89,95 @@ csproj 里两个非默认项**不要删**：
 | `<LangVersion>10.0</LangVersion>` | UWP 默认 C# 7.3，`is not` 与 switch 表达式会报 CS8370 |
 | `<UseDotNetNativeToolchain>true</UseDotNetNativeToolchain>` | 让应用自包含，摆脱对 .NET CoreRuntime 框架包的依赖 |
 
-## 已知问题：本机无法启动
+## 部署：签名 → 安装 → 启动
 
-**代码完整、能编译、产出可安装的 MSIX。但在此开发机上启动失败（`0x8027025B`）。**
-
-做了对照实验，不是推测：
-
-| 实验 | 结果 |
-|---|---|
-| 本应用 | 激活 `0x8027025B` |
-| **纯空白 UWP 应用**（不含本项目任何代码） | **同样 `0x8027025B`** |
-| **系统自带计算器**（同一探针、同一方式） | **启动成功** |
-| 装齐 `Microsoft.NET.CoreRuntime.2.2` 等框架包 | 无改善 |
-| 关闭 .NET Native 工具链 | 无改善 |
-| 签名后 `Add-AppxPackage` 装 MSIX | 被证书信任链挡住 |
-
-**根因：旁加载应用的信任链。** 自签名证书未被信任，而写受信任根存储需要
-**管理员权限**。空白应用与完整应用表现完全一致，说明触发点是部署前置条件，
-不是实现。
-
-### 在有管理员权限的机器上
+已实测跑通。**一条命令搞定，并给出明确结论**：
 
 ```powershell
-# 1) 信任测试证书（需管理员）
-$cert = New-SelfSignedCertificate -Type Custom -Subject "CN=ProjectArcturius" `
-    -KeyUsage DigitalSignature -FriendlyName "Arc Deck Test" `
-    -CertStoreLocation "Cert:\CurrentUser\My" `
-    -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3","2.5.29.19={text}")
-Export-Certificate -Cert $cert -FilePath ArcDeckTest.cer
-Import-Certificate -FilePath ArcDeckTest.cer -CertStoreLocation Cert:\LocalMachine\Root
-
-# 2) 签名并安装
-& "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe" `
-    sign /fd SHA256 /a src\AppPackages\**\*_x64.msix
-Add-AppxPackage -Path src\AppPackages\**\*_x64.msix
-
-# 3) 启动
-Start-Process "shell:appsFolder\ProjectArcturius.ArcDeck_<publisherhash>!App"
+dotnet run --project tools/deploy-check
 ```
+
+它按顺序做四件事并逐步报告结果：
+
+```
+1 · 包是否已签名          → 检查 AppxSignature.p7x 是否存在
+2 · 签名证书是否被信任     → 检查 CurrentUser\Root / TrustedPeople
+3 · 包是否已安装          → Get-AppxPackage
+4 · 建证书 → 信任 → 签名 → 验证 → 给结论
+```
+
+结论是**三种明确状态之一**，不需要从输出里猜：
+
+| 结论 | 含义 |
+|---|---|
+| 未完成 | 包还没签 |
+| 做了一半 | 包签了，但证书没被信任 —— 安装会被 `0x800B0109` 挡住 |
+| 完成 | 可以 `Add-AppxPackage` 了 |
+
+只查不签：`dotnet run --project tools/deploy-check -- --check-only`
+
+### 实测的完整链路
+
+| 步骤 | 结果 |
+|---|---|
+| 生成 `CN=ProjectArcturius` 证书 | ✓ 主体必须与清单 `Publisher` **一致** |
+| 写入 `CurrentUser\TrustedPeople` | ✓ |
+| 写入 `CurrentUser\Root` | ✓ **不需要管理员** |
+| `signtool sign /fd SHA256` | ✓ |
+| 验证 `AppxSignature.p7x` | ✓ |
+| `Add-AppxPackage` | ✓ `Status: Ok` |
+| 启动 | ✓ 运行中，约 81 MB |
+
+## 两个曾经卡住很久的坑
+
+### 1 · `TrustedPeople` 不够，必须在 `Root`
+
+只装 `TrustedPeople` 会在 `Add-AppxPackage` 报：
+
+```
+0x800B0109: 应用包或捆绑包中的签名的根证书必须是受信任的证书
+```
+
+**自签名证书是它自己的根**，所以要装进 `Root`。
+
+### 2 · PowerShell 的 `Import-Certificate` 写 `Root` 会报 "UI is not allowed"
+
+```
+Import-Certificate -CertStoreLocation Cert:\CurrentUser\Root
+→ UI is not allowed in this operation
+```
+
+**这不是权限问题。** 改用 .NET 的 `X509Store` API 直接写就成功了：
+
+```csharp
+using var s = new X509Store(StoreName.Root, StoreLocation.CurrentUser);
+s.Open(OpenFlags.ReadWrite);
+s.Add(new X509Certificate2(cert.Export(X509ContentType.Cert)));
+```
+
+我因为那条报错以为「需要管理员权限」，白绕了一圈。**区分「权限不足」和
+「cmdlet 自身的限制」值得先花一分钟。**
+
+### 3 · 证书主体必须与清单 `Publisher` 逐字一致
+
+我一开始用旧项目留下的 `CN=TakahashiRinta` 去签 `CN=ProjectArcturius` 的清单，
+签名"成功"了，但装不上。主体不匹配的签名是无效的。
+
+## 排查启动失败
+
+`Start-Process shell:appsFolder\...` 只告诉你「已请求启动」，失败时给不出原因；
+事件日志的 `.NET Runtime` 条目**也不含异常消息**（只有代号）。
+
+要拿真实 HRESULT 得直接调 COM：
+
+```csharp
+IApplicationActivationManager mgr = (IApplicationActivationManager)new ApplicationActivationManager();
+var hr = mgr.ActivateApplication(aumid, null, 0, out var pid);
+// hr = 0x8027025B → 应用未启动
+```
+
+**但先跑 `deploy-check`** —— 大部分「起不来」其实是没签名或证书不可信，
+那是部署问题不是启动问题。
 
 ## 踩过的坑
 
@@ -141,16 +192,5 @@ Start-Process "shell:appsFolder\ProjectArcturius.ArcDeck_<publisherhash>!App"
 | `IAsyncOperation` 的 `await` 找不到 `GetAwaiter` | `CS4036` | 加 `using System;` |
 | `Properties/Logo` 走 StoreLogo 校验 | `APPX1619: 必须为 50x50` | 与 `Square150x150Logo` 不是同一项 |
 | 清单缺 `PhoneIdentity` | `APPX1673` | 桌面清单里也是必需元素 |
+| `Add-AppxPackage -Register` 松散文件能注册但起不来 | 激活 `0x8027025B` | 走「签名 MSIX → 安装」才是正路 |
 
-## 排查启动失败的工具
-
-用 `IApplicationActivationManager.ActivateApplication` 的 COM 接口拿真实 HRESULT：
-
-```csharp
-var mgr = (IApplicationActivationManager)new ApplicationActivationManager();
-var hr = mgr.ActivateApplication(aumid, null, 0, out var pid);
-// hr = 0x8027025B → 应用未启动
-```
-
-`Start-Process shell:appsFolder\...` 只告诉你「已请求启动」，失败时给不出原因；
-事件日志的 `.NET Runtime` 条目**也不含异常消息**（只有代号）。下次先用它。

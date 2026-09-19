@@ -223,8 +223,8 @@ UWP 版**不是** Kanesumi Design 的实现。它用微软的控件、微软的�
 | `kanesumi/` 文本排版 | ⚠️ `HeuristicTextEngine` 是占位，不得用于最终排版决策 |
 | `kanesumi/` 无障碍 | ❌ 完全没有（`Scene` 是纯绘制命令，没有无障碍树） |
 | `uwp/` 完整应用（5 页 + NavigationView） | ✅ 编译通过，产出 MSIX |
-| `uwp/` 启动运行 | ❌ 受信任链限制，需管理员权限签名部署 |
-| 两个版本的无障碍 | ❌ **都是空白** —— 全项目最大缺口 |
+| `uwp/` 启动运行 | ✅ **已跑通**（签名 → 安装 → 启动，约 81 MB） |
+| 无障碍 | `kanesumi/` ❌ 没有（自绘路线最大缺口）· `uwp/` ✅ 平台免费提供 |
 | `arc-deck-dsh`（协议客户端） | ❌ 未建立 |
 
 ## 构建
@@ -241,7 +241,20 @@ cargo run -p layout-bench --release
 $msbuild = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
 & $msbuild uwp\src\ArcDeck.csproj /t:Restore /p:Configuration=Release /p:Platform=x64
 & $msbuild uwp\src\ArcDeck.csproj /p:Configuration=Release /p:Platform=x64
+
+# 部署：建证书 → 信任 → 签名 → 验证，一条命令给明确结论
+dotnet run --project uwp\tools\deploy-check
+Add-AppxPackage -Path uwp\src\AppPackages\**\*_x64.msix
 ```
+
+**别用 `Add-AppxPackage -Register` 装松散文件** —— 能注册成功但启动报
+`0x8027025B`。走「签名 MSIX → 安装」才是正路。
+
+签名有两处易错，都记在 `uwp/README.md`：证书主体必须与清单 `Publisher`
+**逐字一致**；证书要装进 `CurrentUser\Root`（只装 `TrustedPeople` 不够）。
+另注：PowerShell 的 `Import-Certificate` 写 `Root` 会报 "UI is not allowed"，
+但 **.NET 的 `X509Store` API 直接写就成功，不需要管理员** —— 那条报错是
+cmdlet 自身的限制而非权限问题。
 
 工具链注意：**Rust 默认工具链是 `gnu`**，而 `--target x86_64-pc-windows-msvc`
 在该工具链下不可用（`error[E0463]: can't find crate for 'std'`）。用

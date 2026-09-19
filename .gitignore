@@ -14,7 +14,11 @@ AppPackages/
 *.suo
 
 # 图标**入库**：Package.appxmanifest 引用它们，忽略会导致干净克隆后构建失败。
-# tools/make-icons 保留作重新生成用（改配色 / 加尺寸时跑）。
+# 图标是设计资产，不用构建脚本合成（已移除 tools/make-icons 的理由之一）。
+
+# 签名用的测试证书 —— 由 tools/deploy-check 现场生成，不入库。
+*.cer
+*.pfx
 
 # ── 本地运行产物 ────────────────────────────────────────
 # 探针与 demo 的临时日志
@@ -26,6 +30,7 @@ AppPackages/
 # 探针抓取的窗口截图（一次性检视用）
 /shot*.png
 /shot*.bmp
+/*-shot.png
 
 # ── 编辑器 / 系统 ───────────────────────────────────────
 .vscode/

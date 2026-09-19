@@ -10,7 +10,7 @@ DeepSeek Harness 的**原生**桌面客户端。**两个实现并列：**
 | 平台 | Windows 优先，随后 Linux | **Windows 专属** |
 | 构建 | `cargo` | **MSBuild** |
 | 外观 | 自定（`based on Kanesumi Design`） | **跟系统走** |
-| 状态 | 骨架 + IME 实测通过 | 完整应用，构建通过 |
+| 状态 | 骨架 + IME 实测通过 | **完整应用，已跑通** |
 
 **两者是同一个客户端的两条实现路线，代码不共享。**
 
