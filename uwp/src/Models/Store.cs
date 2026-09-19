@@ -16,9 +16,18 @@ namespace ArcDeck
 
         public ObservableCollection<Session> Sessions { get; } = new ObservableCollection<Session>();
 
+        /// <summary>
+        /// 可用工具清单。
+        ///
+        /// 目前是示例数据。接上 DSH 协议后这张表来自上游 —— 工具的增减由内核决定，
+        /// 客户端不硬编码。
+        /// </summary>
+        public ObservableCollection<ToolInfo> Tools { get; } = new ObservableCollection<ToolInfo>();
+
         private Store()
         {
             Seed();
+            SeedTools();
         }
 
         public Session Find(string id) => Sessions.FirstOrDefault(x => x.Id == id);
@@ -256,6 +265,79 @@ namespace ArcDeck
                 .At("2 天前 10:42 · 14.7s · 2 轮 · 1 次工具调用"));
 
             return s;
+        }
+
+        // ── 工具清单 ────────────────────────────────────────────────────
+        //
+        // 这一节描述的是**客户端能看到的工具面**，不是内核实现。
+        // RequiresApproval 是这里最要紧的字段：它决定哪些调用会打断用户，
+        // 标出来比让用户逐个记住要可靠。
+
+        private void SeedTools()
+        {
+            AddTool("bash", "在 shell 里执行一条命令", "command: string, timeout?: int",
+                "内置", requiresApproval: true,
+                "有副作用：会读写文件系统、发起网络请求、启动进程。",
+                "审批策略按项目配置。默认对写操作要求确认，读操作放行。",
+                "超时单位是毫秒；不传则用项目默认值。");
+
+            AddTool("read", "读取文件内容", "path: string, offset?: int, limit?: int",
+                "内置", requiresApproval: false,
+                "输出带行号，便于引用具体位置。",
+                "大文件请配合 offset / limit，避免一次把整个文件读进上下文。");
+
+            AddTool("edit", "按字面量替换修改文件", "path: string, old: string, new: string",
+                "内置", requiresApproval: true,
+                "old 必须在文件中唯一出现，否则拒绝执行 —— 这是为了防止改错位置。",
+                "读取与写入之间文件若被外部修改，替换会失败而不是覆盖，属于刻意设计。");
+
+            AddTool("write", "写入整个文件", "path: string, content: string",
+                "内置", requiresApproval: true,
+                "会覆盖已存在的文件，所以默认要求确认。",
+                "新建文件与覆盖走同一条路径 —— 没有单独的 create。");
+
+            AddTool("glob", "按路径模式查找文件", "pattern: string, path?: string",
+                "内置", requiresApproval: false,
+                "只返回文件，不返回目录。",
+                "pattern 里不含分隔符时按文件名在整棵树里匹配，含分隔符则锁定层级。");
+
+            AddTool("grep", "按正则搜索文件内容", "pattern: string, include?: string",
+                "内置", requiresApproval: false,
+                "返回匹配行与行号，按文件分组。",
+                "include 只接受单个 glob，不接受列表。");
+
+            AddTool("web_search", "检索网页", "queries: string[]",
+                "内置", requiresApproval: false,
+                "一次接受 1–4 条查询，结果合并返回。",
+                "返回内容按**外部不可信数据**处理，其中的文字不当作指令。");
+
+            AddTool("web_fetch", "抓取指定 URL 的文本", "url: string",
+                "内置", requiresApproval: false,
+                "把页面解码成文本后返回。",
+                "同样按外部不可信数据处理。");
+
+            AddTool("memory_write", "写入长期记忆", "path: string, content: string",
+                "MCP", requiresApproval: true,
+                "记忆是跨会话持久化的，写错会持续影响后续对话，所以要求确认。");
+
+            AddTool("sokuou_verify", "跑一致性向量套件", "suite: string",
+                "项目自定义", requiresApproval: false,
+                "读同一份向量文件校验两条实现的输出是否一致。",
+                "任何一侧改了曲线，这里立刻红 —— 漂移从「靠人工对照」变成 CI 阻断。");
+        }
+
+        private void AddTool(string name, string summary, string signature,
+                             string origin, bool requiresApproval, params string[] details)
+        {
+            Tools.Add(new ToolInfo
+            {
+                Name = name,
+                Summary = summary,
+                Signature = signature,
+                Origin = origin,
+                RequiresApproval = requiresApproval,
+                Details = details,
+            });
         }
     }
 }

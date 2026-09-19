@@ -74,6 +74,10 @@ namespace ArcDeck
                 rootFrame.Navigate(typeof(ShellPage), e.Arguments);
             }
 
+            // 应用用户上次选的主题。放在设置 Window.Content 之后 —— 必须有一棵
+            // 已挂载的元素树，RequestedTheme 才有东西可作用。
+            Settings.ApplyTheme(rootFrame);
+
             Window.Current.Activate();
         }
 
