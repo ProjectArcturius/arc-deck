@@ -8,14 +8,83 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
+    <Page.Resources>
+        <!--
+          行容器样式。
+
+          只做对齐与挂右键菜单，不碰外观 —— 平台模板里的虚拟化、选中态、
+          键盘导航、无障碍全靠它，重写就得自己维护。
+        -->
+        <Style x:Key="SessionRowStyle" TargetType="ListViewItem">
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="ContextFlyout" Value="{StaticResource RowMenu}" />
+        </Style>
+
+        <!--
+          行右键菜单。放在 Resource 里而不是 ListView 的行模板里 ——
+          后者要为每一行实例化一份 MenuFlyout，长列表下是纯浪费。
+        -->
+        <MenuFlyout x:Key="RowMenu">
+            <MenuFlyoutItem Text="打开" Click="OnOpenClick">
+                <MenuFlyoutItem.Icon>
+                    <SymbolIcon Symbol="OpenFile" />
+                </MenuFlyoutItem.Icon>
+            </MenuFlyoutItem>
+            <MenuFlyoutSeparator />
+            <MenuFlyoutItem Text="重命名…" Click="OnRenameClick">
+                <MenuFlyoutItem.Icon>
+                    <SymbolIcon Symbol="Rename" />
+                </MenuFlyoutItem.Icon>
+            </MenuFlyoutItem>
+            <MenuFlyoutItem x:Name="PinMenuItem" Text="置顶" Click="OnPinClick">
+                <MenuFlyoutItem.Icon>
+                    <SymbolIcon Symbol="Pin" />
+                </MenuFlyoutItem.Icon>
+            </MenuFlyoutItem>
+            <MenuFlyoutItem Text="复制工作区路径" Click="OnCopyPathClick">
+                <MenuFlyoutItem.Icon>
+                    <SymbolIcon Symbol="Copy" />
+                </MenuFlyoutItem.Icon>
+            </MenuFlyoutItem>
+            <MenuFlyoutSeparator />
+            <MenuFlyoutItem Text="删除" Click="OnDeleteClick">
+                <MenuFlyoutItem.Icon>
+                    <SymbolIcon Symbol="Delete" />
+                </MenuFlyoutItem.Icon>
+            </MenuFlyoutItem>
+        </MenuFlyout>
+    </Page.Resources>
+
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <!-- 页面标题区。用平台排版刻度（TitleTextBlockStyle 等），不自定义字号。 -->
-        <StackPanel Grid.Row="0" Margin="24,24,24,12" Spacing="4">
+        <!--
+          命令栏。用 CommandBar 而不是自己摆按钮：它自带溢出菜单
+          （窄窗口时自动收进「⋯」）、键盘提示与无障碍语义。
+          展开时（选中会话后）出现的那组命令走 SecondaryCommands 惯例。
+        -->
+        <CommandBar Grid.Row="0" DefaultLabelPosition="Right" IsOpen="False"
+                    OverflowButtonVisibility="Auto">
+            <AppBarButton Icon="Add" Label="新会话" Click="OnNewSessionClick" />
+            <AppBarButton Icon="Refresh" Label="刷新" Click="OnRefreshClick" />
+            <AppBarSeparator />
+            <AppBarButton Icon="SelectAll" Label="全选" Click="OnSelectAllClick" />
+            <CommandBar.SecondaryCommands>
+                <AppBarButton x:Name="RenameBarButton" Icon="Rename" Label="重命名…" Click="OnRenameClick" />
+                <AppBarButton x:Name="PinBarButton" Icon="Pin" Label="置顶" Click="OnPinClick" />
+                <AppBarButton Icon="Copy" Label="复制路径" Click="OnCopyPathClick" />
+                <AppBarSeparator />
+                <AppBarButton Icon="Delete" Label="删除" Click="OnDeleteClick" />
+            </CommandBar.SecondaryCommands>
+        </CommandBar>
+
+        <!-- 标题区。用平台排版刻度（TitleTextBlockStyle 等），不自定义字号。 -->
+        <StackPanel Grid.Row="1" Margin="24,4,24,0" Spacing="4"
+                    VerticalAlignment="Top" Canvas.ZIndex="1">
             <TextBlock Text="会话" Style="{StaticResource TitleTextBlockStyle}" />
             <TextBlock
                 x:Name="CountText"
@@ -29,14 +98,21 @@
           ListView + ItemTemplate 是 UWP 的标准做法：它自带虚拟化、选中态、
           键盘导航、无障碍语义与触摸手势。用默认样式，不重写模板 ——
           行高、留白、hover 反馈都跟系统走。
+
+          SelectionMode="Extended" 而 IsItemClickEnabled="True" 是刻意的组合：
+          单击进会话（聊天应用的惯例），Ctrl/Shift 多选用于批量操作。
         -->
-        <ListView
+        <local:SessionListView
             x:Name="SessionList"
             Grid.Row="1"
-            Margin="8,0,8,8"
-            SelectionMode="None"
+            Margin="8,72,8,8"
+            SelectionMode="Extended"
             IsItemClickEnabled="True"
-            ItemClick="OnSessionClick">
+            ItemClick="OnSessionClick"
+            SelectionChanged="OnSelectionChanged">
+            <ListView.ItemContainerStyle>
+                <StaticResource ResourceKey="SessionRowStyle" />
+            </ListView.ItemContainerStyle>
             <ListView.ItemTemplate>
                 <DataTemplate x:DataType="local:Session">
                     <Grid ColumnSpacing="14" Padding="4,10">
@@ -46,7 +122,6 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
 
-                        <!-- 头像：ListViewItemPresenter 的对齐由模板 padding 决定，不额外加装饰 -->
                         <Border
                             Grid.Column="0"
                             Width="40"
@@ -63,13 +138,20 @@
                         </Border>
 
                         <StackPanel Grid.Column="1" Spacing="2">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <!-- 置顶标记：只在置顶时占位，不做恒占位的空图标 -->
+                                <SymbolIcon
+                                    Symbol="Pin"
+                                    Visibility="{x:Bind IsPinned, Mode=OneWay}"
+                                    Foreground="{ThemeResource SystemControlForegroundAccentBrush}" />
+                                <TextBlock
+                                    Text="{x:Bind Title}"
+                                    Style="{StaticResource BodyStrongTextBlockStyle}"
+                                    TextTrimming="CharacterEllipsis"
+                                    MaxLines="1" />
+                            </StackPanel>
                             <TextBlock
-                                Text="{x:Bind Title}"
-                                Style="{StaticResource BodyStrongTextBlockStyle}"
-                                TextTrimming="CharacterEllipsis"
-                                MaxLines="1" />
-                            <TextBlock
-                                Text="{x:Bind Preview}"
+                                Text="{x:Bind Preview, Mode=OneWay}"
                                 Style="{StaticResource CaptionTextBlockStyle}"
                                 Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                 TextTrimming="CharacterEllipsis"
@@ -83,13 +165,37 @@
 
                         <TextBlock
                             Grid.Column="2"
-                            Text="{x:Bind UpdatedAt}"
+                            Text="{x:Bind UpdatedAtText}"
                             Style="{StaticResource CaptionTextBlockStyle}"
                             Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                             VerticalAlignment="Top" />
                     </Grid>
                 </DataTemplate>
             </ListView.ItemTemplate>
-        </ListView>
+        </local:SessionListView>
+
+        <!--
+          空状态。ListView 为空时铺一句说明 —— 否则删光会话后是一片纯空白，
+          看起来像加载失败。
+        -->
+        <StackPanel
+            x:Name="EmptyState"
+            Grid.Row="1"
+            Margin="24,72,24,0"
+            Spacing="8"
+            Visibility="Collapsed"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center">
+            <SymbolIcon Symbol="Comment" HorizontalAlignment="Center"
+                        Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+            <TextBlock Text="没有会话" Style="{StaticResource BodyStrongTextBlockStyle}"
+                       HorizontalAlignment="Center" />
+            <TextBlock x:Name="EmptyHintText"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                       HorizontalAlignment="Center"
+                       TextAlignment="Center"
+                       TextWrapping="Wrap" />
+        </StackPanel>
     </Grid>
 </Page>

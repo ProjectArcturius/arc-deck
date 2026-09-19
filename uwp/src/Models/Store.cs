@@ -1,3 +1,4 @@
+using System;
 using System.Collections.ObjectModel;
 using System.Linq;
 
@@ -22,6 +23,92 @@ namespace ArcDeck
 
         public Session Find(string id) => Sessions.FirstOrDefault(x => x.Id == id);
 
+        /// <summary>
+        /// 新建会话。
+        ///
+        /// 号段取「现有最大序号 + 1」而不是 GUID：会话 id 会出现在导航参数里，
+        /// 短 id 便于排查，也不会因为重启而变得不可读。
+        /// </summary>
+        public Session Create(string workspace = "Projects/arc-deck")
+        {
+            var maxSeq = 0;
+            foreach (var s in Sessions)
+            {
+                if (s.Id != null && s.Id.StartsWith("s", StringComparison.Ordinal)
+                    && int.TryParse(s.Id.Substring(1), out var n) && n > maxSeq)
+                {
+                    maxSeq = n;
+                }
+            }
+
+            var session = new Session
+            {
+                Id = "s" + (maxSeq + 1),
+                Title = "新会话",
+                Workspace = workspace,
+                Preview = "还没有消息。",
+                UpdatedAt = DateTimeOffset.Now,
+            };
+
+            Sessions.Insert(0, session);
+            return session;
+        }
+
+        public void Delete(Session session)
+        {
+            if (session != null)
+            {
+                Sessions.Remove(session);
+            }
+        }
+
+        /// <summary>重命名。空标题不接受 —— 否则列表里出现一行没有标识的条目。</summary>
+        public void Rename(Session session, string title)
+        {
+            if (session == null || string.IsNullOrWhiteSpace(title))
+            {
+                return;
+            }
+
+            session.Title = title.Trim();
+            session.UpdatedAt = DateTimeOffset.Now;
+        }
+
+        /// <summary>切换置顶。</summary>
+        public void TogglePin(Session session)
+        {
+            if (session == null)
+            {
+                return;
+            }
+
+            session.IsPinned = !session.IsPinned;
+            Resort();
+        }
+
+        /// <summary>
+        /// 按「置顶 → 最后活动」重排。
+        ///
+        /// 用 Move 而不是清空重建：ObservableCollection 的 Move 能让 ListView
+        /// 保留选中项与滚动位置，Clear + Add 会把两者都丢掉。
+        /// </summary>
+        public void Resort()
+        {
+            var ordered = Sessions
+                .OrderByDescending(s => s.IsPinned)
+                .ThenByDescending(s => s.UpdatedAt)
+                .ToList();
+
+            for (var target = 0; target < ordered.Count; target++)
+            {
+                var current = Sessions.IndexOf(ordered[target]);
+                if (current != target)
+                {
+                    Sessions.Move(current, target);
+                }
+            }
+        }
+
         private void Seed()
         {
             Sessions.Add(Session_ArcDeckIme());
@@ -29,10 +116,11 @@ namespace ArcDeck
             Sessions.Add(Session_Perf());
             Sessions.Add(Session_Sokuou());
             Sessions.Add(Session_UwpDeploy());
+            Resort();
         }
 
         private static Session Make(string id, string title, string workspace,
-                                    string updatedAt, int turns, string preview)
+                                    DateTimeOffset updatedAt, int turns, string preview)
             => new Session
             {
                 Id = id,
@@ -45,7 +133,8 @@ namespace ArcDeck
 
         private static Session Session_ArcDeckIme()
         {
-            var s = Make("s1", "Arc Deck 骨架与 IME 验证", "Projects/arc-deck", "刚刚", 24,
+            var s = Make("s1", "Arc Deck 骨架与 IME 验证", "Projects/arc-deck",
+                DateTimeOffset.Now.AddMinutes(-3), 24,
                 "微软拼音在自研 Win32 事件循环里逐键推进组合串，通路成立。");
 
             s.Messages.Add(ChatMessage.Mine("IME 探针结果如何？中文能不能打进去？")
@@ -74,7 +163,8 @@ namespace ArcDeck
 
         private static Session Session_UwpShell()
         {
-            var s = Make("s2", "UWP 客户端骨架", "Projects/arc-deck", "12 分钟前", 41,
+            var s = Make("s2", "UWP 客户端骨架", "Projects/arc-deck",
+                DateTimeOffset.Now.AddMinutes(-12), 41,
                 "NavigationView 外壳 + 五个页面，控件与外观全部走平台默认。");
 
             s.Messages.Add(ChatMessage.Mine("UWP 版该怎么做？")
@@ -99,7 +189,8 @@ namespace ArcDeck
 
         private static Session Session_Perf()
         {
-            var s = Make("s3", "流式排版性能实测", "Projects/arc-deck", "1 小时前", 8,
+            var s = Make("s3", "流式排版性能实测", "Projects/arc-deck",
+                DateTimeOffset.Now.AddHours(-1), 8,
                 "两万字符冷启动：断行 0.142ms、塑形 4.313ms、光栅化 32.192ms。");
 
             s.Messages.Add(ChatMessage.Mine("流式追加时的排版开销量过没有？")
@@ -120,7 +211,8 @@ namespace ArcDeck
 
         private static Session Session_Sokuou()
         {
-            var s = Make("s4", "Sokuou 一致性向量套件", "Projects/Sokuou", "昨天", 15,
+            var s = Make("s4", "Sokuou 一致性向量套件", "Projects/Sokuou",
+                DateTimeOffset.Now.AddDays(-1), 15,
                 "把「同名 API 约定」从纪律升级成 CI 阻断。");
 
             s.Messages.Add(ChatMessage.Mine("Sokuou 在桌面和 Kotlin 已经不同步了，有没有比 so/dll 更合理的做法？")
@@ -141,7 +233,8 @@ namespace ArcDeck
 
         private static Session Session_UwpDeploy()
         {
-            var s = Make("s5", "UWP 部署：签名与信任链", "Projects/arc-deck", "2 天前", 33,
+            var s = Make("s5", "UWP 部署：签名与信任链", "Projects/arc-deck",
+                DateTimeOffset.Now.AddDays(-2), 33,
                 "0x8027025B 查了半天，根因是自签名证书没进受信任根。");
 
             s.Messages.Add(ChatMessage.Mine("装完报 0x8027025B，查不到原因。")

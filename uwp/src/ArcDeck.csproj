@@ -75,6 +75,7 @@
     <Compile Include="SettingsPage.xaml.cs">
       <DependentUpon>SettingsPage.xaml</DependentUpon>
     </Compile>
+    <Compile Include="Controls\SessionListView.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
 
