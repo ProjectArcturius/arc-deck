@@ -2,14 +2,37 @@
 
 > **based on [Kanesumi Design](https://github.com/ProjectArcturius/Ether/blob/main/docs/KANESUMI_DESIGN.md)** —— 以直角丈量边缘。
 
-DeepSeek Harness 的**原生**桌面客户端。不自研协议，不内嵌浏览器 —— 自绘 `Scene`
-渲染命令，跑在自己的事件循环上。
+DeepSeek Harness 的**原生**桌面客户端。**两个实现并列：**
 
-- **平台**：Windows 优先，随后 Linux
-- **语言**：Rust（edition 2024）
-- **License**：MIT
+| | `kanesumi/` | `uwp/` |
+|---|---|---|
+| 语言 | **Rust**（edition 2024） | **C# + XAML** |
+| 界面 | 自绘 `Scene` 渲染命令 | **WinUI 2** 控件 |
+| 平台 | Windows 优先，随后 Linux | **Windows 专属** |
+| 构建 | `cargo` | **MSBuild** |
+| 外壳 | 自研事件循环（无 winit） | UWP AppContainer |
+| 状态 | 骨架 + IME 实测通过 | 完整应用，构建通过 |
 
-## 为什么不用 WebView
+两者**共享设计正典、控件规格、Sokuou 曲线与命名惯例，不共享一行实现代码** ——
+这是 Kanesumi 的扇区模型：各平台为扇区，共圆心。
+
+## 为什么两个都做
+
+它们不是「主选 + 备选」，而是两条各自成立的路，取舍点很明确：
+
+| | `kanesumi/`（自绘） | `uwp/`（WinUI 2） |
+|---|---|---|
+| 文本编辑 / 滚动 / 命中测试 | **要自己写** ← 真实工期风险 | **平台免费给，且成熟** |
+| 无障碍 | **完全没有** ← 最大缺口 | **平台免费给** |
+| IME | 自己实现（**已实测通过**） | 平台免费给 |
+| 跨平台 | ✅ 同一套 App 逻辑换外壳 | ❌ 只在 Windows |
+| 设计语言保真 | 类型级强制 | 覆盖系统资源，需纪律维持 |
+| 分发 | 裸 exe，随便发 | MSIX + 签名 |
+
+**结论**：要跨平台一致性走 `kanesumi/`；只要 Windows 且想省掉那三项基础设施，
+走 `uwp/`。
+
+## 共同的出发点：不用 WebView
 
 现有的 DSH 桌面外壳都是同一招：把内核自己吐的 HTML 塞进 WebView。
 
@@ -83,32 +106,50 @@ kanesumi-controls = { git = "...", rev = "<sha>", subdirectory = "kanesumi-contr
 
 ```
 arc-deck/
-├── crates/
-│   └── arc-deck-shell/          # 渲染契约 + 平台外壳（已建立）
-│       └── src/
-│           ├── scene.rs         # SceneCommand（八个变体，无渐变/阴影/圆角）
-│           ├── input.rs         # 平台无关输入事件
-│           ├── app.rs           # App trait + TextEngine 度量契约
-│           ├── ime.rs           # IME 状态机（纯逻辑，可单测）
-│           ├── platform/
-│           │   ├── mod.rs       # Win32 事件循环 / 消息泵 / 事件翻译
-│           │   └── win32.rs     # 全仓唯一允许裸 FFI 的地方
-│           └── bin/
-│               └── arc-deck-demo.rs   # 骨架 demo（含 IME 输入行）
-├── probes/
-│   └── ime-probe/               # 否决性验证：最小 IMM32 探针
-└── docs/
-    ├── ARCHITECTURE.md
-    └── DESIGN_SYSTEM.md
+├── kanesumi/                      Rust 版本（自绘 Scene）
+│   ├── crates/arc-deck-shell/
+│   │   └── src/
+│   │       ├── scene.rs           SceneCommand（八变体，无渐变/阴影/圆角）
+│   │       ├── input.rs           平台无关输入事件
+│   │       ├── app.rs             App trait + TextEngine 度量契约
+│   │       ├── ime.rs             IME 状态机（纯逻辑，可单测）
+│   │       ├── platform/
+│   │       │   ├── mod.rs         Win32 事件循环 / 消息泵 / 事件翻译
+│   │       │   └── win32.rs       全仓唯一允许裸 FFI 的地方
+│   │       └── bin/arc-deck-demo.rs
+│   └── probes/
+│       ├── ime-probe/             IMM32 探针 + 输入链路验证 + 窗口截图
+│       └── layout-bench/          流式排版性能
+├── uwp/                           C# + WinUI 2 版本
+│   ├── src/Kanesumi.SecW/         UWP 应用（5 页 + NavigationView 外壳）
+│   └── tools/make-icons/          图标生成（正典配色）
+├── docs/
+│   ├── ARCHITECTURE.md            Rust 侧架构与 winit 决策依据
+│   ├── DESIGN_SYSTEM.md           正典落地取值与已核实落差
+│   └── PERF_FINDINGS.md           流式排版实测
+└── AGENTS.md                      两个版本共同遵守的铁律
 ```
+
+### 构建 Rust 版本
 
 ```bash
-cargo test                     # 21 个测试
-cargo run --bin arc-deck-demo  # 骨架 demo（含中文输入行）
-cargo run -p ime-probe         # 最小 IMM32 探针
+cargo test                       # 21 个测试
+cargo run --bin arc-deck-demo    # 骨架 demo（含中文输入行）
+cargo run -p ime-probe           # IMM32 探针
+cargo run -p layout-bench --release
 ```
 
-## 探针
+### 构建 UWP 版本
+
+见 [`uwp/README.md`](uwp/README.md)。要点：**必须用 MSBuild**（UWP 不支持 `dotnet build`），
+用 **Release** 配置（Debug 依赖未预装的调试运行时）。
+
+```powershell
+$msbuild = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
+& $msbuild uwp\src\Kanesumi.SecW\Kanesumi.SecW.csproj /p:Configuration=Release /p:Platform=x64
+```
+
+## Rust 侧的探针
 
 ### IME 可行性（否决性）
 
@@ -123,8 +164,11 @@ cargo run -p ime-probe         # 最小 IMM32 探针
 Kanesumi 的 Linux 外壳用 `smithay-client-toolkit` + `calloop` **自研事件循环**，
 不用 winit；Windows 侧照此办理，直接写 Win32 消息泵。**IME 完全归自己管。**
 
-`arc-deck-demo` 是可以端到端验证 IME 的载体：窗口里有可输入的行，
-组合串（带下划线 + 强调色）与提交结果分别可见，状态行还会显示组合串原文。
+**实测结论：通路成立。** 微软拼音在自研事件循环里逐键推进
+`z → zh → zho → zhon → zhong`，组合串带橙色下划线正确渲染，与已提交文本视觉分明。
+
+`arc-deck-demo` 是端到端验证载体：窗口里有可输入的行，组合串与提交结果分别可见，
+状态行显示组合串原文。
 
 已用测试钉死的 IME 纪律（`ime.rs`）：
 

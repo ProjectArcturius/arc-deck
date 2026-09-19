@@ -1,21 +1,36 @@
-# Rust
+# ── Rust（kanesumi 版本）────────────────────────────────
 /target
 **/*.rs.bk
 *.pdb
 
-# 探针与 demo 的临时日志（本地运行产物，不入库）
+# ── UWP（uwp 版本，走 MSBuild）──────────────────────────
+# 两个实现的产物都叫 bin/obj，统一在根忽略即可。
+bin/
+obj/
+AppPackages/
+*.appxupload
+*.appxsym
+*.user
+*.suo
+
+# 图标**入库**：Package.appxmanifest 引用它们，忽略会导致干净克隆后构建失败。
+# tools/make-icons 保留作重新生成用（改配色 / 加尺寸时跑）。
+
+# ── 本地运行产物 ────────────────────────────────────────
+# 探针与 demo 的临时日志
 /probe-out.log
 /probe-err.log
 /demo-out.log
 /demo-err.log
 
-# 探针抓取的窗口截图（一次性检视用，不入库）
+# 探针抓取的窗口截图（一次性检视用）
 /shot*.png
 /shot*.bmp
 
-# 编辑器 / 系统
+# ── 编辑器 / 系统 ───────────────────────────────────────
 .vscode/
 .idea/
+.vs/
 *.swp
 Thumbs.db
 desktop.ini
