@@ -1,0 +1,10 @@
+# 统一行尾为 LF。
+#
+# 不设这条时，Windows 上 git 默认 autocrlf 会把检出文件转成 CRLF，
+# 于是「没人改过的文件」也会在 diff 里整篇变化 —— 历史立刻不可读。
+* text=auto eol=lf
+
+# Windows 专用资源（若将来加入 .rc / .ico）保持二进制。
+*.ico binary
+*.rc  text eol=crlf
+*.bat text eol=crlf

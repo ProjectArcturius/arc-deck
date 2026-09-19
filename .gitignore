@@ -1,0 +1,17 @@
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+
+# 探针与 demo 的临时日志（本地运行产物，不入库）
+/probe-out.log
+/probe-err.log
+/demo-out.log
+/demo-err.log
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
