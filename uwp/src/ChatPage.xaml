@@ -17,10 +17,26 @@
           分派 —— 比在单一模板里堆可见性判断清楚，也让每块的排版独立可调。
         -->
 
-        <!-- 段落 -->
+        <!--
+          段落。
+
+          用附加属性 `local:Markdown.Text` 而不是 `Text="{x:Bind Text}"`：
+          消息原文里本来就有 Markdown（`**转发给 App**` 之类），当纯文本显示时
+          界面上会直接出现一串星号。`TextBlock.Inlines` 不能直接 x:Bind，
+          所以由附加属性在回调里填充 —— 见 Controls/Markdown.cs。
+
+          ── 为什么是 RichTextBlock 而不是 TextBlock ──────────────────
+
+          `TextBlock.Inlines` 只接受 `Inline`；段落级的间距要靠 `Paragraph`，
+          而那是 `RichTextBlock` 才有的。用 TextBlock 的话每个块级元素都被迫
+          拼成一行，标题/列表/引用的间距就没法表达。实测编译报错：
+          「无法从 Paragraph 转换为 Inline」。
+
+          RichTextBlock 同样支持选中复制。
+        -->
         <DataTemplate x:Key="ParaTemplate" x:DataType="local:ChatBlock">
-            <TextBlock
-                Text="{x:Bind Text}"
+            <RichTextBlock
+                local:Markdown.Text="{x:Bind Text}"
                 TextWrapping="Wrap"
                 IsTextSelectionEnabled="True"
                 Margin="0,0,0,8" />

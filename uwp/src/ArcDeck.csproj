@@ -76,6 +76,7 @@
       <DependentUpon>SettingsPage.xaml</DependentUpon>
     </Compile>
     <Compile Include="Controls\SessionListView.cs" />
+    <Compile Include="Controls\Markdown.cs" />
     <Compile Include="Models\ToolInfo.cs" />
     <Compile Include="Models\Settings.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
