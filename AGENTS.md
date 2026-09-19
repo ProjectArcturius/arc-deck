@@ -86,13 +86,27 @@ Wayland 外壳下复用同一份实现的**唯一前提**。不要为了图方�
 组合串含中文时两者不等（「中」占 3 字节）。`byte_to_char_index` 负责换算并在
 多字节字符中间向外夹紧 —— 这正是多数框架丢字/乱码的根因。
 
-### 6 · IME 消息必须交回 `DefWindowProcW`
+### 6 · IME 消息必须交回 `DefWindowProcW`，且组合串必须转发给 App
 
 `WM_IME_STARTCOMPOSITION` / `WM_IME_COMPOSITION` / `WM_IME_ENDCOMPOSITION`
 读完自己要的内容后**必须**交给 `DefWindowProcW`。IME 在组合窗口上有自己的簿记，
 吞掉会导致组合无法推进（表现为「能唤起输入法但打不出字」）。
 
-### 7 · `SceneCommand` 只有八个变体，且刻意只有八个
+**外壳持有 `ImeState` ≠ App 看得见组合串。** 两件事必须显式打通：更新完
+`ImeState` 后要调 `handle_input(Preedit)`；组合结束时发一条**空 preedit**
+收起显示，否则界面会残留永不消失的下划线。只更新外壳内部状态（标题、候选窗
+定位都对）而忘了转发，会让 App 一无所知 —— 这是本项目实测踩过的坑。
+
+### 7 · 诊断计数必须对应被断言的代码路径
+
+`committed` 来自 `ImeState`，而 `WM_CHAR` 路径**不经过** `ImeState`（它直接调
+`handle_input`）。用 `committed` 去断言那条路径会得到**假阴性** ——
+第一版 `input-probe` 就是这么错的，把一条完好的链路判成「断」。
+
+诊断计数分三层，才能区分「消息没到」「到了没转发」「转发了但没生效」：
+`chars_received`（到达 `wnd_proc`）→ `app_events`（转发给 `App`）→ 应用自身状态。
+
+### 8 · `SceneCommand` 只有八个变体，且刻意只有八个
 
 无渐变、无阴影、无圆角：
 
@@ -104,7 +118,7 @@ Wayland 外壳下复用同一份实现的**唯一前提**。不要为了图方�
 
 描边约定**向内**（inside）—— 与「贴边」一致：不侵占相邻元素的像素。
 
-### 8 · 配色跟随桌面扇区，且分歧必须显式记录
+### 9 · 配色跟随桌面扇区，且分歧必须显式记录
 
 正典写「OLED 纯黑 `#000000`」，**Android 扇区严格遵守，Ether 桌面扇区用 `#1A1A1A`**。
 **没有文档解释这个分歧。** Arc Deck 跟随桌面扇区，并把它写进
