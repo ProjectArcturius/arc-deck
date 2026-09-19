@@ -66,9 +66,19 @@ namespace ArcDeck
                 _ => AppTheme.System,
             };
 
-            // 主题挂在 Window.Content 上而不是本页：这样连导航栏一起换，
-            // 不会出现「内容变亮、侧栏还是暗的」。
-            Settings.ApplyTheme(Window.Current.Content as FrameworkElement);
+            // 立即应用。定位到外壳而不是直接改本页 —— 本页是 Frame 的子级。
+            //
+            // 注意：这**不能**让 NavigationView 的窗格背景跟着换（那是平台在
+            // 加载期解析的 AcrylicBrush）。见 ShellPage.ReloadTheme 的说明与
+            // AGENTS.md U9。内容区会正确变色，窗格保持平台原样。
+            if ((Window.Current.Content as Frame)?.Content is ShellPage shell)
+            {
+                shell.ReloadTheme();
+            }
+            else
+            {
+                Settings.ApplyTheme(Window.Current.Content as FrameworkElement);
+            }
         }
     }
 }

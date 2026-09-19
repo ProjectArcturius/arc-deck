@@ -13,6 +13,9 @@ namespace ArcDeck
     {
         private Session _session;
 
+        /// <summary>收藏状态。存在页面里而不是会话上 —— 会话模型还没有这个字段。</summary>
+        private bool _favorited;
+
         public ChatPage()
         {
             InitializeComponent();
@@ -50,7 +53,16 @@ namespace ArcDeck
 
         private void OnFavoriteClick(object sender, RoutedEventArgs e)
         {
-            FavoriteButton.Label = FavoriteButton.Label == "收藏" ? "已收藏" : "收藏";
+            // 换成 Button 之后不能再改 Label（Button 没有这个属性）。
+            // 收藏状态用图标本身表达：实心星 = 已收藏，空心星 = 未收藏。
+            //
+            // 这两个码点是同一套图标字体里的一对：E734 空心、E735 实心。
+            // 它们在 Segoe MDL2 Assets 与 Segoe Fluent Icons 里都存在且含义相同，
+            // 所以切换是安全的 —— 换成别的字形就要重新核对，两套字体并非码点通用。
+            _favorited = !_favorited;
+
+            FavoriteIcon.Glyph = _favorited ? "\uE735" : "\uE734";
+            ToolTipService.SetToolTip(FavoriteButton, _favorited ? "取消收藏" : "收藏");
         }
 
         private void OnCopyPathClick(object sender, RoutedEventArgs e)

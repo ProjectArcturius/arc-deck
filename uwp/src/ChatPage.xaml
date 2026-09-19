@@ -181,40 +181,76 @@
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <!-- 顶部命令栏。
-             DefaultLabelPosition="Collapsed" 是必须的：默认 Right 会让四个按钮
-             各占「图标+文字」，窄窗口下装不下，平台就把后两个折叠成「文字﹀」和
-             「⋯」—— 一行带省略号的文字，比没有标签还难认。收起标签后按钮变成
-             纯图标，tooltip 与无障碍名称仍由 Label 提供。 -->
-        <CommandBar Grid.Row="0" DefaultLabelPosition="Collapsed" IsOpen="False">
-            <AppBarButton Icon="Back" Label="返回" Click="OnBackClick" />
-            <AppBarButton x:Name="FavoriteButton" Icon="Favorite" Label="收藏" Click="OnFavoriteClick" />
-            <AppBarSeparator />
-            <AppBarButton Icon="Copy" Label="复制路径" Click="OnCopyPathClick" />
-            <AppBarButton Icon="Refresh" Label="重载" Click="OnReloadClick" />
-            <CommandBar.Content>
-                <StackPanel Margin="0,8,0,10" Spacing="2">
-                    <TextBlock
-                        x:Name="TitleText"
-                        Style="{StaticResource BodyStrongTextBlockStyle}"
-                        TextTrimming="CharacterEllipsis"
-                        MaxLines="1" />
-                    <TextBlock
-                        x:Name="MetaText"
-                        Style="{StaticResource CaptionTextBlockStyle}"
-                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                </StackPanel>
-            </CommandBar.Content>
-        </CommandBar>
+        <!--
+          操作条。
+
+          ── 为什么这不是 CommandBar ──────────────────────────────────────
+
+          原来这里是 `CommandBar`，标题放在它的 `CommandBar.Content` 里。
+          实机坐标：标题在 x=715 起，而「复制路径 / 重载」在 x=1359 / 1444 ——
+          窗口当时只到 1278，也就是说**按钮落在窗口外，点不到**。
+          会话页试过同样的结构，两种配置都会把命令按钮排到窗口外
+          （x=1599..1920 / x=1689..，窗口 1550 宽），用 Region.ps1 量过那两处
+          亮像素数为 0，确认不是抓图伪影。
+
+          所以两页统一改成行为确定的写法：一排按钮 + 一个带 MenuFlyout 的溢出
+          按钮，标题另起一行。每个按钮都有 Label，键盘与无障碍语义都不缺。
+        -->
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="20,10,20,0" Spacing="8">
+            <Button Click="OnBackClick" ToolTipService.ToolTip="返回会话列表">
+                <SymbolIcon Symbol="Back" />
+            </Button>
+
+            <Button x:Name="FavoriteButton" Click="OnFavoriteClick" ToolTipService.ToolTip="收藏">
+                <!--
+                  用 FontIcon 而不是 SymbolIcon：Symbol 枚举里没有"实心星"
+                  （`Symbol.FavoriteFill` 不存在，编译报 CS0117），而收藏状态
+                  要靠图标区分。
+                  FontFamily 显式绑 SymbolThemeFontFamily，码点才会跟着系统实际
+                  使用的那套图标字体解析 —— 写死字体名会在另一套字体下指错图。
+                -->
+                <FontIcon
+                    x:Name="FavoriteIcon"
+                    FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                    Glyph="&#xE734;" />
+            </Button>
+
+            <Button Click="OnCopyPathClick" ToolTipService.ToolTip="复制工作区路径">
+                <SymbolIcon Symbol="Copy" />
+            </Button>
+
+            <Button Click="OnReloadClick" ToolTipService.ToolTip="重载会话">
+                <SymbolIcon Symbol="Refresh" />
+            </Button>
+        </StackPanel>
+
+        <!--
+          标题区。原先挤在命令栏的 Content 里，位置由命令栏模板决定；
+          独立成行后它的位置只取决于本页的排版，不会再被工具条的宽度牵连。
+        -->
+        <StackPanel Grid.Row="1" Margin="20,8,20,10" Spacing="2">
+            <TextBlock
+                x:Name="TitleText"
+                Style="{StaticResource BodyStrongTextBlockStyle}"
+                TextTrimming="CharacterEllipsis"
+                MaxLines="1" />
+            <TextBlock
+                x:Name="MetaText"
+                Style="{StaticResource CaptionTextBlockStyle}"
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                TextTrimming="CharacterEllipsis"
+                MaxLines="1" />
+        </StackPanel>
 
         <!-- 消息列表 -->
         <ListView
             x:Name="MessageList"
-            Grid.Row="1"
+            Grid.Row="2"
             SelectionMode="None"
             IsItemClickEnabled="False"
             ItemTemplateSelector="{StaticResource MessageSelector}"
@@ -234,7 +270,7 @@
         </ListView>
 
         <!-- 输入区。UWP 的 TextBox 自带完整 IME 支持，中文输入无需任何处理。 -->
-        <Grid Grid.Row="2" Padding="16,12" ColumnSpacing="10"
+        <Grid Grid.Row="3" Padding="16,12" ColumnSpacing="10"
               Background="{ThemeResource SystemControlBackgroundChromeMediumLowBrush}">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />

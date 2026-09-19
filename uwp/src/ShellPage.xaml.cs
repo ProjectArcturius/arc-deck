@@ -26,10 +26,38 @@ namespace ArcDeck
         public ShellPage()
         {
             BuildMenuItems();
-            InitializeComponent();
 
+            // 主题必须在 InitializeComponent() **之前**设好。
+            //
+            // 踩过两次坑，都是顺序或作用对象不对：
+            //
+            //  1. 起初把主题应用到 `Window.Content`（那个 Frame）—— 只有内容区
+            //     变亮，导航窗格仍是暗的。NavigationView 是 Frame 的**父级**，
+            //     而 RequestedTheme 在视觉树上只向下传播。
+            //  2. 改到 Nav 上、但在 InitializeComponent() 之后设 —— 也一样。
+            //
+            // 所以顺序是：先给一个尚未加载的元素设 RequestedTheme，再解析 XAML。
+            // 本页在构造函数里还没进视觉树，正好满足这个条件。
+            Settings.ApplyTheme(this);
+
+            InitializeComponent();
             Nav.SelectedItem = MenuItems[0];
         }
+
+        /// <summary>
+        /// 重新应用主题。设置页改完主题后调用，让内容区立即变色并落到设置里。
+        ///
+        /// **已知局限（实测，未修）**：NavigationView 的**窗格背景**不跟着变。
+        /// 它是平台在加载期解析的 AcrylicBrush（NavigationViewDefaultPaneBackground，
+        /// 由 SDK 的 themeresources.xaml 用 StaticResource 指向），事后改
+        /// RequestedTheme 不会让它重新解析。实测浅色主题下内容区 #808080、
+        /// 窗格仍是 #000000。
+        ///
+        /// 不修的理由：唯一的修法是覆盖那个平台画刷，而 U1 禁止往平台外观上塞
+        /// 自定义配色 —— 那会把「跟系统走」这条路走死，代价大于收益。
+        /// 记在 AGENTS.md U9。
+        /// </summary>
+        public void ReloadTheme() => Settings.ApplyTheme(this);
 
         private void BuildMenuItems()
         {

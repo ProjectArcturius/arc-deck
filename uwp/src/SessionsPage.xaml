@@ -36,7 +36,12 @@
                     <SymbolIcon Symbol="Rename" />
                 </MenuFlyoutItem.Icon>
             </MenuFlyoutItem>
-            <MenuFlyoutItem x:Name="PinMenuItem" Text="置顶" Click="OnPinClick">
+            <!--
+              没有 x:Name：操作条里已有一个同名的 PinMenuItem，XAML 不允许
+              两个元素共用同一个名称。两份菜单走同一个 OnPinClick，
+              文案同步只更新操作条那一份即可。
+            -->
+            <MenuFlyoutItem Text="置顶" Click="OnPinClick">
                 <MenuFlyoutItem.Icon>
                     <SymbolIcon Symbol="Pin" />
                 </MenuFlyoutItem.Icon>
@@ -55,36 +60,92 @@
         </MenuFlyout>
     </Page.Resources>
 
+    <!--
+      布局：导航栏（固定高）+ 标题区（固定高）+ 列表（占满剩余）。
+
+      先前是「标题与列表同在 Grid.Row=1，靠 ListView 的 Margin 让出标题的位置」
+      —— 标题靠 Canvas.ZIndex 浮在列表上面。能显示，但标题的实际位置由 margin
+      凑出来，命令栏一旦换高就会错位。改成常规的 StackPanel + 星号行。
+    -->
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
-            <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
         <!--
-          命令栏。用 CommandBar 而不是自己摆按钮：它自带溢出菜单
-          （窄窗口时自动收进「⋯」）、键盘提示与无障碍语义。
-          展开时（选中会话后）出现的那组命令走 SecondaryCommands 惯例。
+          操作条。
+
+          ── 为什么不用 CommandBar ────────────────────────────────────────
+
+          试过 CommandBar，两种配置都失败：
+
+          1. 把标题放进 `CommandBar.Content` —— 命令按钮被排到 x=1599..1920，
+             而窗口只有 1550 宽，即完全在窗口外。截图上是彻底看不见，
+             但 UIA 仍报 `visible`，所以肉眼与自动化都容易误判
+          2. 去掉 `Content`、只留 PrimaryCommands —— 仍然被排到 x=1689 起的
+             窗口外。可见这不是 Content 宽度导致的，而是这个布局下
+             CommandBar 内部对命令条与溢出按钮的排布出了问题
+
+          用 Region.ps1 量过：那两处区域的亮像素数都是 0，确认不是抓图伪影。
+
+          所以改成平台里另一个**行为确定**的写法：一排按钮 + 一个带 MenuFlyout
+          的溢出按钮。动作与键盘可达性都不缺 —— 每个按钮都有 Label，
+          MenuFlyout 本身也有键盘导航与无障碍语义。
+
+          需要 `DefaultLabelPosition` 之类的行为时再回到 CommandBar。
         -->
-        <CommandBar Grid.Row="0" DefaultLabelPosition="Right" IsOpen="False"
-                    OverflowButtonVisibility="Auto">
-            <AppBarButton Icon="Add" Label="新会话" Click="OnNewSessionClick" />
-            <AppBarButton Icon="Refresh" Label="刷新" Click="OnRefreshClick" />
-            <AppBarSeparator />
-            <AppBarButton Icon="SelectAll" Label="全选" Click="OnSelectAllClick" />
-            <CommandBar.SecondaryCommands>
-                <AppBarButton x:Name="RenameBarButton" Icon="Rename" Label="重命名…" Click="OnRenameClick" />
-                <AppBarButton x:Name="PinBarButton" Icon="Pin" Label="置顶" Click="OnPinClick" />
-                <AppBarButton Icon="Copy" Label="复制路径" Click="OnCopyPathClick" />
-                <AppBarSeparator />
-                <AppBarButton Icon="Delete" Label="删除" Click="OnDeleteClick" />
-            </CommandBar.SecondaryCommands>
-        </CommandBar>
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="20,10,20,0" Spacing="8">
+            <Button Click="OnNewSessionClick">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <SymbolIcon Symbol="Add" />
+                    <TextBlock Text="新会话" />
+                </StackPanel>
+            </Button>
+
+            <Button Click="OnRefreshClick" ToolTipService.ToolTip="重新读取会话列表">
+                <SymbolIcon Symbol="Refresh" />
+            </Button>
+
+            <Button Click="OnSelectAllClick" ToolTipService.ToolTip="全选 / 取消全选">
+                <SymbolIcon Symbol="SelectAll" />
+            </Button>
+
+            <!-- 其余动作收进菜单。用 Button + MenuFlyout 而不是 CommandBar 的
+                 SecondaryCommands —— 后者正是上面那个排布问题的来源。 -->
+            <Button ToolTipService.ToolTip="更多操作">
+                <SymbolIcon Symbol="More" />
+                <Button.Flyout>
+                    <MenuFlyout>
+                        <MenuFlyoutItem x:Name="RenameMenuItem" Text="重命名…" Click="OnRenameClick">
+                            <MenuFlyoutItem.Icon>
+                                <SymbolIcon Symbol="Rename" />
+                            </MenuFlyoutItem.Icon>
+                        </MenuFlyoutItem>
+                        <MenuFlyoutItem x:Name="PinMenuItem" Text="置顶" Click="OnPinClick">
+                            <MenuFlyoutItem.Icon>
+                                <SymbolIcon Symbol="Pin" />
+                            </MenuFlyoutItem.Icon>
+                        </MenuFlyoutItem>
+                        <MenuFlyoutItem Text="复制工作区路径" Click="OnCopyPathClick">
+                            <MenuFlyoutItem.Icon>
+                                <SymbolIcon Symbol="Copy" />
+                            </MenuFlyoutItem.Icon>
+                        </MenuFlyoutItem>
+                        <MenuFlyoutSeparator />
+                        <MenuFlyoutItem Text="删除" Click="OnDeleteClick">
+                            <MenuFlyoutItem.Icon>
+                                <SymbolIcon Symbol="Delete" />
+                            </MenuFlyoutItem.Icon>
+                        </MenuFlyoutItem>
+                    </MenuFlyout>
+                </Button.Flyout>
+            </Button>
+        </StackPanel>
 
         <!-- 标题区。用平台排版刻度（TitleTextBlockStyle 等），不自定义字号。 -->
-        <StackPanel Grid.Row="1" Margin="24,4,24,0" Spacing="4"
-                    VerticalAlignment="Top" Canvas.ZIndex="1">
+        <StackPanel Grid.Row="1" Margin="24,8,24,12" Spacing="4">
             <TextBlock Text="会话" Style="{StaticResource TitleTextBlockStyle}" />
             <TextBlock
                 x:Name="CountText"
@@ -104,8 +165,8 @@
         -->
         <local:SessionListView
             x:Name="SessionList"
-            Grid.Row="1"
-            Margin="8,72,8,8"
+            Grid.Row="2"
+            Margin="8,0,8,8"
             SelectionMode="Extended"
             IsItemClickEnabled="True"
             ItemClick="OnSessionClick"
@@ -180,8 +241,8 @@
         -->
         <StackPanel
             x:Name="EmptyState"
-            Grid.Row="1"
-            Margin="24,72,24,0"
+            Grid.Row="2"
+            Margin="24"
             Spacing="8"
             Visibility="Collapsed"
             HorizontalAlignment="Center"

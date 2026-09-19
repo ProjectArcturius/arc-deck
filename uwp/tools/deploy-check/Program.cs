@@ -276,7 +276,35 @@ static class Program
             if (Directory.Exists(dir))
             {
                 var hits = Directory.GetFiles(dir, "*.msix", SearchOption.AllDirectories);
-                if (hits.Length > 0) return hits[0];
+
+                // 取**最新构建的那个**，不能取第一个。
+                //
+                // 这里出过一个真实的静默失败：AppPackages 下会同时留着多个版本
+                // 的包（提版本号后旧目录不会自动清理），而 GetFiles 的返回顺序
+                // 不保证是新的在前。结果是签名签在旧包上，新构建的包没签名，
+                // 安装时报 0x80073CF0 / 0x800B0100（"必须经过数字签名"）——
+                // 看起来像签名环节坏了，实际是签错了文件。
+                if (hits.Length > 0)
+                {
+                    var newest = hits[0];
+                    var newestTime = File.GetLastWriteTimeUtc(newest);
+                    foreach (var h in hits)
+                    {
+                        var t = File.GetLastWriteTimeUtc(h);
+                        if (t > newestTime)
+                        {
+                            newest = h;
+                            newestTime = t;
+                        }
+                    }
+
+                    if (hits.Length > 1)
+                    {
+                        Console.WriteLine($"  （目录下有 {hits.Length} 个 .msix，取最新的一个）");
+                    }
+
+                    return newest;
+                }
             }
             dir = Path.GetDirectoryName(dir);
         }

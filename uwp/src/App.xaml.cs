@@ -74,9 +74,9 @@ namespace ArcDeck
                 rootFrame.Navigate(typeof(ShellPage), e.Arguments);
             }
 
-            // 应用用户上次选的主题。放在设置 Window.Content 之后 —— 必须有一棵
-            // 已挂载的元素树，RequestedTheme 才有东西可作用。
-            Settings.ApplyTheme(rootFrame);
+            // 主题由 ShellPage 自己应用（挂在 NavigationView 上）。
+            // 这里不再重复设置 rootFrame —— Frame 只是 NavigationView 的子级，
+            // 挂在父级上才能连导航窗格一起换。
 
             Window.Current.Activate();
         }

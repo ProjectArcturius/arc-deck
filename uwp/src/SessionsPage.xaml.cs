@@ -84,7 +84,7 @@ namespace ArcDeck
         }
 
         /// <summary>
-        /// 命令栏与右键菜单的可用状态跟着选中项走。
+        /// 菜单项的可用状态跟着选中项走。
         ///
         /// 不这么做的话，没选中任何会话时「删除」仍可点，点下去静默无反应 ——
         /// 用户会以为坏了。
@@ -94,22 +94,13 @@ namespace ArcDeck
             var hasSelection = SessionList.SelectedItems.Count > 0;
             var single = SessionList.SelectedItems.Count == 1;
 
-            RenameBarButton.IsEnabled = single;
-            PinBarButton.IsEnabled = hasSelection;
+            RenameMenuItem.IsEnabled = single;
 
-            // 混选时置顶按钮的文字取多数状态，避免出现"点了反而取消"的意外。
-            if (hasSelection)
-            {
-                var pinned = SessionList.SelectedItems.Cast<Session>().Count(s => s.IsPinned);
-                var allPinned = pinned == SessionList.SelectedItems.Count;
-                PinBarButton.Label = allPinned ? "取消置顶" : "置顶";
-                PinMenuItem.Text = allPinned ? "取消置顶" : "置顶";
-            }
-            else
-            {
-                PinBarButton.Label = "置顶";
-                PinMenuItem.Text = "置顶";
-            }
+            // 混选时置顶的文案取整体状态，避免出现「点了反而取消」的意外。
+            var allPinned = hasSelection
+                && SessionList.SelectedItems.Cast<Session>().All(s => s.IsPinned);
+
+            PinMenuItem.Text = allPinned ? "取消置顶" : "置顶";
         }
 
         private void OnSelectionChanged(object sender, SelectionChangedEventArgs e)
