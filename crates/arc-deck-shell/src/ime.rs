@@ -33,6 +33,11 @@ pub struct ImeState {
     /// fcitx5 与 IMM32 都会出现「陈旧帧」：组合已经推进，但仍有一条早先的
     /// 组合串到达。用单调序号过滤是这两个平台共同的必要手段。
     generation: u64,
+    /// 累计收到的提交次数。
+    ///
+    /// 这不是装饰：它让「提交链路是否通」成为可由**外部进程读取并断言**的量
+    /// （见 `platform::ShellState::publish_title`），于是验证不必依赖人眼看窗口。
+    commits: u64,
 }
 
 impl ImeState {
@@ -58,6 +63,11 @@ impl ImeState {
     /// 当前组合世代。
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// 累计提交次数（含直接键入，不含组合串更新）。
+    pub fn committed_count(&self) -> u64 {
+        self.commits
     }
 
     /// 组合开始 —— 清空上一轮残留。
@@ -89,6 +99,7 @@ impl ImeState {
             // 空提交是合法的 no-op（某些 IME 用它表示取消），不产出事件。
             return None;
         }
+        self.commits += 1;
         Some(InputEvent::Commit { text })
     }
 

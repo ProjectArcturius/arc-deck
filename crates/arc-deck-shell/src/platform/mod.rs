@@ -46,6 +46,19 @@ struct ShellState {
     /// 「能唤起输入法但屏幕不更新」。
     painting: bool,
     client: Size,
+    /// 诊断计数：收到的字符消息数（`WM_CHAR` + `WM_IME_CHAR`）。
+    ///
+    /// `PostMessage` 返回成功只表示**入队成功**，不表示 `wnd_proc` 处理了。
+    /// 把「收到」与「已提交」分开计数，才能区分「消息没到」和「到了但没处理」
+    /// —— 这两种情况的修法完全不同。
+    chars_received: u64,
+    /// 诊断计数：转发给 `App::handle_input` 的事件数。
+    ///
+    /// 与 [`Self::chars_received`] 分开是刻意的：`committed` 计数来自
+    /// `ImeState`，而 `WM_CHAR` 路径**不经过** `ImeState`（它直接调
+    /// `handle_input`）。因此只靠 `committed` 无法判断应用层是否收到事件 ——
+    /// 这个字段补上那一段的证据链。
+    app_events: u64,
 }
 
 impl ShellState {
@@ -57,6 +70,8 @@ impl ShellState {
             ime: ImeState::new(),
             painting: false,
             client: Size::new(cfg.width, cfg.height),
+            chars_received: 0,
+            app_events: 0,
         }
     }
 
@@ -67,6 +82,28 @@ impl ShellState {
     unsafe fn request_repaint(&self, hwnd: HWND) {
         // SAFETY: 见函数契约。
         unsafe { InvalidateRect(hwnd, null(), 0) };
+    }
+
+    /// 把状态写进窗口标题。
+    ///
+    /// 这不只是装饰：标题可由**外部进程读取**，于是「提交链路是否通」变成
+    /// 一个可被 `input-probe` 自动断言的量，而不必靠人眼看窗口。
+    /// 人工验证一次只产出一个布尔值且不可复现；可读取的状态则能被反复验证。
+    ///
+    /// # Safety
+    /// `hwnd` 必须是本状态所属的窗口。
+    unsafe fn publish_title(&self, hwnd: HWND) {
+        let title = format!(
+            "{} | committed={} chars={} app_events={} composing={}",
+            self.app.config().title,
+            self.ime.committed_count(),
+            self.chars_received,
+            self.app_events,
+            self.ime.preedit()
+        );
+        let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: wide 以 NUL 结尾，生命周期覆盖调用。
+        unsafe { SetWindowTextW(hwnd, wide.as_ptr()) };
     }
 }
 
@@ -344,7 +381,31 @@ unsafe extern "system" fn wnd_proc(
                             if let Some(t) = composition_string(himc, GCS_RESULTSTR) {
                                 if let Some(ev) = s.ime.on_commit(t) {
                                     s.app.handle_input(ev);
+                                    s.app_events += 1;
                                 }
+                            }
+                        }
+
+                        // **把组合串转发给 App。**
+                        //
+                        // 这一步曾经漏掉，后果是：外壳内部状态正确（标题、
+                        // 候选窗定位都对），但 App 从不知道正在组合 ——
+                        // 界面上什么都不显示，表现为「能唤起输入法但打不出字」。
+                        // 外壳持有 ImeState 不等于 App 看得见组合串，两件事必须
+                        // 显式打通。
+                        match s.ime.as_preedit_event() {
+                            Some(ev) => {
+                                s.app.handle_input(ev);
+                                s.app_events += 1;
+                            }
+                            None => {
+                                // 组合串已清（例如提交后），通知 App 收起组合显示。
+                                // 否则界面会残留一段永不消失的下划线文本。
+                                s.app.handle_input(InputEvent::Preedit {
+                                    text: String::new(),
+                                    cursor: None,
+                                });
+                                s.app_events += 1;
                             }
                         }
 
@@ -363,6 +424,7 @@ unsafe extern "system" fn wnd_proc(
                         ImmReleaseContext(hwnd, himc);
                     }
                     s.request_repaint(hwnd);
+                    s.publish_title(hwnd);
                 }
                 // 同上：必须交回系统，否则组合状态不推进。
                 DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -371,7 +433,15 @@ unsafe extern "system" fn wnd_proc(
             WM_IME_ENDCOMPOSITION => {
                 if let Some(s) = shell_of(hwnd) {
                     s.ime.on_composition_end();
+                    // 通知 App 收起组合显示 —— 组合结束不代表已提交，
+                    // 未提交的组合本就该丢弃，但界面必须停止显示它。
+                    s.app.handle_input(InputEvent::Preedit {
+                        text: String::new(),
+                        cursor: None,
+                    });
+                    s.app_events += 1;
                     s.request_repaint(hwnd);
+                    s.publish_title(hwnd);
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
@@ -424,6 +494,7 @@ unsafe extern "system" fn wnd_proc(
                 let y = ((lparam >> 16) & 0xFFFF) as i16 as f32;
                 if let Some(s) = shell_of(hwnd) {
                     s.app.handle_input(InputEvent::PointerMoved(Point::new(x, y)));
+                    s.app_events += 1;
                     if s.app.needs_redraw() {
                         s.request_repaint(hwnd);
                     }
@@ -513,17 +584,20 @@ unsafe extern "system" fn wnd_proc(
             }
 
             WM_CHAR | WM_IME_CHAR => {
-                // 非 IME 路径的字符输入（直接键入 ASCII）。
-                if let Some(ch) = char::from_u32(wparam as u32) {
-                    // 过滤控制字符：回车/退格等已作为 Key 事件处理。
-                    if !ch.is_control() {
-                        if let Some(s) = shell_of(hwnd) {
+                // 非 IME 路径的字符输入（直接键入 ASCII / 程序化投递）。
+                if let Some(s) = shell_of(hwnd) {
+                    s.chars_received += 1;
+                    if let Some(ch) = char::from_u32(wparam as u32) {
+                        // 过滤控制字符：回车/退格等已作为 Key 事件处理。
+                        if !ch.is_control() {
                             s.app.handle_input(InputEvent::Commit {
                                 text: ch.to_string(),
                             });
+                            s.app_events += 1;
                             s.request_repaint(hwnd);
                         }
                     }
+                    s.publish_title(hwnd);
                 }
                 0
             }
@@ -608,6 +682,11 @@ pub fn run(app: Box<dyn App>) -> Result<(), String> {
 
         ShowWindow(hwnd, SW_SHOW);
         UpdateWindow(hwnd);
+
+        // 初始标题即带上状态，便于外部进程在启动后立刻读取。
+        if let Some(s) = shell_of(hwnd) {
+            s.publish_title(hwnd);
+        }
 
         // 消息泵。
         //
