@@ -254,6 +254,9 @@ UWP 版**不是** Kanesumi Design 的实现。它用微软的控件、微软的�
 
 ## 当前状态
 
+**区分「实测通过」与「只是编译通过」。** 两者都写了才算如实 —— 编译通过不等于
+行为正确，而下面带 ⚠️ 的那些恰好是最容易出错的交互与持久化。
+
 | | 状态 |
 |---|---|
 | `kanesumi/` 渲染契约 + Win32 外壳 | ✅ 21 个测试通过 |
@@ -262,13 +265,33 @@ UWP 版**不是** Kanesumi Design 的实现。它用微软的控件、微软的�
 | `kanesumi/` GDI 参考渲染器 | ⚠️ 缺 `Arc`/`Triangle`/`Image`，裁剪为空 |
 | `kanesumi/` 文本排版 | ⚠️ `HeuristicTextEngine` 是占位，不得用于最终排版决策 |
 | `kanesumi/` 无障碍 | ❌ 完全没有（`Scene` 是纯绘制命令，没有无障碍树） |
-| `uwp/` 完整应用（5 页 + NavigationView） | ✅ 编译通过，产出 MSIX |
-| `uwp/` 启动运行 | ✅ **已跑通**（签名 → 安装 → 启动，约 81 MB） |
-| `uwp/` 对话页块渲染（段落/代码/工具卡） | ✅ 已跑通并逐块截图核对 |
+| `uwp/` 编译与打包 | ✅ 从零 Rebuild 无错误无警告，产出 MSIX |
+| `uwp/` 启动运行 | ✅ 早前实测通过（签名 → 安装 → 启动，约 81 MB） |
+| `uwp/` 对话页块渲染（段落/代码/工具卡） | ✅ 早前逐块截图核对过 |
+| `uwp/` 会话管理（新建/重命名/置顶/删除） | ⚠️ **仅编译通过，未实机核对** |
+| `uwp/` 工具页（工具清单 + 详情） | ⚠️ **仅编译通过，未实机核对** |
+| `uwp/` 设置持久化（主题） | ⚠️ **仅编译通过，未实机核对** |
 | `uwp/` 外观 | ⚠️ 只做到圆角归零。图标字形与控件模板形状改不动，见 U3 |
 | 无障碍 | `kanesumi/` ❌ 没有（自绘路线最大缺口）· `uwp/` ✅ 平台免费提供 |
 | `arc-deck-dsh`（协议客户端） | ❌ 未建立 |
-| `uwp/` 数据 | ⚠️ 全部是示例数据（`Models/Store.cs`），未接协议 |
+| `uwp/` 数据 | ⚠️ 全部是示例数据（`Models/Store.cs`、`Store.Tools`），未接协议 |
+
+### 「未实机核对」的含义
+
+上面标 ⚠️ 的三项，以及日后任何只做过 `MSBuild` 的改动，含义是：
+**代码写完了、编译过了，但没有任何一次运行证明它行为正确。**
+
+这一轮的界面改动**没有跑过程序**（用户明确要求不跑）。所以下面这些都是
+未经运行时验证的推断，不是结论：
+
+- 新建会话是否真的跳到新会话、时间戳是否按真实时间显示
+- 右键菜单是否命中被右键的那一行（`SessionListView` 存在的唯一理由）
+- 置顶排序与多选批量操作是否符合预期
+- 主题切换是否即时生效、重开后是否恢复
+- 工具详情是否正确渲染
+
+要确认它们，只能部署后按「构建」一节里的方式逐项核对。**在有人做过之前，
+不要把这些写成「已跑通」。**
 
 ## 构建
 
@@ -285,21 +308,28 @@ $msbuild = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBui
 & $msbuild uwp\src\ArcDeck.csproj /t:Restore /p:Configuration=Release /p:Platform=x64
 & $msbuild uwp\src\ArcDeck.csproj /p:Configuration=Release /p:Platform=x64
 
+# 不跑程序时，唯一可用的检查是从零重建 —— 它会重新编译 XAML，
+# 增量构建可能漏掉 XAML 层面的错误。
+& $msbuild uwp\src\ArcDeck.csproj /t:Rebuild /p:Configuration=Release /p:Platform=x64
+
 # 部署：建证书 → 信任 → 签名 → 验证，一条命令给明确结论
 dotnet run --project uwp\tools\deploy-check
 Add-AppxPackage -Path uwp\src\AppPackages\**\*_x64.msix
 
 # 看界面：驱动 + 截图（必须用 Windows PowerShell 5.1，不是 pwsh）
 $ps5 = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-& $ps5 -File uwp\tools\shot\Ui.ps1  -Max -Out shot.png
-& $ps5 -File uwp\tools\shot\Uia.ps1 -List
+& $ps5 -File uwp\tools\shot\Print.ps1 -Out shot.png     # 首选：不看焦点不看 Z 序
+& $ps5 -File uwp\tools\shot\Uia.ps1 -List               # 元素树
 & $ps5 -File uwp\tools\shot\Uia.ps1 -Invoke "会话" -Out shot.png
 ```
 
 **别用肉眼判断界面改没改。** `uwp/tools/shot/` 下的脚本是为了把这类判断做成
 可测量的：`ImgDiff.ps1` 做对照实验的差异分布，`GlyphDiff.ps1` 比字形，
-`ZoomRect.ps1` 放大真实像素。这一轮的教训是：我曾在 14px 图标上看走眼，
-据此下了错误结论并白绕很久。**声明「改好了」之前先出证据。**
+`ZoomRect.ps1` 放大真实像素。**声明「改好了」之前先出证据。**
+
+抓图的坑（都在脚本注释里）：全屏截图会抓到前台的程序，而**抓错窗口是静默失败** ——
+你会得到另一张应用的截图，然后据此判断「界面改坏了」。首选 `Print.ps1`
+（`PrintWindow` + `PW_RENDERFULLCONTENT`，不看焦点也不看 Z 序）。
 
 **别用 `Add-AppxPackage -Register` 装松散文件** —— 能注册成功但启动报
 `0x8027025B`。走「签名 MSIX → 安装」才是正路。
