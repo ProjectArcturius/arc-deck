@@ -6,8 +6,8 @@ namespace ArcDeck
     /// <summary>
     /// 应用状态。
     ///
-    /// 这是示例数据 —— 本应用当前的目标是「一个用微软自家套件的标准 UWP 客户端」。
-    /// 接 DSH 协议是后续的事，不该混在界面骨架里。
+    /// 目前是示例数据 —— 本应用的界面与交互已经成型，接 DSH 协议是下一步。
+    /// 把协议客户端与界面混在一起会让两边都难改，所以先分开。
     /// </summary>
     public sealed class Store
     {
@@ -24,36 +24,16 @@ namespace ArcDeck
 
         private void Seed()
         {
-            Add("s1", "Arc Deck 骨架与 IME 验证", "Projects/arc-deck", "刚刚", 24,
-                "中文 IME 在自研事件循环里组合成功，组合串带下划线正确渲染。",
-                ("你", "IME 探针结果如何？中文能不能打进去？", true),
-                ("助手", "能。微软拼音逐键推进 z → zh → zho → zhon → zhong，组合串正确渲染，与已提交文本视觉分明。", false));
-
-            Add("s2", "UWP 客户端骨架", "Projects/arc-deck", "12 分钟前", 41,
-                "NavigationView 外壳 + 会话列表 + 对话页，全部用平台自带控件的默认外观。",
-                ("你", "UWP 版该怎么做？", true),
-                ("助手", "用微软自家的接口和套件：NavigationView 做导航、Frame 管页面栈、ListView 显示列表、ContentDialog 做对话框。外观跟系统主题走，不覆盖。", false));
-
-            Add("s3", "流式排版性能实测", "Projects/arc-deck", "1 小时前", 8,
-                "两万字符冷启动：断行 0.142ms、塑形 4.313ms、光栅化 32.192ms。",
-                ("你", "流式追加时的排版开销量过没有？", true),
-                ("助手", "量过。两万字符全量重排约 37ms，其中 32ms 是字形光栅化 —— 按 (字符, 字号) 做缓存即可让这段与消息长度无关。", false));
-
-            Add("s4", "Sokuou 一致性向量套件", "Projects/Sokuou", "昨天", 15,
-                "把「同名 API 约定」从纪律升级成 CI 阻断。",
-                ("你", "Sokuou 在桌面和 Kotlin 已经不同步了，怎么办？", true),
-                ("助手", "做成一致性测试向量。Rust 侧与 Kotlin 侧读同一份向量文件，任何一侧改了曲线，另一侧的测试立刻红。", false));
-
-            Add("s5", "Ether launcher 迁移收尾", "Projects/Ether", "2 天前", 33,
-                "文档仍在说 launcher 是 egui 形态，实际早已迁完。",
-                ("你", "launcher 现在什么形态？", true),
-                ("助手", "已经是 Kanesumi 形态了。Cargo.toml 里连 egui 依赖都没有，是文档陈旧。", false));
+            Sessions.Add(Session_ArcDeckIme());
+            Sessions.Add(Session_UwpShell());
+            Sessions.Add(Session_Perf());
+            Sessions.Add(Session_Sokuou());
+            Sessions.Add(Session_UwpDeploy());
         }
 
-        private void Add(string id, string title, string workspace, string updatedAt,
-                         int turns, string preview, params (string author, string text, bool mine)[] messages)
-        {
-            var s = new Session
+        private static Session Make(string id, string title, string workspace,
+                                    string updatedAt, int turns, string preview)
+            => new Session
             {
                 Id = id,
                 Title = title,
@@ -63,12 +43,126 @@ namespace ArcDeck
                 Preview = preview,
             };
 
-            foreach (var (author, text, mine) in messages)
-            {
-                s.Messages.Add(new ChatMessage { Author = author, Text = text, IsMine = mine });
-            }
+        private static Session Session_ArcDeckIme()
+        {
+            var s = Make("s1", "Arc Deck 骨架与 IME 验证", "Projects/arc-deck", "刚刚", 24,
+                "微软拼音在自研 Win32 事件循环里逐键推进组合串，通路成立。");
 
-            Sessions.Add(s);
+            s.Messages.Add(ChatMessage.Mine("IME 探针结果如何？中文能不能打进去？")
+                .At("14:02"));
+
+            s.Messages.Add(ChatMessage.Theirs(
+                "能。微软拼音在自研事件循环里正确组合，逐键推进：",
+                "关键是要把组合串**转发给 App** —— 外壳自己持有 IME 状态不等于界面看得见它。")
+                .WithCode("text", "vk=Z → composing=\"z\"\nvk=H → composing=\"zh\"\nvk=O → composing=\"zho\"\nvk=N → composing=\"zhon\"\nvk=G → composing=\"zhong\"")
+                .At("14:02 · 5.2s · 2 轮"));
+
+            s.Messages.Add(ChatMessage.Theirs(
+                "截图上组合串带橙色下划线，与已提交文本视觉分明。")
+                .At("14:03 · 2.1s"));
+
+            s.Messages.Add(ChatMessage.Mine("那之前为什么打不出字？")
+                .At("14:05"));
+
+            s.Messages.Add(ChatMessage.Theirs(
+                "三个缺陷叠加，而且都不报错：重绘请求恒假、组合串从未转发给 App、IME 消息被吞掉没交回系统。")
+                .WithTool("pwsh", "> cargo test -p arc-deck-shell\ntest result: ok. 21 passed; 0 failed; 0 ignored\n\n> window-shot.exe flat1.png\n已写出 flat1.png（1038×808 RGB PNG）")
+                .At("14:05 · 18.4s · 6 轮 · 1 次工具调用"));
+
+            return s;
+        }
+
+        private static Session Session_UwpShell()
+        {
+            var s = Make("s2", "UWP 客户端骨架", "Projects/arc-deck", "12 分钟前", 41,
+                "NavigationView 外壳 + 五个页面，控件与外观全部走平台默认。");
+
+            s.Messages.Add(ChatMessage.Mine("UWP 版该怎么做？")
+                .At("13:48"));
+
+            s.Messages.Add(ChatMessage.Theirs(
+                "用微软自家的接口和套件。导航交给 NavigationView，页面栈交给 Frame，列表交给 ListView，对话框交给 ContentDialog。",
+                "外观跟系统主题走 —— 用户换了主题或强调色，应用跟着变，不需要自己维护一套配色。")
+                .At("13:48 · 7.7s"));
+
+            s.Messages.Add(ChatMessage.Mine("那 Fluent 味怎么办？")
+                .At("13:51"));
+
+            s.Messages.Add(ChatMessage.Theirs(
+                "只关圆角。我先试过把 Acrylic 也换成纯色，那是走反了 —— 材质是平台外观的一部分，不是可以挑着关的装饰，已经撤掉。",
+                "图标字体那条路也堵死了：两套字体的码点语义不通用（U+E8B7 在 Fluent 里是文件夹，在 MDL2 里不是），换字体只会让写死的码点指错图。")
+                .WithCode("xml", "<!-- 圆角：平台默认值，不在任何 XAML 文件里，只能覆盖 -->\n<CornerRadius x:Key=\"ControlCornerRadius\">0</CornerRadius>\n<CornerRadius x:Key=\"OverlayCornerRadius\">0</CornerRadius>")
+                .At("13:51 · 12.9s · 4 轮"));
+
+            return s;
+        }
+
+        private static Session Session_Perf()
+        {
+            var s = Make("s3", "流式排版性能实测", "Projects/arc-deck", "1 小时前", 8,
+                "两万字符冷启动：断行 0.142ms、塑形 4.313ms、光栅化 32.192ms。");
+
+            s.Messages.Add(ChatMessage.Mine("流式追加时的排版开销量过没有？")
+                .At("12:31"));
+
+            s.Messages.Add(ChatMessage.Theirs(
+                "量过。两万字符全量重排约 37ms，其中 32ms 是字形光栅化。",
+                "但读上游缓存设计后要修正一处：它的缓存是**两级**的，塑形按行、排版按整段。所以流式追加时已确定的行会命中塑形缓存。")
+                .WithCode("text", "规模          断行      塑形       光栅化（冷启动）\n2,085 字符    0.015ms   0.419ms    3.809ms\n20,016 字符   0.142ms   4.313ms   32.192ms")
+                .At("12:32 · 41.6s · 3 轮 · 2 次工具调用"));
+
+            s.Messages.Add(ChatMessage.Theirs(
+                "结论：字形缓存（键取字符+字号）+ 段落级布局切分。稳态下每 token 只引入 0-1 个新字形，缓存命中后这段成本与消息长度无关。")
+                .At("12:32 · 6.3s"));
+
+            return s;
+        }
+
+        private static Session Session_Sokuou()
+        {
+            var s = Make("s4", "Sokuou 一致性向量套件", "Projects/Sokuou", "昨天", 15,
+                "把「同名 API 约定」从纪律升级成 CI 阻断。");
+
+            s.Messages.Add(ChatMessage.Mine("Sokuou 在桌面和 Kotlin 已经不同步了，有没有比 so/dll 更合理的做法？")
+                .At("昨天 21:15"));
+
+            s.Messages.Add(ChatMessage.Theirs(
+                "有。你遇到的是**多实现同步**问题，标准解法是规范 + 测试向量，不是二进制分发。",
+                "Python / Zig / Go 各有多个 JSON、regex、Unicode 实现，靠官方测试向量保持一致 —— 没有人为此发 .so。")
+                .WithCode("json", "// Sokuou/tests/vectors/easing.json\n{\n  \"metro_default\": [\n    { \"t\": 0.0, \"v\": 0.0 },\n    { \"t\": 0.5, \"v\": 0.75 },\n    { \"t\": 1.0, \"v\": 1.0 }\n  ]\n}")
+                .At("昨天 21:15 · 23.8s · 2 轮"));
+
+            s.Messages.Add(ChatMessage.Theirs(
+                "Rust 侧与 Kotlin 侧读同一份向量。任何一侧改了曲线，另一侧的测试立刻红 —— 漂移从「靠人工对照」变成 CI 阻断。")
+                .At("昨天 21:17 · 9.1s"));
+
+            return s;
+        }
+
+        private static Session Session_UwpDeploy()
+        {
+            var s = Make("s5", "UWP 部署：签名与信任链", "Projects/arc-deck", "2 天前", 33,
+                "0x8027025B 查了半天，根因是自签名证书没进受信任根。");
+
+            s.Messages.Add(ChatMessage.Mine("装完报 0x8027025B，查不到原因。")
+                .At("2 天前 10:04"));
+
+            s.Messages.Add(ChatMessage.Theirs(
+                "先别从事件日志查 —— 那里的 .NET Runtime 条目只有代号，没有异常消息。",
+                "直接调激活接口拿真实 HRESULT，或者干脆先跑部署检查：大部分「起不来」其实是没签名或证书不可信。")
+                .WithCode("csharp", "IApplicationActivationManager mgr =\n    (IApplicationActivationManager)new ApplicationActivationManager();\nvar hr = mgr.ActivateApplication(aumid, null, 0, out var pid);\n// hr = 0x8027025B → 应用未启动")
+                .At("2 天前 10:05 · 33.2s · 5 轮 · 3 次工具调用"));
+
+            s.Messages.Add(ChatMessage.Mine("用 Import-Certificate 写 Root 报 \"UI is not allowed\"，是权限不够吗？")
+                .At("2 天前 10:41"));
+
+            s.Messages.Add(ChatMessage.Theirs(
+                "不是。那是 cmdlet 自身的限制。改用 .NET 的 X509Store 直接写就成功了，不需要管理员。",
+                "教训：区分「权限不足」和「cmdlet 限制」值得先花一分钟。我因为那条报错以为是权限问题，白绕了一圈。")
+                .WithTool("pwsh", "> deploy-check\n1 · 包是否已签名\n    ✓ 有 AppxSignature.p7x\n2 · 签名证书是否被信任\n    ✓ 已在 CurrentUser\\Root\n\n结论：签名完成 —— 证书可信，包已签。")
+                .At("2 天前 10:42 · 14.7s · 2 轮 · 1 次工具调用"));
+
+            return s;
         }
     }
 }
