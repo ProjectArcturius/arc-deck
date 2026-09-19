@@ -1,0 +1,13 @@
+[package]
+name = "layout-bench"
+description = "Arc Deck 探针 —— 流式文本排版性能（决定渲染管线设计）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+# 与上游 kanesumi-canvas 完全相同的版本，保证测出来的数字对得上。
+fontdue = "0.9"
+rustybuzz = "0.18"
+unicode-linebreak = "0.1"
