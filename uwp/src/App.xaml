@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Application
+    x:Class="ArcDeck.App"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!--
+      UWP 应用的标准资源装配。
+
+      **有意为之的克制**：这里只合并 WinUI 2 的控件资源，不覆盖任何外观。
+      控件长什么样由 Windows 决定 —— 主题、强调色、圆角、动效全部跟系统走，
+      用户换了系统主题或强调色，应用跟着变。
+
+      这是 UWP 应用该有的样子：用平台的接口、平台的套件。
+    -->
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>

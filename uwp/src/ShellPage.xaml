@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="ArcDeck.ShellPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:muxc="using:Microsoft.UI.Xaml.Controls"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <!--
+      应用外壳。NavigationView 是 UWP 的标准导航容器：
+      它自带汉堡按钮、窗格、选中态、设置项、自适应行为、键盘导航与无障碍。
+
+      用它的**默认外观**，不覆盖任何样式 —— 这就是「用平台套件」的意思。
+    -->
+    <muxc:NavigationView
+        x:Name="Nav"
+        IsBackButtonVisible="Collapsed"
+        IsSettingsVisible="True"
+        MenuItemsSource="{x:Bind MenuItems}"
+        SelectionChanged="OnSelectionChanged"
+        SizeChanged="OnNavSizeChanged">
+
+        <muxc:NavigationView.AutoSuggestBox>
+            <!-- 搜索框是 NavigationView 的一等成员，不是自己拼的 -->
+            <AutoSuggestBox
+                x:Name="SearchBox"
+                QueryIcon="Find"
+                PlaceholderText="搜索会话"
+                TextChanged="OnSearchTextChanged" />
+        </muxc:NavigationView.AutoSuggestBox>
+
+        <Frame x:Name="ContentFrame" />
+    </muxc:NavigationView>
+</Page>
