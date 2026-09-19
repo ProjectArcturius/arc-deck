@@ -201,12 +201,23 @@
           所以两页统一改成行为确定的写法：一排按钮 + 一个带 MenuFlyout 的溢出
           按钮，标题另起一行。每个按钮都有 Label，键盘与无障碍语义都不缺。
         -->
+        <!--
+          每个纯图标按钮都必须显式设 AutomationProperties.Name。
+          `Button` + `SymbolIcon` 不带任何文本，`ToolTipService.ToolTip` 也**不构成**
+          无障碍名称 —— 实测 Narrator 与 UI Automation 都读不到它（Uia.ps1 -Invoke
+          "返回" 报 element not found 就是这个原因）。没有名字屏幕阅读器只会念
+          「按钮」，用户不知道是哪个。
+        -->
         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="20,10,20,0" Spacing="8">
-            <Button Click="OnBackClick" ToolTipService.ToolTip="返回会话列表">
+            <Button Click="OnBackClick"
+                    AutomationProperties.Name="返回会话列表"
+                    ToolTipService.ToolTip="返回会话列表">
                 <SymbolIcon Symbol="Back" />
             </Button>
 
-            <Button x:Name="FavoriteButton" Click="OnFavoriteClick" ToolTipService.ToolTip="收藏">
+            <Button x:Name="FavoriteButton" Click="OnFavoriteClick"
+                    AutomationProperties.Name="收藏"
+                    ToolTipService.ToolTip="收藏">
                 <!--
                   用 FontIcon 而不是 SymbolIcon：Symbol 枚举里没有"实心星"
                   （`Symbol.FavoriteFill` 不存在，编译报 CS0117），而收藏状态
@@ -220,11 +231,15 @@
                     Glyph="&#xE734;" />
             </Button>
 
-            <Button Click="OnCopyPathClick" ToolTipService.ToolTip="复制工作区路径">
+            <Button Click="OnCopyPathClick"
+                    AutomationProperties.Name="复制工作区路径"
+                    ToolTipService.ToolTip="复制工作区路径">
                 <SymbolIcon Symbol="Copy" />
             </Button>
 
-            <Button Click="OnReloadClick" ToolTipService.ToolTip="重载会话">
+            <Button Click="OnReloadClick"
+                    AutomationProperties.Name="重载会话"
+                    ToolTipService.ToolTip="重载会话">
                 <SymbolIcon Symbol="Refresh" />
             </Button>
         </StackPanel>

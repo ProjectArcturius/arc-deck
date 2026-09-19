@@ -10,14 +10,15 @@
 
     <Page.Resources>
         <!--
-          行容器样式。
-
-          只做对齐与挂右键菜单，不碰外观 —— 平台模板里的虚拟化、选中态、
+          行容器样式。只做对齐，不碰外观 —— 平台模板里的虚拟化、选中态、
           键盘导航、无障碍全靠它，重写就得自己维护。
+
+          右键菜单**不在这里挂**：它由 SessionListView 挂到每个容器上，
+          因为只有那个控件能在菜单弹出时用指针位置反查命中哪一行。
+          （挂在 ListView 或样式上都无法知道是哪个容器弹的。）
         -->
         <Style x:Key="SessionRowStyle" TargetType="ListViewItem">
             <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-            <Setter Property="ContextFlyout" Value="{StaticResource RowMenu}" />
         </Style>
 
         <!--
@@ -96,25 +97,34 @@
 
           需要 `DefaultLabelPosition` 之类的行为时再回到 CommandBar。
         -->
+        <!--
+          纯图标按钮必须显式设 AutomationProperties.Name —— `Button` + `SymbolIcon`
+          没有文本，`ToolTipService.ToolTip` 也**不构成**无障碍名称。缺了它，
+          屏幕阅读器只会念「按钮」，UI Automation 也按名字找不到（实测）。
+        -->
         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="20,10,20,0" Spacing="8">
-            <Button Click="OnNewSessionClick">
+            <Button Click="OnNewSessionClick" AutomationProperties.Name="新会话">
                 <StackPanel Orientation="Horizontal" Spacing="8">
                     <SymbolIcon Symbol="Add" />
                     <TextBlock Text="新会话" />
                 </StackPanel>
             </Button>
 
-            <Button Click="OnRefreshClick" ToolTipService.ToolTip="重新读取会话列表">
+            <Button Click="OnRefreshClick"
+                    AutomationProperties.Name="刷新会话列表"
+                    ToolTipService.ToolTip="重新读取会话列表">
                 <SymbolIcon Symbol="Refresh" />
             </Button>
 
-            <Button Click="OnSelectAllClick" ToolTipService.ToolTip="全选 / 取消全选">
+            <Button Click="OnSelectAllClick"
+                    AutomationProperties.Name="全选"
+                    ToolTipService.ToolTip="全选 / 取消全选">
                 <SymbolIcon Symbol="SelectAll" />
             </Button>
 
             <!-- 其余动作收进菜单。用 Button + MenuFlyout 而不是 CommandBar 的
                  SecondaryCommands —— 后者正是上面那个排布问题的来源。 -->
-            <Button ToolTipService.ToolTip="更多操作">
+            <Button AutomationProperties.Name="更多操作" ToolTipService.ToolTip="更多操作">
                 <SymbolIcon Symbol="More" />
                 <Button.Flyout>
                     <MenuFlyout>
@@ -170,7 +180,8 @@
             SelectionMode="Extended"
             IsItemClickEnabled="True"
             ItemClick="OnSessionClick"
-            SelectionChanged="OnSelectionChanged">
+            SelectionChanged="OnSelectionChanged"
+            RowMenu="{StaticResource RowMenu}">
             <ListView.ItemContainerStyle>
                 <StaticResource ResourceKey="SessionRowStyle" />
             </ListView.ItemContainerStyle>

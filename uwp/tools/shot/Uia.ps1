@@ -1,4 +1,4 @@
-<#
+﻿<#
   UI Automation driver for the Arc Deck UWP window. Windows PowerShell 5.1.
 
   Why this exists: coordinate clicking on this window is unreliable. The window
@@ -11,11 +11,18 @@
     powershell.exe -File Uia.ps1 -Invoke "Sessions"
     powershell.exe -File Uia.ps1 -Invoke "Sessions" -Out shot.png
     powershell.exe -File Uia.ps1 -SetText "搜索会话" "hello" -Out shot.png
+    powershell.exe -File Uia.ps1 -SetTextFirstEdit "新标题"
+
+  -SetTextFirstEdit exists because text boxes created in code -- such as the one
+  inside the rename ContentDialog -- have no Name, so they cannot be addressed by
+  name. It writes to the first Edit control in the tree. Use it when a modal dialog
+  is up and there is exactly one input.
 #>
 param(
   [switch]$List,
   [string]$Invoke,
   [string[]]$SetText,
+  [string]$SetTextFirstEdit,
   [string]$Out,
   [int]$Depth = 6
 )
@@ -102,6 +109,19 @@ if ($SetText -and $SetText.Count -ge 2) {
   $p = $el.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
   $p.SetValue($SetText[1])
   "set '$($SetText[0])' = '$($SetText[1])'"
+  Start-Sleep -Milliseconds 1200
+}
+
+if ($SetTextFirstEdit) {
+  # 对话框里代码创建的 TextBox 没有 Name，只能按类型找。
+  $editCond = New-Object System.Windows.Automation.PropertyCondition(
+    $AE::ControlTypeProperty, $CT::Edit)
+  $edit = $win.FindFirst($TS::Descendants, $editCond)
+  if ($null -eq $edit) { Write-Error "no Edit control found"; exit 2 }
+
+  $p = $edit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+  $p.SetValue($SetTextFirstEdit)
+  "set first Edit = '$SetTextFirstEdit'"
   Start-Sleep -Milliseconds 1200
 }
 
