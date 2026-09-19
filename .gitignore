@@ -9,6 +9,10 @@
 /demo-out.log
 /demo-err.log
 
+# 探针抓取的窗口截图（一次性检视用，不入库）
+/shot*.png
+/shot*.bmp
+
 # 编辑器 / 系统
 .vscode/
 .idea/
