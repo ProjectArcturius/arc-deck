@@ -24,6 +24,8 @@ AppPackages/
 # 探针与 demo 的临时日志
 /probe-out.log
 /probe-err.log
+/probe-sdk.log
+/probe-cli*.log
 /demo-out.log
 /demo-err.log
 

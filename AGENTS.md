@@ -1,13 +1,15 @@
 # AGENTS.md — Arc Deck
 
-Arc Deck 是 DeepSeek Harness 的原生桌面客户端，有**两个并列实现**。
+Arc Deck 是 DeepSeek Harness 的原生桌面客户端，有**两个并列实现**，
+外加**一层两者共用的协议客户端**。
 
 ```
-kanesumi/   Rust + 自绘 Scene（跨平台，无 WebView）   based on Kanesumi Design
-uwp/        C# + WinUI 2（Windows 专属）              用微软自家的接口与套件
+kanesumi/       Rust + 自绘 Scene（跨平台，无 WebView）   based on Kanesumi Design
+uwp/            C# + WinUI 2（Windows 专属）              用微软自家的接口与套件
+arc-deck-dsh/   与内核说话的协议层（C# / .NET 9，桌面进程）  两个实现都要用它
 ```
 
-**两者代码不共享，外观也不共享。** 它们是同一个客户端的两条实现路线：
+**两个实现代码不共享，外观也不共享。** 它们是同一个客户端的两条实现路线：
 
 | | `kanesumi/` | `uwp/` |
 |---|---|---|
@@ -20,6 +22,68 @@ uwp/        C# + WinUI 2（Windows 专属）              用微软自家的接�
 
 > 不要把 Kanesumi 的东西搬进 `uwp/`，也不要拿 `uwp/` 的平台行为去改
 > Kanesumi 的规格。两者的**唯一**交集是「同一个客户端」这个目标。
+
+### P · `arc-deck-dsh/` —— 那一层是共用的
+
+界面两条路线不共享，但**协议只有一份**：事件词汇、翻译规则、上游版本钉法，
+两边读到的东西必须逐字一致。所以它单独成目录，而不是塞进任一实现里。
+
+#### P1 · 界面那侧**必须**是完整信任的桌面进程 —— 不能是 AppContainer
+
+这一条是 UWP 版的**结构性**约束，不是取舍：
+
+| 需要的能力 | `uwp/src/ArcDeck.csproj`（`OutputType=AppContainerExe`） |
+|---|---|
+| 起 `dsh` 子进程 | ❌ AppContainer 无 `CreateProcess` |
+| 读 `%APPDATA%\dsh-desktop\harness`（凭据、会话日志） | ❌ 包外路径不可读 |
+| 连 `127.0.0.1` 上已在跑的内核 | ❌ 回环被沙箱挡住（需 `CheckNetIsolation` 提权） |
+
+三条都被堵死，所以「UWP 界面 + 内核」这条路**不能靠改代码走通**。
+UWP 版目前的界面本身是好的（会话列表、Markdown、工具页、主题都已实测），
+但它无法自己拿到数据 —— 这是两件独立的事，不要混为一谈。
+
+**下一步的方向**（尚未实施）：界面外壳换成完整信任的桌面进程，
+`arc-deck-dsh` 作为它的引用；UWP 版作为「无内核也能看的界面」保留。
+
+#### P2 · 上游版本只能**钉**，问不出来
+
+协议**没有版本协商**：握手只回 `serverInfo.version = "0.0.1"`，客户端不校验。
+所以「对侧是什么」这个问题在协议里没有答案，只能靠 `DshVersion` 里的常量钉住
+一个已验证的组合。升级上游是刻意的工程动作 —— 与 K9 对 Rust 侧的要求同源。
+
+#### P3 · `provider` 与 `model` 不是一回事，且**校验发生在轮次内部**
+
+实测：把 `model` 填成 provider 的名字（`deepseek-official`）时，
+`initialize` **成功**、`turn/start` 也照发，错误只在
+`assistant/chunk` 的 `finish` 块里：
+
+```
+The supported API model names are deepseek-flash, deepseek-v4-pro,
+but you passed deepseek-official.
+```
+
+界面上表现为「消息发出去以后什么都没有」。**所以 UI 必须消费 `finish` 块的
+`reason.failure`** —— 那是模型失败的唯一出口，协议层不会抛错。
+
+#### P4 · 助手的正文在事件流里出现两次，必须区分
+
+- `assistant/chunk` 的 `text-delta` —— 逐 token 增量，用来做流式观感
+- `assistant/message` 的 `message.content[]` —— 该步的**权威全文**
+
+两条都用而不区分，界面会出现**正文写两遍**（实测过）。做法见
+`DshProjection` 的 `Authoritative` 标记与 `FindStreamedEntry`。
+
+#### P5 · 内核的内部事件不是对话内容
+
+一次普通 `session/prompt` 就会带上 `permission/preset`、`sandbox/mode`、
+`approval/policy`、`agent/inbox/spliced`、`request/context` 等事件。
+第一次跑通时它们全被画成了原始 JSON，对话里涌出七条，真正的内容被埋掉。
+**内部簿记进 `DshProjection.Recorded`，不进 `Messages`。**
+
+#### P6 · 只有 `source.kind == "user"` 的 `user/message` 才是人说的话
+
+内核会把系统提示词、工作区指令、技能清单都写成 `user/message`
+（一次 prompt 实测产生 4 条）。全画出来界面会被几百行英文系统提示词淹没。
 
 ## 提交规范
 
@@ -338,37 +402,76 @@ WPF 用 `Style` 的 `EventSetter` 解决，**UWP 不支持 `EventSetter`**。
 
 **写法**：`AutomationProperties.Name="返回会话列表"` 显式设上。图标按钮一律要加。
 
-### U13 · 未解决：对话页输入区落在窗口底部之外
+### U13 · 输入区没有落在窗口外 —— 是**量测工具**的坐标空间错了
 
-**这是当前唯一已知未修的缺陷**，写清楚现状供接手的人少走弯路。
+这一条曾经作为「唯一未修缺陷」记了很久，**结论是错的**。写清楚是因为那个错误
+本身比缺陷更值得记住。
 
-实测（`uwp/tools/shot/Geometry.ps1`，同一次进程内读窗口矩形与 UIA 矩形）：
+**当初的实测**（`uwp/tools/shot/Geometry.ps1`，同一次进程内读窗口矩形与 UIA 矩形）：
 
 ```
 实际窗口   rect=-7,-7  size=1550x830   dpi=120
 UIA 窗口   -9,-9  1938x1038
-消息列表   401,165  1519x784
-输入框     421,964  1403x41      ← 964+41 = 1005 > 830
+输入框     421,964  1403x41      ← 964+41 = 1005 > 830，判为「被裁掉」
 ```
 
-应用的布局高度比窗口**真实可见高度**多出约 200px，底部 75px 的输入区被裁掉 ——
-**输入框与「发送」在屏幕上看不见也点不到**。`Rows` 是 Auto/Auto/*/Auto，
-`*` 行拿到 784，总高 1025，超出可用高度约 50 逻辑像素。
+**真相**：那两个尺寸差**恰好 1.25 倍**，也就是显示器的缩放比。根因是
+`GetWindowRect` 在**未声明 DPI 感知**的进程里被系统虚拟化，返回的是按 96 DPI
+换算过的值；而 UIA 的 `BoundingRectangle` 报的是**物理像素**。
+两个不同空间里的数字被直接比较，凭空造出一个「多出 200px」的布局。
 
-**为什么自动化与文档都没早点发现**：输入框存在、能拿键盘焦点（实测
-`HasKeyboardFocus=True`），UIA 也报 `visible`。**只看 UIA 会判成正常**，
-必须量像素或看截图。这一条本身就是 U9 那条经验的第二次验证。
+实情：窗口是 **1938×1038 物理像素**（120 DPI，即 1550×830 DIP），
+输入框底边 1005 在窗口底边 1029 **之内**。全屏截图里输入框与「发送」
+都在屏幕上、也点得到。
 
-**试过四种办法，都没有改善**（每种都实测过坐标）：
+**教训（比这条缺陷本身值钱）**：
 
-1. 根 `Grid` 加 `VerticalAlignment="Stretch"`
-2. 根 `Grid` 加 `ScrollViewer.VerticalScrollBarVisibility="Disabled"`
-3. 在 `NavigationView` 上关掉它自带的那层滚动
-4. 用 `VisualTree.ps1` 查祖先链 —— 内容区里**没有**第二层 `ScrollViewer`，
-   所以「被无限高度测量」这个最初假设不成立
+- **两个来源的数字要先确认在同一个坐标空间，再相减。** 差一个整数倍就该怀疑
+  是 DPI 缩放，而不是去改布局。
+- 之前「试过四种办法都没改善」也就解释得通了 —— 改布局当然不会改善一个
+  量测错误。**四种无效尝试本身就是「诊断错了」的信号**，当时没被读成信号。
+- 新工具 `uwp/tools/shot/Layout.ps1` 第一件事是
+  `SetProcessDpiAwarenessContext`，并把「是否拿到了 DPI 感知」打出来；
+  同时用 `DwmGetWindowAttribute` 拿扩展边框（UWP 的 `GetWindowRect` 会把
+  不可见的 resize 边框算进去）。**量坐标一律用它，不要再用 Geometry.ps1 的
+  窗口矩形。**
 
-**根因尚未定位。** 下一步值得试的方向：把消息列表从 `*` 行改成固定高度看总高是否
-随之收敛；或在 `SizeChanged` 里打印 `ActualHeight` 链，找出从哪一层开始偏大。
+### U13b · PowerShell 5.1 读 UTF-8 脚本要 BOM
+
+`uwp/tools/shot/` 下的脚本由 `powershell.exe`（5.1）执行，而 5.1 **默认按 ANSI
+解码无 BOM 的文件**。后果是脚本里的中文变成乱码，且**报错位置与真实原因无关**：
+
+```
+$(if ($inside) { "在窗口内 ✓" } else { … })
+→ You must provide a value expression following the '*' operator
+```
+
+乱码把 `"` 吃掉了一部分，解析器于是抱怨运算符。**新增 .ps1 一律带 BOM**
+（`[IO.File]::WriteAllText($p, $text, [Text.UTF8Encoding]::new($true))`）。
+仓库里 `Crop.ps1`、`Ui.ps1`、`ZoomRect.ps1` 三个文件至今没有 BOM。
+
+### U16 · 不要把构建输出用 `Select-Object -Last N` 截掉再 `--no-build` 跑
+
+`dotnet build … | Select-Object -Last 5` 会在构建**失败**时把 error 行截掉，
+而 `dotnet run --no-build` **不校验产物是否比源码新** —— 于是它照常跑上一次的 dll。
+
+后果不是「跑不起来」，而是**「我刚修好的 bug 还在」**：看起来像修复无效，
+实际是修好的那份根本没被编译进去。为这个白花了一轮。
+
+**做法**：跑协议层验收用 `uwp\tools\sdk\run-cli.ps1` —— 它显式检查
+`$LASTEXITCODE` 并 `throw`，且只在紧接一次成功构建之后才允许 `--no-build`。
+
+### U17 · 自动化断言要看**对**元素，否则得到假阴性
+
+写 UIA 验收脚本时踩了两次同类错，都是「断言读错了地方」：
+
+| 症状 | 真正的原因 |
+|---|---|
+| 对 `ListItem` 取 `InvokePattern` 报 `Unsupported Pattern` | ListView 的行是 `SelectionItemPattern`；要**往上找**第一个能应答的元素（`Uia.ps1` 的 `Get-Actionable` 是对的） |
+| 「最后一条里没有刚发出的文本」但界面明明有 | `ListItem` 自身的 `Name` 是**数据对象的类型名**（`ArcDeck.ChatMessage`），正文在它**子树**的 `Text` 元素里 |
+
+**对照实验与断言之间要确认「读的是同一个东西」。** 这两个都表现为
+「功能坏了」，而功能是好的 —— 与 U13 同类，只是错在元素层次而不是坐标空间。
 
 ### U14 · 资源键写错不会报错，只会静默回退
 
@@ -454,23 +557,25 @@ SDK 里 152 处引用、0 处定义。
 | `uwp/` 工具页（工具清单 + 详情） | ✅ **已实测**（10 个工具、4 个「需确认」、详情三行 + 说明齐备） |
 | `uwp/` 设置持久化（主题） | ✅ **已实测**：内容区切换 + 跨重启保持 |
 | `uwp/` 主题对导航窗格 | ✅ 已修（`Flat.xaml` 覆盖 `NavigationViewDefaultPaneBackground`；见 U10） |
-| `uwp/` 对话页**输入区可见性** | ❌ **已知缺陷（未修）**：输入框与「发送」落在窗口底部之外，点不到（U13） |
+| `uwp/` 对话页**输入区可见性** | ✅ **不是缺陷**：原来的「落在窗口外」是量测工具坐标空间错的产物（U13） |
+| `uwp/` 对话页**发送通路** | ✅ **已实测**（`SendCheck.ps1`：进入会话 → 写输入框 → 点发送 → MessageList 5→6 条且正文正确 → 输入框清空）。⚠️ 修过一处：`Send()` 原先**没有**调 `Session.Touch()`，列表摘要与轮数不跟着更新 |
 | `uwp/` 多选批量操作 | ✅ **已实测**（`CanSelectMultiple=True`；选中两行后批量置顶，两行都升到顶部且带图钉；多选时「重命名」正确置灰） |
 | `uwp/` 外观 | ⚠️ 只做到圆角归零。图标字形与控件模板形状改不动，见 U3 |
 | 无障碍 | `kanesumi/` ❌ 没有（自绘路线最大缺口）· `uwp/` ✅ 平台提供，图标按钮已补 `AutomationProperties.Name` |
-| `arc-deck-dsh`（协议客户端） | ❌ 未建立 |
-| `uwp/` 数据 | ⚠️ 全部是示例数据（`Models/Store.cs`、`Store.Tools`），未接协议 |
+| `arc-deck-dsh`（协议客户端） | ✅ **已实测**：找到内核 → 起 `dsh --profile sdk` → 握手 → `session/prompt` → 流式事件 → 投影出助手正文（`dsh-cli`，见下） |
+| `arc-deck-dsh` 接进界面 | ❌ **未做**，卡在 P1：UWP 是 AppContainer，起不了内核也读不到包外路径 |
+| `arc-deck-dsh` 会话重载（读回已存会话） | ❌ 未做。落盘格式是 `session.jsonl.zstd`（**zstd**），要一个解压依赖，暂时没引入 |
+| `uwp/` 数据 | ⚠️ 全部是示例数据（`Models/Store.cs`、`Store.Tools`），未接协议；协议层已能供数据但**尚未接线** |
 
 ### 还没实测的部分
 
 上表标 ⚠️ 的项，含义是**代码写完了、能编译，但没有任何一次运行证明它行为正确**。
-目前只剩一项：
+目前没有 ⚠️ 的未测项。
 
-- 对话页**发送消息**后列表摘要与轮数是否更新 —— **这一项卡在 U13**：
-  输入框落在窗口外点不到，没法发消息，所以它无法验证，不是「忘了测」
-
-其余全部路径都已实测：新建、右键命中目标行、重命名、删除（含取消分支）、
-置顶、多选批量置顶、搜索筛选 + 空状态、工具页、主题切换与持久化。
+原先挂着的「对话页**发送消息**后列表摘要与轮数是否更新」也**已经测过**：
+当初判定它「卡在 U13」是因为相信了那条错误的量测 —— 输入框一直在窗口内，
+发送通路本来就能走。这条记在这里是为了提醒：一个错误的诊断会连带冻住
+别的验证项（参 U13）。
 
 ## 构建
 
