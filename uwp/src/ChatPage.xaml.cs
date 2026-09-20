@@ -107,6 +107,15 @@ namespace ArcDeck
 
             _session.Messages.Add(ChatMessage.Mine(text)
                 .At(DateTime.Now.ToString("HH:mm")));
+
+            // 重算摘要与轮数 —— **不调这一下，会话列表永远显示发送前的样子**。
+            //
+            // 实测（`uwp/tools/shot/SendCheck.ps1`）：消息确实进了 MessageList
+            // （5 → 6 条、正文正确、输入框清空），但退回列表时那一行还是旧摘要。
+            // 原因是 `Preview` / `TurnCount` 是模型上的静态字段，只在 Seed 时写过一次；
+            // 「界面看起来能用、数据是假的」是最典型的一种漏。
+            _session.Touch();
+
             Composer.Text = string.Empty;
 
             // 滚到底 —— 新消息在列表末尾。

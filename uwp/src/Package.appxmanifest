@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:mp="http://schemas.microsoft.com/appx/2014/phone/manifest"
@@ -15,7 +15,7 @@
   <Identity
     Name="ProjectArcturius.ArcDeck"
     Publisher="CN=ProjectArcturius"
-    Version="0.1.13.0" />
+    Version="0.1.15.0" />
 
   <!-- PhoneIdentity 在桌面清单里也是必需元素 —— 缺它报 APPX1673。 -->
   <mp:PhoneIdentity PhoneProductId="7c4e1a92-5d38-4f61-b0a7-2e9c8d5f3b14"
