@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Arc Deck · DSH 协议客户端（库）。
+
+    net9.0（不带 -windows）：本层只碰 Process / Stream / JSON，
+    不碰任何 Win32 专用 API —— 这样它将来能原样被别的外壳引用，
+    也意味着「界面的平台细节不该渗进协议层」这条约束是**编译器**在守。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>ArcDeck.Dsh</AssemblyName>
+    <RootNamespace>ArcDeck.Dsh</RootNamespace>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+</Project>

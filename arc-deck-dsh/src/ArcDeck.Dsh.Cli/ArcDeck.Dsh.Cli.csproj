@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    arc-deck-dsh host：进程外壳的**一次性验证工具**。
+
+    它不是产品的一部分 —— 产品是「Arc Deck 界面 + 这一层协议」。
+    但协议层必须有办法在没有界面的情况下被单独跑通，否则每一次
+    「消息没出来」都要连带怀疑界面，最后两个方向互相掩盖。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>dsh-cli</AssemblyName>
+    <RootNamespace>ArcDeck.Dsh.Cli</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ArcDeck.Dsh\ArcDeck.Dsh.csproj" />
+  </ItemGroup>
+
+</Project>
