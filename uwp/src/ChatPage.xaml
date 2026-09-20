@@ -195,32 +195,27 @@
     </Page.Resources>
 
     <!--
-      ── 已知未解决的布局问题：输入区落在窗口底部之外 ────────────────
+      ── 这里曾经记着一条「输入区落在窗口外」的缺陷，它是**量测错误** ────
 
-      实测（`uwp/tools/shot/Geometry.ps1`，同一次进程内读窗口矩形与 UIA 矩形）：
+      当时的数字（`uwp/tools/shot/Geometry.ps1`）看起来无懈可击：
 
-          实际窗口   rect=-7,-7  size=1550x830   dpi=120
-          UIA 窗口   -9,-9  1938x1038
-          消息列表   401,165  1519x784
-          输入框     421,964  1403x41      ← 964+41 = 1005 > 830
+          实际窗口   size=1550x830   dpi=120
+          UIA 窗口   1938x1038
+          输入框     421,964  1403x41   ← 964+41 = 1005 > 830
 
-      即应用的布局高度比窗口**真实可见高度**多出约 200px，底部那 75px 的输入区
-      被裁掉：**输入框和「发送」在屏幕上看不见、点不到**。
+      错在两个数字**不在同一个坐标空间**：`GetWindowRect` 在未声明 DPI 感知的
+      进程里返回按 96 DPI 虚拟化过的值，而 UIA 的 `BoundingRectangle` 是物理像素。
+      两者差 1.25 倍（正是缩放比），相减就凭空造出「多出 200px」。
 
-      为什么自动化发现不了：输入框确实存在、能拿键盘焦点（实测
-      `HasKeyboardFocus=True`），UIA 也报 `visible`。只看自动化会判成正常，
-      必须量像素或看截图才能发现。
+      实情：窗口 1938x1038 物理像素 = 1550x830 DIP，输入框底边 1005 在窗口底边
+      1029 之内。**布局本来是对的**，当初「试过四种办法都无效」也正因为它没错。
 
-      **试过四种办法，都无效**（都实测过坐标，没有改善）：
-
-        1. 根 `Grid` 加 `VerticalAlignment="Stretch"`
-        2. 根 `Grid` 加 `ScrollViewer.VerticalScrollBarVisibility="Disabled"`
-        3. 在 `NavigationView` 上关掉那层滚动
-        4. 用 `VisualTree.ps1` 排查祖先，内容区里并没有第二层 `ScrollViewer`
-
-      所以根因还没定位到。`Rows` 是 Auto/Auto/*/Auto，`*` 行拿到 784 ——
-      总高 1025，超出可用高度约 50 逻辑像素。这是**待解的缺陷，不是已完成的功能**，
-      记在 AGENTS.md U13。
+      量坐标请用 `uwp/tools/shot/Layout.ps1`（先 SetProcessDpiAwarenessContext）。
+      详见 AGENTS.md U13。
+    -->
+    <!--
+      布局：Auto（工具条）/ Auto（标题）/ *（消息列表）/ Auto（输入区）。
+      `*` 行吃满剩余高度 —— 输入区因此永远贴在窗口底部，不依赖窗口尺寸。
     -->
     <Grid
         VerticalAlignment="Stretch"

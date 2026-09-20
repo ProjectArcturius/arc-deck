@@ -1,4 +1,21 @@
-﻿<#
+<#
+  ⚠️ 本脚本的**窗口尺寸不可用** —— 改用 Layout.ps1，或者只想看 UIA 元素时再用本脚本。
+
+  它把 GetWindowRect 与 UIA 的 BoundingRectangle 放在一起报，看起来是「同一个
+  坐标空间」，实际**不是**：本进程没有声明 DPI 感知，所以 GetWindowRect 返回的
+  是被系统按 96 DPI 虚拟化过的值，而 UIA 报的是物理像素。125% 缩放下两者差
+  恰好 1.25 倍 —— 据此得出的「窗口 1550x830」是假的（真实是 1938x1038），
+  并直接导致 U13 那条「输入区落在窗口外」的错误结论。
+
+  Layout.ps1 第一件事是 SetProcessDpiAwarenessContext，并会把是否拿到 DPI
+  感知打出来；窗口尺寸也从 DwmGetWindowAttribute 取（UWP 的 GetWindowRect
+  会把不可见的 resize 边框算进去）。**量坐标一律用那个。**
+
+  本脚本保留的原因：它的 UIA 元素列表（Nav / ContentFrame / MessageList / Edit）
+  仍然好用，那几个数字本身是物理像素、是对的。
+
+  ----------------- 以下是原始说明 -----------------
+
   Measure the window rectangle and the key UIA rectangles in ONE process, so the
   numbers share a coordinate space and a moment in time.
 
