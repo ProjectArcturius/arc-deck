@@ -84,6 +84,74 @@ but you passed deepseek-official.
 
 内核会把系统提示词、工作区指令、技能清单都写成 `user/message`
 （一次 prompt 实测产生 4 条）。全画出来界面会被几百行英文系统提示词淹没。
+另外那几条还带 `<system-reminder>` 之类的固定标记，也按标记排掉 ——
+**别按长度猜**。
+
+#### P7 · 会话日志是 zstd，而且正文大多被压成「打包行」
+
+落盘路径：`<DSH_HOME>/sessions/<工作区分组>/<会话 id>/session.jsonl.zstd`。
+文件名里写着 `jsonl`，**但它不是文本** —— 直接按文本读会得到二进制噪声，
+报错是「JSON 解析失败」，指向的方向完全不对。
+
+解压后的第 1 行是会话头（`{"type":"session","id":…,"cwd":…}`，**没有 seq**），
+之后每行一帧事件或一行**打包编码**：
+
+| 行类型 | 是什么 | 重放时 |
+|---|---|---|
+| `assistant/chunk` | 真实事件 | 认 |
+| `text-chunks` / `reasoning-chunks` / `tool-call-chunks` | 连续同类增量块的**压缩行** | **跳过** |
+
+实测一份 5127 行的日志：真正的 `text-delta` 只有 **1** 帧，2840 行是打包行。
+**展开打包行会把正文写两遍**，而那件事在终端输出里看不出来 ——
+所以 `DshProjection` 有一个 `replay` 开关，重放只认权威全文。
+
+两条附带经验：
+
+- 解压必须用**能读多帧拼接流**的 API。日志是追加写的，每追加一段就是一个
+  zstd 帧；只解第一帧的 API 会**静默丢掉后半段**。库选了 `ZstdSharp.Port`
+  （纯托管、无本机依赖）—— 决定只影响 `DshSessionLogFile` 一个文件
+- 一个正在被写的会话，末尾可能是**半行**。判据只看「末尾有没有换行」，
+  不要猜内容（`{...}` 与 `{...` 从形状上分不出来）。这不是错误，但要报出来
+
+#### P8 · 一条消息 = 一轮，不是一步
+
+`turn` 是「用户说一次话」，`step` 是这一轮里模型的一次调用。一次 agentic 的
+运行有**几十到几百个 step**（实测：1 轮 238 步）。按 step 建消息会得到几百个
+气泡、绝大多数只有一个工具卡。所以按 `turn` 归并，工具卡与思考块进同一条消息。
+
+**`turn` 从 1 开始**（实测日志里只有 `turn:1` 与 `turn:2`，没有 `turn:0`），
+不能拿它当索引再加一 —— 那样会多报一轮，而「轮数偏一」在界面上看不出来。
+
+#### P9 · 「重放是对的」需要证据，不能只有论证
+
+论证（两条路径共用同一个 `DshProjection`）是对的，但论证不等于证据。
+现在有三层：
+
+| 层 | 工具 | 证明什么 |
+|---|---|---|
+| 解压 | `tools/zstd-probe` | 与 zstd 命令行**逐字节一致**（多帧拼接） |
+| 重放不变式 | `tools/log-probe --check-all <sessions 根>` | **全部 69 份真实日志**上：正文不重复 / 工具配对 / 无空消息 / 轮次一致 / 打包行确实跳过 |
+| 实时 vs 重放 | `dsh-cli --verify-reload` | **同一条会话**两条路径逐块比对一致 |
+
+`log-probe --no-replay` 是给断言做**对照实验**的：不跳过打包行时必须失败。
+**一个永远不会失败的断言等于没有断言。**
+
+另外：不变式要按真实数据的分布来定，不能按「应该怎样」定。
+实测一份 315 次工具调用的日志里稳定地有 **1** 个没有结果的调用，
+所以「工具必须全部配对」是过严的断言，判据得是「孤儿 > 1」。
+
+#### P10 · sdk profile 下工具**真的会执行** —— 「审批策略 ask」是虚的
+
+`sdk` profile 的事件流里 `approval/policy = ask`，但组合里**没有应答者**，
+而上游规定没有应答者时请求以 `unavailable` **失败关闭**。
+
+实测：一条 `session/prompt` 明确要求跑 PowerShell，内核直接执行并返回了结果
+（`isError: false`，内容就是那两条 `.md` 文件名）。也就是说 sdk profile 下
+工具调用不会卡在等审批上 —— 本客户端**不需要**实现审批 UI 才能用。
+
+但要注意这条的**边界**：它说明的是「这条链路能跑通」，不是「审批语义不存在」。
+审批事件（`approval/asked` / `approval/decided`）仍然会写进日志，
+将来要做「让用户看见哪些操作被放行 / 被拒」时从日志里读。
 
 ## 提交规范
 
@@ -564,7 +632,8 @@ SDK 里 152 处引用、0 处定义。
 | 无障碍 | `kanesumi/` ❌ 没有（自绘路线最大缺口）· `uwp/` ✅ 平台提供，图标按钮已补 `AutomationProperties.Name` |
 | `arc-deck-dsh`（协议客户端） | ✅ **已实测**：找到内核 → 起 `dsh --profile sdk` → 握手 → `session/prompt` → 流式事件 → 投影出助手正文（`dsh-cli`，见下） |
 | `arc-deck-dsh` 接进界面 | ❌ **未做**，卡在 P1：UWP 是 AppContainer，起不了内核也读不到包外路径 |
-| `arc-deck-dsh` 会话重载（读回已存会话） | ❌ 未做。落盘格式是 `session.jsonl.zstd`（**zstd**），要一个解压依赖，暂时没引入 |
+| `arc-deck-dsh` 会话重载（读回已存会话） | ✅ **已实测**：69 份真实日志全部通过重放不变式；`dsh-cli --verify-reload` **同一条会话**实时 vs 重放逐块一致（参 P7/P9） |
+| `arc-deck-dsh` 工具卡 / 思考块 | ✅ 已实现（工具卡带标题与结果、思考块默认折叠）。界面侧未接，所以「折叠」这个交互本身**没实测** |
 | `uwp/` 数据 | ⚠️ 全部是示例数据（`Models/Store.cs`、`Store.Tools`），未接协议；协议层已能供数据但**尚未接线** |
 
 ### 还没实测的部分
@@ -584,6 +653,19 @@ SDK 里 152 处引用、0 处定义。
 cargo test
 cargo run --bin arc-deck-demo
 cargo run -p layout-bench --release
+```
+
+```powershell
+# 协议层（arc-deck-dsh）—— 与界面无关，不需要窗口
+# 必须用这个包装脚本：它会在构建失败时炸，而不是拿旧 dll 继续跑（参 U16）
+pwsh -File uwp\tools\sdk\run-cli.ps1 --list                      # 列磁盘上的会话
+pwsh -File uwp\tools\sdk\run-cli.ps1 --load <会话 id>             # 重载一个已存会话
+pwsh -File uwp\tools\sdk\run-cli.ps1 --prompt "…" --verify-reload # 发一条并比对实时/重放
+
+# 重放不变式：对全部真实日志跑一遍（这是最接近回归测试的东西）
+dotnet run --project arc-deck-dsh\tools\log-probe -- --check-all "$env:APPDATA\dsh-desktop\harness\sessions"
+# 对照实验：不跳过打包行时，断言**必须**失败 —— 用它证明断言有牙齿
+dotnet run --project arc-deck-dsh\tools\log-probe -- <日志路径> --check --no-replay
 ```
 
 ```powershell

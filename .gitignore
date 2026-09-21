@@ -52,3 +52,6 @@ desktop.ini
 
 # 提交信息临时文件（写中文正文用，避免 heredoc 在 PowerShell 里的转义问题）
 /.git-commit-msg.tmp
+
+# 提交信息临时文件
+/.commitmsg.tmp
