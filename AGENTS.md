@@ -130,7 +130,7 @@ but you passed deepseek-official.
 | 层 | 工具 | 证明什么 |
 |---|---|---|
 | 解压 | `tools/zstd-probe` | 与 zstd 命令行**逐字节一致**（多帧拼接） |
-| 重放不变式 | `tools/log-probe --check-all <sessions 根>` | **全部 69 份真实日志**上：正文不重复 / 工具配对 / 无空消息 / 轮次一致 / 打包行确实跳过 / 重放后无残留流式段落 |
+| 重放不变式 | `tools/log-probe --check-all <sessions 根>` | **全部真实日志**上：正文不重复 / 工具配对 / 无空消息 / 轮次一致 / 打包行确实跳过 / 重放后无残留流式段落 |
 | 实时 vs 重放 | `dsh-cli --verify-reload` | **同一条会话**两条路径逐块比对一致 |
 
 **一处必须写下来的失败尝试**：`log-probe --no-replay`（展开打包行、并按最朴素
@@ -161,6 +161,76 @@ but you passed deepseek-official.
 但要注意这条的**边界**：它说明的是「这条链路能跑通」，不是「审批语义不存在」。
 审批事件（`approval/asked` / `approval/decided`）仍然会写进日志，
 将来要做「让用户看见哪些操作被放行 / 被拒」时从日志里读。
+
+#### P11 · `follow` 的 opening **就是快照那一帧** —— 之后全是 live
+
+契约来自上游源码（`dsh-api-session-controller/lib/types/history.js`）：
+
+```
+@returns a complete opening snapshot followed by gap-free event frames
+```
+
+发完快照后，服务端把游标设为 `cursor + 1`，之后每帧的 `seq` 严格连续。
+**没有「opening 结束」的标记帧** —— 快照是 opening 的全部。
+
+所以「读到快照为止」是字面意思：折完那一帧就跳出读循环。这条写错过一次，
+代价是一整轮卡死：旧代码收下快照后继续等下一帧（一个不再有人说话的会话当然
+没有下一帧），一路等到 60s 上限，报出来的还是「没给出快照」——
+而线上那一帧 73806 字节的快照早就到了（`probe-harness7.log`）。
+**「收到了却报没收到」比「没收到」难查得多。**
+
+顺带记一条同源的经验：快照与调用方第一次 `PumpAsync` 之间到达的帧不会丢，
+mux 的 channel 是无界的。
+
+#### P12 · WebSocket 分块边界会**撕开多字节字符**
+
+`ClientWebSocket.ReceiveAsync` 给的是一段一段的字节，**不能在每段上各自
+`Encoding.UTF8.GetString`** —— 一个跨边界的汉字会被两边各解出半个，
+变成两个 `U+FFFD`，而且字符串还多出一个字符。必须攒完整条消息再解码一次。
+
+实测抓法不是读代码，是两条路对账（参 P9 的思路）：`--harness-check-all`
+在 71 个会话里报出**唯一**一处不一致 —— 某个 147 块的消息里只有一个思考块
+长度 7799 而重放是 7798：
+
+```
+实时 …帧（Delay → 隐\uFFFD\uFFFD）\nassert!(
+重放 …帧（Delay → 隐藏）\nassert!(r
+```
+
+**影响面比这一处大**：快照动辄几十上百 KB、一定跨分块，而中文字符占 3 字节 ——
+所以中文内容在长消息里会被静默损坏。短会话上没暴露，只是那个边界恰好没落在
+字符中间。这类「静默偶发」只有对账能抓到。
+
+#### P13 · 快照是**一页**，不是全部历史 —— 而且子 agent 的地址形状不一样
+
+两条都是 `--harness-check-all` 在 71 个真实会话上量出来的：
+
+**一页。** 大会话上线上只给最后一页（实测约 2500 条记录 / 2 千多帧），
+`hasMore = true`。拿一页去比整份日志会得到**假不一致** —— 第一版就这么报了
+11 条「消息条数 线上 10 ≠ 重放 136」。真要比得先用 `session/page` 按
+`throughSeq` 往回翻到底。**这件事还没做**，所以检查项现在如实报「只比了一页」
+（10 个），而不是把它算成不一致。
+
+**子 agent 要父地址。** 对子 agent 用 `{kind:'session', sessionId}` 会被内核拒绝：
+`subagent Sessions require their durable parent address`。44 个子 agent 会话
+都在这一条上，长得一模一样 —— 混进「打不开」会把真问题埋掉。
+**父地址的形状尚未实现**，客户端目前是明确跳过它们。
+
+#### P14 · 两份真实日志，内核与我们都打不开（成因未查证）
+
+`--harness-check-all` 的「打不开」桶里有两个，都是内核自己报的损坏：
+
+| 会话 | 内核报的 | 判断 |
+|---|---|---|
+| `session-45cb1b3c…` | `torn JSONL record` | 那是**正在被写**的会话（DSH Desktop 自己那个），下回多半就好 |
+| `session-7d8b4422…` | `seq gap in committed region at line 8881` | 这份确实坏了 |
+
+第二条值得留着：SDK 那条路的 `log-probe --check-all` **也独立判它失败**
+（`轮次计数 7 ≠ 实际最大轮 3`）—— 两份读数都指向它，所以不是本客户端的 bug。
+
+**成因没有查证。** 一个候选是：`HarnessHost.DisposeAsync` 对内核用的是
+`Kill(entireProcessTree: true)`，硬杀一个正在写日志的进程。**没有证据**，
+所以这里只记下候选，不写结论（参 P9 的规矩：论证可以写，要标明还没被证伪过）。
 
 ## 提交规范
 
@@ -641,15 +711,22 @@ SDK 里 152 处引用、0 处定义。
 | 无障碍 | `kanesumi/` ❌ 没有（自绘路线最大缺口）· `uwp/` ✅ 平台提供，图标按钮已补 `AutomationProperties.Name` |
 | `arc-deck-dsh`（协议客户端） | ✅ **已实测**：找到内核 → 起 `dsh --profile sdk` → 握手 → `session/prompt` → 流式事件 → 投影出助手正文（`dsh-cli`，见下） |
 | `arc-deck-dsh` 接进界面 | ❌ **未做**，卡在 P1：UWP 是 AppContainer，起不了内核也读不到包外路径 |
-| `arc-deck-dsh` 会话重载（读回已存会话） | ✅ **已实测**：70 份真实日志全部通过重放不变式；`dsh-cli --verify-reload` **同一条会话**实时 vs 重放逐块一致（参 P7/P9） |
-| `arc-deck-dsh` 会话列表（列磁盘上的会话） | ✅ **已实测**：`--list` 列出 70 个会话并标出属于当前工作区的那些。只读会话头、**不解压全文**；所以列表上拿不到标题（真标题要重载才知道，见 `DshSessionReader.Enumerate` 的注释） |
+| `arc-deck-dsh` 会话重载（读回已存会话） | ✅ **已实测**：真实日志全部通过重放不变式（**现有 71 份里有 1 份失败** —— 那份日志确实坏了，两份独立读数都指向它，见 P14）；`dsh-cli --verify-reload` **同一条会话**实时 vs 重放逐块一致（参 P7/P9） |
+| `arc-deck-dsh` 会话列表（列磁盘上的会话） | ✅ **已实测**：`--list` 列出会话并标出属于当前工作区的那些。只读会话头、**不解压全文**；所以列表上拿不到标题（真标题要重载才知道，见 `DshSessionReader.Enumerate` 的注释） |
 | `arc-deck-dsh` 工具卡 / 思考块 | ✅ 已实现（工具卡带标题与结果、思考块默认折叠）。界面侧未接，所以「折叠」这个交互本身**没实测** |
+| `arc-deck-dsh` **harness web / Remote 层**（会话列表、打开、对账） | ✅ **已实测**：71 个会话里 **15 个逐块对账一致、0 不一致**（`--harness-check-all`）；`--harness-verify` 单条会话「两条路一致」。路上修掉两处：`follow` 打开挂死（P11）与 WS 分块撕开汉字（P12） |
+| `arc-deck-dsh` harness **发消息**（`--harness-prompt`） | ❌ **未实测**：代码写了，**一次都没跑过** —— 跑它会往**真实会话**里发一条消息，所以没有擅自跑（铁律 2） |
+| `arc-deck-dsh` harness **往回翻页**（`session/page`） | ❌ **未做**：所以大会话只对得上最新一页（10 个会话属于这一类，见 P13） |
+| `arc-deck-dsh` harness **子 agent 会话** | ❌ **未实现**：它们的地址要带父地址，客户端现在明确跳过（44 个，见 P13） |
 | `uwp/` 数据 | ⚠️ 全部是示例数据（`Models/Store.cs`、`Store.Tools`），未接协议；协议层已能供数据但**尚未接线** |
 
 ### 还没实测的部分
 
 上表标 ⚠️ 的项，含义是**代码写完了、能编译，但没有任何一次运行证明它行为正确**。
 目前没有 ⚠️ 的未测项。
+
+标 ❌ 的项是**没做**，不是没测 —— 别把两者混起来：❌ 的那些在代码里也存在缺口
+（`--harness-prompt` 是唯一「代码在、却没跑过」的：跑它会往真实会话里发消息）。
 
 原先挂着的「对话页**发送消息**后列表摘要与轮数是否更新」也**已经测过**：
 当初判定它「卡在 U13」是因为相信了那条错误的量测 —— 输入框一直在窗口内，
@@ -668,9 +745,16 @@ cargo run -p layout-bench --release
 ```powershell
 # 协议层（arc-deck-dsh）—— 与界面无关，不需要窗口
 # 必须用这个包装脚本：它会在构建失败时炸，而不是拿旧 dll 继续跑（参 U16）
-pwsh -File uwp\tools\sdk\run-cli.ps1 --list                      # 列磁盘上的会话
-pwsh -File uwp\tools\sdk\run-cli.ps1 --load <会话 id>             # 重载一个已存会话
-pwsh -File uwp\tools\sdk\run-cli.ps1 --prompt "…" --verify-reload # 发一条并比对实时/重放
+powershell -File uwp\tools\sdk\run-cli.ps1 --list                      # 列磁盘上的会话
+powershell -File uwp\tools\sdk\run-cli.ps1 --load <会话 id>             # 重载一个已存会话
+powershell -File uwp\tools\sdk\run-cli.ps1 --prompt "…" --verify-reload # 发一条并比对实时/重放
+
+# harness web 那条路（Remote 层，完整功能面）。它会起一个 `dsh web` 子进程 ——
+# **需要写 <DSH_HOME>\profiles\web**（内核每次启动都重写 cordis.yml），
+# 所以文件沙箱是 workspace-write 时它会以 EPERM 失败在 prepareProfile 上。
+powershell -File uwp\tools\sdk\run-cli.ps1 --harness-list                # 内核给的会话列表
+powershell -File uwp\tools\sdk\run-cli.ps1 --harness-verify <会话 id>     # follow 投影 vs 日志重放
+powershell -File uwp\tools\sdk\run-cli.ps1 --harness-check-all           # 全部会话逐一对账
 
 # 重放不变式：对全部真实日志跑一遍（这是最接近回归测试的东西）
 dotnet run --project arc-deck-dsh\tools\log-probe -- --check-all "$env:APPDATA\dsh-desktop\harness\sessions"
@@ -678,6 +762,9 @@ dotnet run --project arc-deck-dsh\tools\log-probe -- --check-all "$env:APPDATA\d
 # **注意：在当前的日志上它观察不到差异**（参 P9），`log-probe` 会自己把这件事报出来。
 dotnet run --project arc-deck-dsh\tools\log-probe -- <日志路径> --check --no-replay
 ```
+
+> 上面写的是 `powershell`（5.1）而不是 `pwsh`：这台机器上**没有装 PowerShell 7**，
+> `pwsh` 会报 `CommandNotFoundException`。`run-cli.ps1` 两个版本都能跑。
 
 ```powershell
 # UWP 版本（必须 MSBuild + Release）
