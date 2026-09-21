@@ -641,7 +641,8 @@ SDK 里 152 处引用、0 处定义。
 | 无障碍 | `kanesumi/` ❌ 没有（自绘路线最大缺口）· `uwp/` ✅ 平台提供，图标按钮已补 `AutomationProperties.Name` |
 | `arc-deck-dsh`（协议客户端） | ✅ **已实测**：找到内核 → 起 `dsh --profile sdk` → 握手 → `session/prompt` → 流式事件 → 投影出助手正文（`dsh-cli`，见下） |
 | `arc-deck-dsh` 接进界面 | ❌ **未做**，卡在 P1：UWP 是 AppContainer，起不了内核也读不到包外路径 |
-| `arc-deck-dsh` 会话重载（读回已存会话） | ✅ **已实测**：69 份真实日志全部通过重放不变式；`dsh-cli --verify-reload` **同一条会话**实时 vs 重放逐块一致（参 P7/P9） |
+| `arc-deck-dsh` 会话重载（读回已存会话） | ✅ **已实测**：70 份真实日志全部通过重放不变式；`dsh-cli --verify-reload` **同一条会话**实时 vs 重放逐块一致（参 P7/P9） |
+| `arc-deck-dsh` 会话列表（列磁盘上的会话） | ✅ **已实测**：`--list` 列出 70 个会话并标出属于当前工作区的那些。只读会话头、**不解压全文**；所以列表上拿不到标题（真标题要重载才知道，见 `DshSessionReader.Enumerate` 的注释） |
 | `arc-deck-dsh` 工具卡 / 思考块 | ✅ 已实现（工具卡带标题与结果、思考块默认折叠）。界面侧未接，所以「折叠」这个交互本身**没实测** |
 | `uwp/` 数据 | ⚠️ 全部是示例数据（`Models/Store.cs`、`Store.Tools`），未接协议；协议层已能供数据但**尚未接线** |
 
