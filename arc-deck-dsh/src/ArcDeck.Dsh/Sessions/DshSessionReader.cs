@@ -142,15 +142,16 @@ public static class DshSessionReader
     public static DshLoadedSession Load(string path) => Load(path, replay: true);
 
     /// <summary>
-    /// 对照实验用的入口：**不跳过打包行**地重放。
+    /// 对照实验用的入口：**按「最朴素的做法」重放** —— 消费增量、并把打包行
+    /// 展开成增量（也就是两处判断都不做）。
     ///
-    /// 存在的唯一理由是让不变式断言有牙齿 —— 一个永远不会失败的断言等于没有断言。
-    /// 拿它跑同一份日志，"正文重复" 那条必须报错；不报错就说明断言写错了地方。
+    /// 存在的唯一理由是让不变式断言有牙齿。用 <c>--no-replay</c> 跑同一份日志，
+    /// 「正文重复」那条**必须**报错；不报错就说明断言写错了地方。
     /// 产品路径永远走 <see cref="Load(string)"/>。
     /// </summary>
-    public static DshLoadedSession LoadRaw(string path) => Load(path, replay: false);
+    public static DshLoadedSession LoadRaw(string path) => Load(path, replay: false, expandPacked: true);
 
-    public static DshLoadedSession Load(string path, bool replay)
+    public static DshLoadedSession Load(string path, bool replay, bool expandPacked = false)
     {
         var text = DshSessionLogFile.ReadText(path);
         var split = DshSessionLogFile.SplitLines(text);
@@ -172,7 +173,7 @@ public static class DshSessionReader
         // 日志里的正文增量大多被压成打包行（实测：一份 5127 行的日志里，
         // 真正的 text-delta 只有 1 帧，其余正文全在 text-chunks 里），
         // 展开它们会与权威全文重复。重放只认权威全文。
-        var projection = new DshProjection(view, replay);
+        var projection = new DshProjection(view, replay, expandPacked);
         var packedRows = 0;
 
         var events = 0;

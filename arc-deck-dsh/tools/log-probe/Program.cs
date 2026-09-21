@@ -252,6 +252,37 @@ static int CheckOne(string path, bool quiet = false, string? label = null, bool 
         problems.Add("日志里有打包行，但重放一行都没跳过");
     }
 
+    // ⑥ 对照实验**必须真的产生差异**。
+    //
+    //    这一条是后补的，因为原先「--no-replay 必须让断言失败」的说法
+    //    **没有被验证过**：实测下来即使展开打包行、并让增量进投影，
+    //    流式段落也会被权威全文照常替换掉，两边**完全一样** ——
+    //    也就是说那个开关当时什么都没证明。与其在文档里写一句漂亮话，
+    //    不如在这里把真实差异量出来：帧数与正文块数只要有一条不同，
+    //    就说明这道判断确实在起作用。
+    var name0 = label ?? Path.GetFileName(Path.GetDirectoryName(path)) ?? path;
+    if (hasPacked && !quiet)
+    {
+        var naive = DshSessionReader.LoadRaw(path);
+        var textBlocks = CountTextBlocks(view);
+        var naiveTextBlocks = CountTextBlocks(naive.View);
+        var differs = naive.EventCount != loaded.EventCount || textBlocks != naiveTextBlocks;
+
+        Console.WriteLine(differs
+            ? $"  ✓ 对照实验确有差异：帧 {loaded.EventCount} vs {naive.EventCount} · " +
+              $"正文块 {textBlocks} vs {naiveTextBlocks}"
+            : $"  ! {name0}：对照实验**没有**差异（帧与正文块都一样）—— " +
+              "那道跳过判断在当前数据上观察不到效果，别据此说它被验证过");
+    }
+
+    // ⑦ 重放之后不该残留「流式中」的段落 —— 那是实时才有的状态，
+    //    出现在重放结果里意味着权威全文没有到位（或者替换逻辑漏了）。
+    var streaming = CountStreaming(view);
+    if (streaming > 0)
+    {
+        problems.Add($"重放后仍有 {streaming} 个流式段落未定稿");
+    }
+
     var name = label ?? Path.GetFileName(Path.GetDirectoryName(path)) ?? path;
 
     if (problems.Count == 0)
@@ -277,6 +308,34 @@ static bool FileHasPackedRows(string path)
     return text.Contains("\"type\":\"text-chunks\"", StringComparison.Ordinal)
            || text.Contains("\"type\":\"reasoning-chunks\"", StringComparison.Ordinal)
            || text.Contains("\"type\":\"tool-call-chunks\"", StringComparison.Ordinal);
+}
+
+/// <summary>视图里的正文块总数 —— 对照实验用它比较两条路径。</summary>
+static int CountTextBlocks(DshSessionView view)
+{
+    var n = 0;
+    foreach (var message in view.Messages)
+    {
+        foreach (var block in message.Blocks)
+        {
+            if (block.Kind == DshBlockKind.Text) n++;
+        }
+    }
+    return n;
+}
+
+/// <summary>视图里的流式段落残留数 —— 正常重放之后应当是 0。</summary>
+static int CountStreaming(DshSessionView view)
+{
+    var n = 0;
+    foreach (var message in view.Messages)
+    {
+        foreach (var block in message.Blocks)
+        {
+            if (block.IsStreaming) n++;
+        }
+    }
+    return n;
 }
 
 /// <summary>

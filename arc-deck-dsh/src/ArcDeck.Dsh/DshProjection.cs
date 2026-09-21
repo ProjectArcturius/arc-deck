@@ -39,6 +39,7 @@ public sealed class DshProjection
     private const int MaxRecordedEvents = 200;
 
     private readonly bool _replay;
+    private readonly bool _expandPacked;
     private readonly DshSessionView _view;
     private readonly Dictionary<string, DshMessageView> _messagesById = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DshBlock> _toolsByCallId = new(StringComparer.Ordinal);
@@ -58,10 +59,20 @@ public sealed class DshProjection
     /// true = 从落盘日志重放：**忽略流式增量**，只认权威全文与工具事件。
     /// 日志里那些增量要么被压缩成打包行、要么与权威全文重复，都不该再叠一遍。
     /// </param>
-    public DshProjection(DshSessionView view, bool replay = false)
+    /// <param name="expandPacked">
+    /// **只为对照实验存在**：把打包行当成增量展开（也就是「不做那道判断」）。
+    ///
+    /// 它证明的是断言有牙齿 —— `log-probe --no-replay` 用它跑同一份日志，
+    /// 「正文重复」那条必须报错。**产品路径永远传 false。**
+    /// 这一条是补上的：原先 `--no-replay` 只是改了 <c>replay</c>，
+    /// 而打包行的跳过与 `replay` 无关，于是那个「对照实验」根本不会失败，
+    /// 等于在文档里写了一句没被验证的话。
+    /// </param>
+    public DshProjection(DshSessionView view, bool replay = false, bool expandPacked = false)
     {
         _view = view;
         _replay = replay;
+        _expandPacked = expandPacked;
     }
 
     public DshSessionView View => _view;
@@ -139,9 +150,16 @@ public sealed class DshProjection
 
             // 打包行是日志的**压缩编码**，不是事件：它们的内容与权威全文重复，
             // 重放时展开会写两遍。这里显式跳过，而不是靠「不认识」兜底。
+            //
+            // `expandPacked` 只为对照实验打开（参构造函数的说明）：
+            // 那时候故意把它们当增量喂进去，好让「正文重复」那条断言报错。
             case DshEventType.PackedTextChunks:
             case DshEventType.PackedReasoningChunks:
             case DshEventType.PackedToolCallChunks:
+                if (_expandPacked && evt.Type == DshEventType.PackedTextChunks)
+                {
+                    change |= ExpandPackedText(evt);
+                }
                 break;
 
             default:
@@ -157,6 +175,32 @@ public sealed class DshProjection
         _streaming = null;
         _streamingParagraph = null;
         _streamingKey = null;
+    }
+
+    /// <summary>
+    /// 把一行 <c>text-chunks</c> 按它编码的方式展开回增量，再当增量喂进去。
+    ///
+    /// 只给对照实验用。展开规则按上游编码器的形状写（<c>texts</c> 数组 +
+    /// <c>index</c>/<c>turn</c>/<c>step</c>），不做校验 —— 因为它的用途是
+    /// 「故意做错一次，看断言会不会响」。
+    /// </summary>
+    private Change ExpandPackedText(DshSessionEvent evt)
+    {
+        if (evt.Data is not JsonObject data) return Change.None;
+        if (data["texts"] is not JsonArray texts) return Change.None;
+
+        var turn = data["turn"]?.GetValue<int>() ?? Math.Max(_currentTurn, 0);
+        var step = data["step"]?.GetValue<int>() ?? 0;
+        var index = data["index"]?.GetValue<int>() ?? 0;
+
+        var change = Change.None;
+        foreach (var item in texts)
+        {
+            var text = item?.GetValue<string>();
+            if (string.IsNullOrEmpty(text)) continue;
+            change |= AppendStreamedText(turn, step, index, text!, evt.Time);
+        }
+        return change;
     }
 
     // ── 自己的消息 ───────────────────────────────────────────────────────
@@ -265,14 +309,23 @@ public sealed class DshProjection
         var step = data["step"]?.GetValue<int>() ?? 0;
         var index = chunk["index"]?.GetValue<int>() ?? 0;
 
-        // 同一步里模型可以同时产出正文块与思考块（index 不同）。不分开会让
-        // 思考的增量混进正文 —— 所以流式段落按 (turn, step, index) 区分。
+        return AppendStreamedText(turn, step, index, delta!, evt.Time);
+    }
+
+    /// <summary>
+    /// 往「正在流的那一段」追加文本，必要时开新的一段。
+    ///
+    /// 流式段落按 **(turn, step, index)** 区分：同一步里模型可以同时产出
+    /// 正文块与思考块（index 不同），不分开会让思考的增量混进正文。
+    /// </summary>
+    private Change AppendStreamedText(int turn, int step, int index, string delta, DateTimeOffset time)
+    {
         var key = $"{turn}:{step}:{index}";
 
         var change = Change.None;
         if (_streaming is null || _streamingKey != key)
         {
-            _streaming = AssistantFor(turn, evt.Time);
+            _streaming = AssistantFor(turn, time);
             _streamingKey = key;
             _streamingParagraph = DshBlock.Paragraph(string.Empty);
             _streamingParagraph.IsStreaming = true;

@@ -55,3 +55,6 @@ desktop.ini
 
 # 提交信息临时文件
 /.commitmsg.tmp
+
+# 提交信息临时文件
+/.commitmsg*.tmp
