@@ -605,10 +605,27 @@ public sealed class HarnessSessionClient : IAsyncDisposable
     /// 返回收到的事件类型直方图 —— 「收到了哪些事件」是排查流式问题的第一手材料，
     /// 而调用方（界面）只关心视图变了没有。
     /// </summary>
+    /// <summary>
+    /// 把 <c>session/follow</c> 后续的 live 帧折叠进视图，直到 <paramref name="until"/> 取消
+    /// 或 <paramref name="stopWhen"/> 说停。
+    ///
+    /// 返回收到的事件类型直方图 —— 「收到了哪些事件」是排查流式问题的第一手材料，
+    /// 而调用方（界面）只关心视图变了没有。
+    ///
+    /// <para>
+    /// **<paramref name="onEvent"/> 只在投影真的变了的时候回调** ——
+    /// `turn/end`、`step/end` 这类事件不改视图，所以**不会**触发它。
+    /// 第一次真发消息时就是栽在这里：想「收到 turn/end 就停」，
+    /// 于是把判断写在 onEvent 里，结果它一次都没被调用，
+    /// 明明直方图里有 `turn/end×1`，循环却等到了超时。
+    /// **要等某个事件，用 <paramref name="stopWhen"/>。**
+    /// </para>
+    /// </summary>
     public async Task<Dictionary<string, int>> PumpAsync(
         HarnessSessionStream session,
         Action<DshProjection.Change, DshSessionEvent>? onEvent = null,
-        CancellationToken until = default)
+        CancellationToken until = default,
+        Func<DshSessionEvent, bool>? stopWhen = null)
     {
         var histogram = new Dictionary<string, int>(StringComparer.Ordinal);
 
@@ -628,12 +645,33 @@ public sealed class HarnessSessionClient : IAsyncDisposable
             if (value is null) continue;
 
             var type = value["type"]?.GetValue<string>();
+
+            // 只认**持久事件**的包装帧 —— `assistant-stream` 之类的进程内帧不折进投影，
+            // 因为投影的输入是持久事件（重放那条路也只认它们）。
             if (type != "event") continue;
 
-            var evt = ToEvent(session.View.SessionId, value);
+            // **实时帧也是 `{ type:'event', event:{…} }` 这个包装**，与快照里的 record
+            // 同形：上游 `SessionFollowFrame = {type:'snapshot',…} | SessionEventEntry`，
+            // 而 README 写着「实时 follow frame 继续携带单个 `event` record」。
+            //
+            // 这里曾经把**包装**直接喂给 `ToEvent` —— 于是每一帧都被读成
+            // `type = "event"`、没有 seq、没有 data。症状极具误导性：
+            // 投影收下了 16 帧却一条消息都没长出来，界面上「发出去以后一直不动」，
+            // 而事件直方图只会打出孤零零一个 `event×16`。
+            // 实测于 A3 第一次真发消息（参 P16）。
+            var payload = value["event"] as JsonObject;
+            if (payload is null) continue; // 契约破了就跳过，不要把包装当事件
+
+            var evt = ToEvent(session.View.SessionId, payload);
             if (evt is null) continue;
 
             histogram[evt.Type] = histogram.GetValueOrDefault(evt.Type) + 1;
+
+            // **先看要不要停，再折进投影。** 反过来的话，`turn/end` 这一帧
+            // 会先被折进投影（无副作用），然后才轮到判断 —— 那是无害的，
+            // 但如果将来某个「停止事件」恰好改投影，顺序反了就会多折一帧。
+            if (stopWhen is not null && stopWhen(evt)) break;
+
             var change = session.Projection.Apply(evt);
             if (change != DshProjection.Change.None) onEvent?.Invoke(change, evt);
         }
@@ -686,6 +724,29 @@ public sealed class HarnessSessionClient : IAsyncDisposable
 
         return (value?["title"]?.GetValue<string>() ?? title, value?["seq"]?.GetValue<long>() ?? -1);
     }
+
+    /// <summary>
+    /// 换这个会话用的模型。
+    ///
+    /// 存在的理由不是功能，是**对照实验**：P3 说模型名不会被提前校验 ——
+    /// 填错时 `prompt` 照收、`turn/start` 照发，错误只在
+    /// `assistant/chunk` 的 `finish.reason.failure` 里。
+    /// 要证明「我们读那个块」这件事有牙齿，就得**真的造一次失败**。
+    /// </summary>
+    public Task SelectModelAsync(
+        string sessionId,
+        string provider,
+        string model,
+        CancellationToken cancellationToken = default)
+        => _rpc.CallAsync("session", "selectModel", new JsonObject
+        {
+            ["request"] = new JsonObject
+            {
+                ["sessionId"] = sessionId,
+                ["provider"] = provider,
+                ["model"] = model,
+            },
+        }, cancellationToken);
 
     /// <summary>取消当前轮次，但**保留**待处理的队列。</summary>
     public Task CancelAsync(string sessionId, CancellationToken cancellationToken = default)
