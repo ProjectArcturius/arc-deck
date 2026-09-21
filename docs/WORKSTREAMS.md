@@ -28,7 +28,7 @@
 
 起点 `main` @ `94af565` → 本机迭代。文件所有权那条规则随分线一起作废
 （没有人跟你抢文件了），但「一处改动一处出处」的原则还在：
-**在 `docs/LINUX_FINDINGS.md` 里改不了的东西，就直接在 `AGENTS.md` 里记。**
+**改了哪一层就在那一层的文档里记，别散在提交信息里。**
 
 ## 工作清单
 
@@ -37,7 +37,7 @@
 | A1 | 修 `session/follow` 的**打开挂死** | `--harness-verify` 不再超时 | ✅ **已实测** |
 | A2 | `follow` 投影 vs **日志重放**对账 | 同一会话两条路逐块一致 | ✅ **已实测** |
 | A2b | `--harness-check-all`（A2 的全部会话版） | 全部会话逐一对账 | ✅ **已实测**：**一致 71 / 73 · 不一致 0** · 往回翻 132 页 |
-| A3 | 发一条消息并消费 live 事件（含 P3 的 `finish.reason.failure`） | `--harness-prompt` 收到 `turn/end` 且有事件直方图 | ❌ **未跑** —— 会往**真实会话**发消息，需要用户指定会话 |
+| A3 | 发一条消息并消费 live 事件（含 P3 的 `finish.reason.failure`） | `--harness-prompt-live` 收到 `turn/end` 且有事件直方图 | ✅ **已实测**：真发 → 收到 `turn/end` → 当轮无失败块。**第一次跑就抓出两个 bug**（实时帧没拆包装、`stopWhen` 缺失，见 P16）；P3 的失败出口用**对照实验**证过（故意用错模型） |
 | A4 | mux 按 `streamId` 分流 | 一条连接上开两条逻辑流，互不串帧 | ✅ **已实测**（`--harness-mux-check`：两条流并发等，各自快照 `header.id` 逐字相符） |
 | A6 | 子 agent 会话（44 个打不开） | 能把它们打开并对账 | ✅ **已实测**：44 个全部打开并对账通过。根因是 `mode` 读错了位置（`projections.values.subagent`，不是列表项顶层） |
 | A7 | Windows 耦合清单（原 B 的残件） | 一处一行，**每行都标「未验证」** | 待做 |
@@ -56,10 +56,13 @@ A1–A4/A6 让**协议层**的话能说圆（能开、能对、能翻页、能�
 
 - **P11** `follow` 的 opening 就是快照那一帧 —— 收下它之后必须跳出循环
 - **P12** WS 分块边界会撕开多字节字符 —— 中文内容在长消息里会被静默损坏
-- **P13** 快照是一页（已实现往回翻）；子 agent 要父地址（未实现）
+- **P13** 快照是一页（往回翻已实现）；子 agent 要**父地址**（已实现，
+  `mode` 在 `projections.values.subagent` 里）
 - **P14** 两份真实日志坏了，报错形状是「seq 倒退 4」—— 像两个写者；成因未证实
 - **P15** `session/follow` **不是只读** —— 它会 promote 冷会话；所以 `--harness-*`
   那几条都会往日志里写，DSH Desktop 开着时别跑
+- **P16** 实时帧也带包装（`{type:'event', event:{…}}`），而 `onEvent` **只在投影
+  变了时才回调** —— 「等 turn/end」得用 `stopWhen`，写在 `onEvent` 里永远不会响
 
 环境上的一条：`dsh web` 需要写 `<DSH_HOME>\profiles\web`，**文件沙箱是
 workspace-write 时它会以 EPERM 死在 `prepareProfile` 上**。

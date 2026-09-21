@@ -291,6 +291,35 @@ DSH Desktop 正在跑时，两个内核会碰同一份 `DSH_HOME`。
 要「只读地」看一眼历史，用 `--load <id>`（那条路直接解 zstd，不经过内核）；
 `--harness-*` 那几条都会起内核、都会 promote。参 P14。
 
+#### P16 · 实时帧也带包装 —— 而且 `onEvent` **只在投影变了时才回调**
+
+两条都是第一次**真发消息**（A3）时当场踩出来的，而它们此前一直在代码里躺着。
+
+**一、实时帧与快照 record **同形**：`{ type:'event', event:{…} }`。**
+`PumpAsync` 曾经把这个**包装**直接喂给 `ToEvent`（它读的是事件本身：
+`type`/`seq`/`time`/`data`），于是每一帧都被读成 `type = "event"`、
+没有 seq、没有 data。症状极具误导性：
+
+```
+投影收下 16 帧，一条消息都没长出来；
+事件直方图只打出孤零零一个 `event×16`
+```
+
+界面上就是「消息发出去了，然后一直不动」。**而这个 bug 之前一直被对账漏过去** ——
+`--harness-check-all` 走的是快照那条路（`ApplyRecord` 读 `entry["event"]`，是对的），
+一次都不经过 `PumpAsync`。**对账绿不等于这条路径绿**：它只覆盖它走的那条路。
+
+**二、`onEvent` 只在投影真的变了的时候回调。**
+`turn/end`、`step/end` 这类事件不改视图，所以**不会**触发它。
+「收到 turn/end 就停」写在 `onEvent` 里就永远不会触发 —— 实测直方图里
+明明有 `turn/end×1`，循环却等到了 3 分钟超时。要等某个事件得用
+`PumpAsync(..., stopWhen:)`，那个谓词每个事件都过。
+
+**三、顺带一条断言纪律**：把模型改回正确值后仍然报「模型失败」，
+因为断言扫的是**整个视图**，而上一轮**故意造的**那个失败还留在历史里。
+**功能是好的，断言读错了范围**（与 U17 同类）。凡是「这一轮」的断言，
+都得先记住发消息前的条数，只看新增的那一段。
+
 ## 提交规范
 
 **Conventional Commits**：`feat:` / `fix:` / `docs:` / `chore:` / `refactor:` /
@@ -775,7 +804,9 @@ SDK 里 152 处引用、0 处定义。
 | `arc-deck-dsh` 工具卡 / 思考块 | ✅ 已实现（工具卡带标题与结果、思考块默认折叠）。界面侧未接，所以「折叠」这个交互本身**没实测** |
 | `arc-deck-dsh` **harness web / Remote 层**（会话列表、打开、翻页、对账） | ✅ **已实测**：**73 个会话里 71 个逐块对账一致、0 不一致**（`--harness-check-all`，往回翻 132 页）；`--harness-verify` 单条会话「两条路一致」。路上修掉三处：`follow` 打开挂死（P11）、WS 分块撕开汉字（P12）、子 agent 地址读错位置（P13） |
 | `arc-deck-dsh` harness **会话列表带真标题** | ✅ **已实测**：标题就在 `projections.values.title`（`--harness-list-raw` 打出原文确认）。**扫磁盘那条路仍然拿不到标题** —— 两条路不要混 |
-| `arc-deck-dsh` harness **发消息**（`--harness-prompt`） | ❌ **未实测**：代码写了，**一次都没跑过** —— 跑它会往**真实会话**里发一条消息，所以没有擅自跑（铁律 2） |
+| `arc-deck-dsh` harness **发消息**（`--harness-prompt-live`） | ✅ **已实测**：真发一条 → `accepted=true` → live 事件 10 种 → 收到 `turn/end` → 这一轮新增 2 条消息、无失败块。**第一次跑就抓出两个 bug**（实时帧没拆包装、`stopWhen` 缺失，见 P16） |
+| `arc-deck-dsh` harness **模型失败的出口**（P3） | ✅ **已实测**（对照实验）：故意把模型填成 provider 名字 → 失败以 `finish.reason.failure` 的原文出现在 `assistant/chunk:finish` 块里，检查抓住了它。**这条断言有牙齿**，不是论证 |
+| `arc-deck-dsh` harness **当轮作用域的断言** | ⚠️ 踩过一次假阳性：断言扫了整个视图，把上一轮**故意造的**失败也算了进来，于是修复后仍报「模型失败」。已改成只看发消息后新增的那一段（参 P16 第三条） |
 | `arc-deck-dsh` harness **往回翻页**（`session/page`） | ✅ **已实测**：`loadAllHistory` 翻到底再按时间顺序折叠；73 个会话全部「历史取全=True」，最多的一个 17 页（参 P13） |
 | `arc-deck-dsh` harness **mux 分流**（一条连接两条流） | ✅ **已实测**（`--harness-mux-check`：两条流并发等，各自快照的 `header.id` 与请求逐字相同）。修前所有流共用一个队列 |
 | `arc-deck-dsh` harness **子 agent 会话** | ✅ **已实测**：44 个子 agent 用**父地址**形状打开并对账通过。`mode` 从 `projections.values.subagent` 读（位置曾经读错，见 P13） |
@@ -786,13 +817,15 @@ SDK 里 152 处引用、0 处定义。
 上表标 ⚠️ 的项，含义是**代码写完了、能编译，但没有任何一次运行证明它行为正确**。
 目前没有 ⚠️ 的未测项。
 
-标 ❌ 的项是**没做**，不是没测 —— 别把两者混起来：❌ 的那些在代码里也存在缺口
-（`--harness-prompt` 是唯一「代码在、却没跑过」的：跑它会往真实会话里发消息）。
+标 ❌ 的项是**没做**，不是没测 —— 别把两者混起来。
 
 原先挂着的「对话页**发送消息**后列表摘要与轮数是否更新」也**已经测过**：
 当初判定它「卡在 U13」是因为相信了那条错误的量测 —— 输入框一直在窗口内，
 发送通路本来就能走。这条记在这里是为了提醒：一个错误的诊断会连带冻住
 别的验证项（参 U13）。
+
+「协议层代码在、一次没跑过」的项现在**清零了** —— `--harness-prompt-live`
+（A3）把它跑掉了，而且是当场抓出两个 bug（见 P16）。
 
 ## 构建
 
@@ -814,8 +847,17 @@ powershell -File uwp\tools\sdk\run-cli.ps1 --prompt "…" --verify-reload # 发�
 # **需要写 <DSH_HOME>\profiles\web**（内核每次启动都重写 cordis.yml），
 # 所以文件沙箱是 workspace-write 时它会以 EPERM 失败在 prepareProfile 上。
 powershell -File uwp\tools\sdk\run-cli.ps1 --harness-list                # 内核给的会话列表
+powershell -File uwp\tools\sdk\run-cli.ps1 --harness-list-raw            # 把「我们解析的那几个位置」打出来
 powershell -File uwp\tools\sdk\run-cli.ps1 --harness-verify <会话 id>     # follow 投影 vs 日志重放
 powershell -File uwp\tools\sdk\run-cli.ps1 --harness-check-all           # 全部会话逐一对账
+powershell -File uwp\tools\sdk\run-cli.ps1 --harness-mux-check           # 一条连接上同时开两条流，看串不串帧
+
+# 真发一条并消费 live 事件（A3）。**注意 `follow` 会 promote 会话**，所以这几条
+# 不只是读；发消息那两条还会真的消耗模型配额，跑之前想清楚。
+powershell -File uwp\tools\sdk\run-cli.ps1 --harness-prompt-live "收到"                          # 自动挑一个空会话
+powershell -File uwp\tools\sdk\run-cli.ps1 --harness-prompt-live "继续" --harness-target <id>     # 指定会话
+powershell -File uwp\tools\sdk\run-cli.ps1 --harness-prompt-live "x" --harness-target <id> `
+    --harness-model deepseek-official/deepseek-official    # 对照实验：故意用错的模型，看 finish 失败块
 
 # 重放不变式：对全部真实日志跑一遍（这是最接近回归测试的东西）
 dotnet run --project arc-deck-dsh\tools\log-probe -- --check-all "$env:APPDATA\dsh-desktop\harness\sessions"

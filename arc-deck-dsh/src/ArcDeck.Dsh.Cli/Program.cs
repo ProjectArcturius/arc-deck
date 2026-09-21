@@ -502,6 +502,17 @@ internal static class Program
             return 1;
         }
 
+        // **往已有会话发消息必须点名。** 不点名时的默认目标是「第一个有内容的会话」，
+        // 那就是用户自己的对话 —— 一条命令就能往别人的对话里插一句，太容易误伤。
+        // 要发就用 `--harness-target <id>`（或 `--harness-verify <id>`）说清是哪一个，
+        // 或者用 `--harness-prompt-live` 走空会话那条路（它自带挑目标的规矩）。
+        if (prompt is not null && targetId is null && verify is null)
+        {
+            Console.WriteLine("✗ 拒绝在不点名的情况下往会话里发消息 —— 那会落在你正在用的对话上。");
+            Console.WriteLine("  请加 --harness-target <会话 id>（或在测试会话上用 --harness-prompt-live）。");
+            return 2;
+        }
+
         Console.WriteLine();
         Console.WriteLine($"打开会话 {target.SessionId}（session/follow）…");
 
