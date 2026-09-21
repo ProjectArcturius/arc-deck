@@ -235,21 +235,52 @@ mux 的 channel 是无界的。
 
 `mode` 不在 `session/list` 给我们的字段里 —— 要实现得先确认那个值从哪来。
 
-#### P14 · 两份真实日志，内核与我们都打不开（成因未查证）
+#### P14 · 两份真实日志坏了 —— 报错形状指向**两个写者**（成因未证实）
 
-`--harness-check-all` 的「打不开」桶里有两个，都是内核自己报的损坏：
+`--harness-check-all` 的「打不开」桶里稳定是两个（跑了六七轮，**没有变多**）：
 
-| 会话 | 内核报的 | 判断 |
-|---|---|---|
-| `session-45cb1b3c…` | `torn JSONL record` | 那是**正在被写**的会话（DSH Desktop 自己那个），下回多半就好 |
-| `session-7d8b4422…` | `seq gap in committed region at line 8881` | 这份确实坏了 |
+| 会话 | 内核报的 |
+|---|---|
+| `session-45cb1b3c…` | 起先是 `torn JSONL record`，后来变成 `seq gap … at line 1686 (expected 32358, got 32354)` |
+| `session-7d8b4422…` | `seq gap in committed region at line 8881 (expected 170089, got 170085)` |
 
-第二条值得留着：SDK 那条路的 `log-probe --check-all` **也独立判它失败**
-（`轮次计数 7 ≠ 实际最大轮 3`）—— 两份读数都指向它，所以不是本客户端的 bug。
+三条观察，都比「坏了」这个结论有用：
 
-**成因没有查证。** 一个候选是：`HarnessHost.DisposeAsync` 对内核用的是
-`Kill(entireProcessTree: true)`，硬杀一个正在写日志的进程。**没有证据**，
-所以这里只记下候选，不写结论（参 P9 的规矩：论证可以写，要标明还没被证伪过）。
+1. **第一个会话的报错会变** —— 因为它是**正在被写**的那个（DSH Desktop 自己那场对话）。
+   每读一次，尾部又长了一点
+2. **两个报错都是「倒退 4」而不是「少了一段」**：`expected 170089, got 170085`
+   说的是下一条记录的 seq 比期望的小 4 —— 那是**回写/重复覆盖**，不是空洞。
+   两个不同会话都恰好差 **4**，这不像随机损坏
+3. **SDK 那条路的 `log-probe --check-all` 也独立判 7d8b4422 失败**（`轮次计数 7 ≠
+   实际最大轮 3`）—— 两份读数都指向它，所以不是本客户端的 bug
+
+**成因没有查证。** 一个能解释 2 的候选是**两个内核同时写同一份日志** ——
+而见 P15：我们的探针**恰好会制造第二个写者**。**这是推测，不是证据**：
+要证实得能按需复现，而按需复现意味着再弄坏一份真实日志，不做。
+
+能做的、代价为零的那件事已经做了：探针现在会**明确警告**
+「follow 会 promote 冷会话，DSH Desktop 正开着时建议先关掉」。
+
+#### P15 · `session/follow` 不是只读 —— 它**激活**会话
+
+上游 `history.js` 的 `follow` 在发完快照后：
+
+```js
+if (address.kind === 'session' && source.source === 'prepared') {
+    const promotion = source.retain();
+    this.promote(promotion);   // "starts ordinary Session activation after snapshot delivery"
+}
+```
+
+也就是说对一个**冷会话**（在磁盘上、进程里没有活动实例）follow 一下，
+这个内核就**接管**它了，之后它会往同一份日志里写。
+
+**这条对工具的性质有影响**：`--harness-check-all` 打开 25 个会话，
+就等于让第二个内核接管 25 个会话 —— 它不是「扫一遍日志」那种只读检查。
+DSH Desktop 正在跑时，两个内核会碰同一份 `DSH_HOME`。
+
+要「只读地」看一眼历史，用 `--load <id>`（那条路直接解 zstd，不经过内核）；
+`--harness-*` 那几条都会起内核、都会 promote。参 P14。
 
 ## 提交规范
 
@@ -736,6 +767,7 @@ SDK 里 152 处引用、0 处定义。
 | `arc-deck-dsh` **harness web / Remote 层**（会话列表、打开、翻页、对账） | ✅ **已实测**：71 个会话里 **25 个逐块对账一致、0 不一致**（`--harness-check-all`，往回翻了 85 页）；`--harness-verify` 单条会话「两条路一致」。路上修掉两处：`follow` 打开挂死（P11）与 WS 分块撕开汉字（P12） |
 | `arc-deck-dsh` harness **发消息**（`--harness-prompt`） | ❌ **未实测**：代码写了，**一次都没跑过** —— 跑它会往**真实会话**里发一条消息，所以没有擅自跑（铁律 2） |
 | `arc-deck-dsh` harness **往回翻页**（`session/page`） | ✅ **已实测**：`loadAllHistory` 翻到底再按时间顺序折叠；25 个会话全部「历史取全=True」，最多的一个 17 页（参 P13） |
+| `arc-deck-dsh` harness **mux 分流**（一条连接两条流） | ✅ **已实测**（`--harness-mux-check`：两条流并发等，各自快照的 `header.id` 与请求逐字相同）。修前所有流共用一个队列 |
 | `arc-deck-dsh` harness **子 agent 会话** | ❌ **未实现**：地址形状已从上游 schema 读出，但差 `mode` 的数据来源；客户端现在明确跳过（44 个，见 P13） |
 | `uwp/` 数据 | ⚠️ 全部是示例数据（`Models/Store.cs`、`Store.Tools`），未接协议；协议层已能供数据但**尚未接线** |
 

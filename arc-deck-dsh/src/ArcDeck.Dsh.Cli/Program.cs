@@ -565,6 +565,27 @@ internal static class Program
     }
 
     /// <summary>
+    /// 打开会话之前必须说清的一件事：**这不是只读操作**。
+    ///
+    /// 上游的 `follow` 在发完快照后，对**冷会话**（`source.source === 'prepared'`）
+    /// 会 `retain()` + `promote()` —— 注释写着「starts ordinary Session activation
+    /// after snapshot delivery」。也就是说 follow 一下，那个会话就被这个内核**接管**了，
+    /// 之后它会往同一份日志里写。
+    ///
+    /// 而 DSH Desktop 很可能正在跑、正握着同一个 `DSH_HOME`。两个内核碰同一份日志
+    /// 会怎样，**没有查证**（参 P14：那两份损坏的报错形状是「seq 倒退 4」，
+    /// 像两个写者，但这是推测不是证据）。可避开的代价几乎为零，所以先避开。
+    /// </summary>
+    private static void WarnActivation()
+    {
+        Console.WriteLine();
+        Console.WriteLine("! 下面会打开会话 —— 而 `session/follow` 对**冷会话**会把它 promote");
+        Console.WriteLine("  （上游 history.js 的 `promote(promotion)`），所以这条命令**不只是读**：");
+        Console.WriteLine("  它会让这个内核接管这些会话并往同一份日志里写。");
+        Console.WriteLine("  DSH Desktop 正开着时，两个内核会碰同一份日志 —— 建议关掉它再跑。");
+    }
+
+    /// <summary>
     /// A4 的验收：同一条 WS 上开**两条**流，看每条是否只收到自己的帧。
     ///
     /// 为什么必须真的开两条：分流这件事在只有一条流时**完全看不出来** ——
@@ -585,6 +606,7 @@ internal static class Program
 
         Console.WriteLine();
         Console.WriteLine("── 筛两个能打开的会话 ────────────────────────");
+        WarnActivation();
 
         var usable = new List<string>();
         foreach (var candidate in candidates)
@@ -647,6 +669,7 @@ internal static class Program
 
         Console.WriteLine();
         Console.WriteLine($"── 对 {targets.Count} 个会话逐一对账 ──────────────");
+        WarnActivation();
 
         var equivalent = 0;
         var mismatched = new List<string>();
