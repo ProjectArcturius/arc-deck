@@ -468,7 +468,8 @@ internal static class Program
         HarnessSessionStream session;
         try
         {
-            session = await client.OpenAsync(target.SessionId, withAssistantStream: false);
+            session = await client.OpenAsync(target.SessionId, withAssistantStream: false,
+                loadAllHistory: true);
         }
         catch (HarnessRpcException ex)
         {
@@ -480,9 +481,9 @@ internal static class Program
             return 1;
         }
 
-        Console.WriteLine($"✓ 快照 {session.SnapshotRecords} 条记录 · " +
+        Console.WriteLine($"✓ 快照 {session.PagesLoaded} 页 / {session.SnapshotRecords} 条记录 · " +
                           $"折叠 {session.FoldedEvents} 帧事件 · 跳过 {session.SkippedPackedRows} 行打包 · " +
-                          $"cursor={session.Cursor} · hasMore={session.HasMore}");
+                          $"cursor={session.Cursor} · 历史取全={session.HistoryComplete}");
 
         if (prompt is not null)
         {
@@ -519,12 +520,11 @@ internal static class Program
         {
             Console.WriteLine();
             Console.WriteLine("── Remote 层 vs 日志重放 ─────────────────────");
-            // 快照是**一页**。`hasMore=true` 时下面这个比对只覆盖最新的一页，
-            // 而重放覆盖整份日志 —— 那必然报一堆假差异，所以先说清楚。
+            // 现在已经往回翻到底（`loadAllHistory: true`），所以正常情况下这条不会出现。
             if (session.HasMore)
             {
-                Console.WriteLine("! 这个会话还有更早的历史（hasMore=true）：快照只是最新一页，");
-                Console.WriteLine("  下面的比对**只覆盖这一页**，差异里可能全是「没翻到的部分」。");
+                Console.WriteLine("! 这个会话还有更早的历史没取回（翻页被上限截住了）：");
+                Console.WriteLine("  下面的比对**只覆盖已取回的部分**，差异里可能全是「没翻到的部分」。");
             }
 
             var logInfo = DshSessionReader.Enumerate(install.HarnessHome)
@@ -589,6 +589,8 @@ internal static class Program
         var paginated = 0;
         var subagents = 0;
         var noLog = 0;
+        var totalPages = 0;
+        var maxPages = 0;
 
         foreach (var s in targets)
         {
@@ -610,7 +612,7 @@ internal static class Program
             try
             {
                 stream = await client.OpenAsync(s.SessionId, withAssistantStream: false,
-                    openBudget: TimeSpan.FromSeconds(20));
+                    openBudget: TimeSpan.FromSeconds(60), loadAllHistory: true);
             }
             catch (HarnessRpcException ex)
             {
@@ -619,11 +621,10 @@ internal static class Program
                 continue;
             }
 
-            // **`hasMore` 必须看。** 快照是**一页**，不是全部历史：大会话上
-            // 线上只有最后一页（实测约 2500 条记录），拿它去和整份日志比，
-            // 得到的是「消息条数 线上 10 ≠ 重放 136」这种**假不一致**。
-            // 要比就得先用 `session/page` 往回翻到底 —— 那件事还没做，
-            // 所以这里如实报「只比了一页」，而不是把它算成不一致。
+            // **`hasMore` 必须看。** 快照是**一页**，不是全部历史。现在
+            // `loadAllHistory: true` 会往回翻到底，所以正常情况下这里不该再为 true；
+            // 真为 true 只可能是翻页被上限截住了 —— 那时如实报「只比了一页」，
+            // 而不是把它算成不一致（参 P13）。
             if (stream.HasMore)
             {
                 paginated++;
@@ -642,6 +643,12 @@ internal static class Program
 
             var replayed = DshSessionReader.Load(logInfo.Path);
             var comparison = DshSessionReader.Compare(stream.View, replayed.View);
+
+            // 把「翻了多少页」也累计起来 —— 否则「一致 25」看不出往回翻到底有没有真的发生：
+            // 若 hasMore 恰好全是 false，25 这个数字与「只翻了 1 页」是一模一样的。
+            totalPages += stream.PagesLoaded;
+            maxPages = Math.Max(maxPages, stream.PagesLoaded);
+
             if (comparison.IsEquivalent)
             {
                 equivalent++;
@@ -662,6 +669,8 @@ internal static class Program
         Console.WriteLine($"一致 {equivalent} · 不一致 {mismatched.Count} · " +
                           $"只比了一页 {paginated} · 子 agent 跳过 {subagents} · " +
                           $"打不开 {unopenable.Count} · 磁盘上没有日志 {noLog}");
+        Console.WriteLine($"往回翻了 {totalPages} 页（最多的一个会话 {maxPages} 页）" +
+                          $"—— 1 页意味着那条会话的快照本来就装下了全部历史");
 
         if (mismatched.Count > 0)
         {

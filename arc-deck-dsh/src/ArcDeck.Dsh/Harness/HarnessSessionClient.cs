@@ -55,11 +55,41 @@ public sealed class HarnessSessionStream
     public required int SkippedPackedRows { get; init; }
 
     /// <summary>
+    /// 这一页**上面还叠了几页更早的**（<c>session/page</c> 往回翻了几次）。
+    ///
+    /// 打开一个会话时是 1（只有 follow 给的那一页快照）。要让界面上的
+    /// 历史完整，或者要让「线上 vs 日志」的对账覆盖整份日志，就得往回翻。
+    /// </summary>
+    public required int PagesLoaded { get; init; }
+
+    /// <summary>
+    /// 更早的历史**是否已经全部取回**。
+    ///
+    /// 与 <see cref="HasMore"/> 的分工：那个说的是「内核那边还有」，
+    /// 这个说的是「我们已经拿到了」。只有这个为 true，与整份日志的对账才成立 ——
+    /// 否则比的是**一页对全部**，差异里全是「没翻到的部分」（参 P13）。
+    /// </summary>
+    public required bool HistoryComplete { get; init; }
+
+    /// <summary>
     /// 快照里每种 record 的条数（<c>event assistant/chunk</c> 之类）。
     ///
     /// 与日志侧的计数**不是同一个东西**，见 <c>RecordTypeKey</c> 的说明。
     /// </summary>
     public required Dictionary<string, int> SnapshotRecordTypes { get; init; }
+}
+
+/// <summary>一次 <c>session/page</c> 的结果：一页更早的历史 + 还有没有更早的。</summary>
+public sealed class HarnessHistoryPage
+{
+    public HarnessHistoryPage(JsonArray records, bool hasMore)
+    {
+        Records = records;
+        HasMore = hasMore;
+    }
+
+    public JsonArray Records { get; }
+    public bool HasMore { get; }
 }
 
 /// <summary>
@@ -134,12 +164,18 @@ public sealed class HarnessSessionClient : IAsyncDisposable
     /// <paramref name="withAssistantStream"/> 打开的话，内核还会推**进程内**的
     /// 助手流帧（没落盘的增量）。界面上要流式观感就得开；
     /// 做「实时 vs 重放」对账时要**关**，否则重放侧没有对应物。
+    ///
+    /// <paramref name="loadAllHistory"/> 打开的话，会用 <c>session/page</c>
+    /// **往回翻到底**再折叠 —— 快照只是**一页**（实测约 2500 条记录），
+    /// 拿一页去和整份日志比会得到一堆假差异（参 P13）。
+    /// 界面上的「往上滚加载更早」要的也是这件事。
     /// </summary>
     public async Task<HarnessSessionStream> OpenAsync(
         string sessionId,
         bool withAssistantStream = true,
         int maxMessages = 200,
         TimeSpan? openBudget = null,
+        bool loadAllHistory = false,
         CancellationToken cancellationToken = default)
     {
         var request = new JsonObject
@@ -162,6 +198,7 @@ public sealed class HarnessSessionClient : IAsyncDisposable
         var foldedEvents = 0;
         var skippedPackedRows = 0;
         var recordTypes = new Dictionary<string, int>(StringComparer.Ordinal);
+        var pages = new List<JsonArray>();
         var sawSnapshot = false;
 
         // 读到快照为止。快照之后是 live 帧，那时才把流交还给调用方 ——
@@ -234,7 +271,42 @@ public sealed class HarnessSessionClient : IAsyncDisposable
             hasMore = value["hasMore"]?.GetValue<bool>() ?? false;
             view.Workspace = value["header"]?["cwd"]?.GetValue<string>() ?? string.Empty;
 
-            foreach (var record in value["records"] as JsonArray ?? new JsonArray())
+            // 快照这一页**先不折叠** —— 往回翻的页比它更早，而折叠必须按时间顺序。
+            // 所以先把「从新到旧」的页攒起来，翻完再反着折一遍。
+            pages.Add(value["records"] as JsonArray ?? new JsonArray());
+
+            // 打开到此为止 —— 理由见上面那段注释里的上游契约。
+            break;
+        }
+
+        // ── 往回翻到底（可选）────────────────────────────────────────
+        //
+        // 下一页的游标来自**本页第一条记录的 seq 减一**：上游的 `paginate`
+        // 返回 `events.slice(cut, end)`，而 `cut` 就是第一条事件的 seq
+        // （日志的 seq 是稠密零基前缀，所以位置就是 seq）。
+        // 而且 `session/page` 会校验 `sourceLog[throughSeq].seq === throughSeq` ——
+        // 差一个就报 `session log does not contain through seq N`，所以
+        // **不能拿「上一页的最小 seq」直接当游标，必须减一**。
+        while (loadAllHistory && hasMore && pages.Count < MaxHistoryPages)
+        {
+            var oldest = FirstRecordSeq(pages[^1]);
+            if (oldest <= 0) break; // 到头了（throughSeq=-1 会回一个空页，见上游）
+
+            var page = await PageAsync(sessionId, oldest - 1, maxMessages, cancellationToken).ConfigureAwait(false);
+            var pageOldest = FirstRecordSeq(page.Records);
+
+            // **无进展就停。** 页取空了、或者游标没往回走，都说明再翻也不会前进 ——
+            // 没有这道闸，一个不按契约递减的游标会让这里死循环。
+            if (page.Records.Count == 0 || pageOldest < 0 || pageOldest >= oldest) break;
+
+            pages.Add(page.Records);
+            hasMore = page.HasMore;
+        }
+
+        // 从**最旧**的一页开始折，才是时间顺序。
+        for (var i = pages.Count - 1; i >= 0; i--)
+        {
+            foreach (var record in pages[i])
             {
                 switch (ApplyRecord(projection, sessionId, record))
                 {
@@ -245,9 +317,6 @@ public sealed class HarnessSessionClient : IAsyncDisposable
                 if (key is not null) recordTypes[key] = recordTypes.GetValueOrDefault(key) + 1;
                 snapshotRecords++;
             }
-
-            // 打开到此为止 —— 理由见上面那段注释里的上游契约。
-            break;
         }
 
         return new HarnessSessionStream
@@ -261,8 +330,69 @@ public sealed class HarnessSessionClient : IAsyncDisposable
             FoldedEvents = foldedEvents,
             SkippedPackedRows = skippedPackedRows,
             SnapshotRecordTypes = recordTypes,
+            PagesLoaded = pages.Count,
+            HistoryComplete = !hasMore,
         };
     }
+
+    /// <summary>
+    /// 往回翻的上限。上游的会话再长也就是几十轮对话，这个数字不该被撞到 ——
+    /// 它存在的意义是「万一游标逻辑写错，是停住而不是转到天亮」。
+    /// </summary>
+    private const int MaxHistoryPages = 500;
+
+    /// <summary>一页记录里**第一条**的 seq（两种 record 都用 <c>event</c> 这个键）。</summary>
+    private static long FirstRecordSeq(JsonArray records)
+    {
+        if (records.Count == 0) return -1;
+        return records[0]?["event"]?["seq"]?.GetValue<long>() ?? -1;
+    }
+
+    /// <summary>
+    /// 读一页更早的历史（<c>session/page</c>）。
+    ///
+    /// 契约来自上游源码（`types/history.js` 的 `page`）：请求是
+    /// <c>{ address, throughSeq, beforeSeq?, maxMessages? }</c>，
+    /// 返回 <c>{ records, hasMore }</c>。
+    ///
+    /// **`throughSeq` 是必需字段**，且 <c>-1</c> 表示「到头了」（返回空页，
+    /// 不是「整条日志」）—— 这一点反直觉，所以往回翻的循环靠
+    /// <see cref="FirstRecordSeq"/> 递减而不是靠 -1。
+    /// </summary>
+    public async Task<HarnessHistoryPage> PageAsync(
+        string sessionId,
+        long throughSeq,
+        int maxMessages = 200,
+        CancellationToken cancellationToken = default)
+    {
+        var request = new JsonObject
+        {
+            ["address"] = SessionAddress(sessionId),
+            ["throughSeq"] = throughSeq,
+            ["maxMessages"] = maxMessages,
+        };
+
+        // 形参名是 `request`（`page(request, signal)`）—— 与 `session/list` 的
+        // `_request` 不是一个名字。Gateway 按描述符逐字校验字段集合。
+        var value = await _rpc.CallAsync("session", "page",
+            new JsonObject { ["request"] = request }, cancellationToken).ConfigureAwait(false);
+
+        return new HarnessHistoryPage(
+            value?["records"] as JsonArray ?? new JsonArray(),
+            value?["hasMore"]?.GetValue<bool>() ?? false);
+    }
+
+    /// <summary>
+    /// 一个**普通会话**的地址。
+    ///
+    /// 子 agent 是**另一种形状**：<c>{ kind:'subagent', parentSessionId,
+    /// childSessionId, mode:'one-shot'|'continuable' }</c>（从上游
+    /// `typert.host.js` 的 page 参数 schema 读出）。拿普通会话地址去开子 agent
+    /// 会被拒为「subagent Sessions require their durable parent address」——
+    /// 那 44 个会话就是卡在这里，**尚未实现**（参 P13）。
+    /// </summary>
+    private static JsonObject SessionAddress(string sessionId) =>
+        new() { ["kind"] = "session", ["sessionId"] = sessionId };
 
     /// <summary>
     /// 把 <c>session/follow</c> 后续的 live 帧折叠进视图，直到 <paramref name="until"/> 取消。
