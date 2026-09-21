@@ -42,10 +42,16 @@ internal static class Program
         var harnessCheckAll = args.Contains("--harness-check-all");
         var harnessMuxCheck = args.Contains("--harness-mux-check");
         var harnessRaw = args.Contains("--harness-list-raw");
+        var harnessPromptLive = ArgValue(args, "--harness-prompt-live");
+        var harnessTarget = ArgValue(args, "--harness-target");
+        var harnessModel = ArgValue(args, "--harness-model");
 
-        if (harnessList || harnessCheckAll || harnessMuxCheck || harnessRaw || harnessVerify is not null || harnessPrompt is not null)
+        if (harnessList || harnessCheckAll || harnessMuxCheck || harnessRaw
+            || harnessVerify is not null || harnessPrompt is not null || harnessPromptLive is not null)
         {
-            return await RunHarnessModeAsync(harnessList || harnessRaw, harnessCheckAll, harnessMuxCheck, harnessRaw, harnessVerify, harnessPrompt, cwd).ConfigureAwait(false);
+            return await RunHarnessModeAsync(harnessList || harnessRaw, harnessCheckAll, muxCheck: harnessMuxCheck,
+                listRaw: harnessRaw, verify: harnessVerify, prompt: harnessPrompt, promptLive: harnessPromptLive,
+                targetId: harnessTarget, modelSpec: harnessModel, cwd).ConfigureAwait(false);
         }
 
         Console.WriteLine("Arc Deck · DSH 协议客户端");
@@ -403,7 +409,8 @@ internal static class Program
     /// 与 SDK 那条路的区别见 <see cref="ArcDeck.Dsh.Harness.HarnessHost"/> 的类注释：
     /// 这条路能列会话、读历史、改名、取消，因为它是 WebView 客户端用的那套 API。
     /// </summary>
-    private static async Task<int> RunHarnessModeAsync(bool list, bool checkAll, bool muxCheck, bool listRaw, string? verify, string? prompt, string cwd)
+    private static async Task<int> RunHarnessModeAsync(bool list, bool checkAll, bool muxCheck, bool listRaw,
+        string? verify, string? prompt, string? promptLive, string? targetId, string? modelSpec, string cwd)
     {
         Console.WriteLine("Arc Deck · harness Remote 层（完整功能面）");
         Console.WriteLine("──────────────────────────────────────────────");
@@ -438,7 +445,7 @@ internal static class Program
                           $"（{sessions.Count(s => s.Running)} 个运行中，" +
                           $"{sessions.Count(s => s.IsSubagent)} 个子 agent）");
 
-        if (list || (!checkAll && !muxCheck && verify is null && prompt is null))
+        if (list || (!checkAll && !muxCheck && promptLive is null && verify is null && prompt is null))
         {
             Console.WriteLine();
             foreach (var s in sessions.Where(s => !s.IsSubagent).Take(15))
@@ -476,6 +483,11 @@ internal static class Program
         if (muxCheck)
         {
             return await MuxCheckAsync(client, sessions).ConfigureAwait(false);
+        }
+
+        if (promptLive is not null)
+        {
+            return await PromptLiveAsync(client, sessions, promptLive, targetId, modelSpec, cwd).ConfigureAwait(false);
         }
 
         // 目标会话：显式给的那个，否则第一个「有内容、不是子 agent」的。
@@ -605,6 +617,171 @@ internal static class Program
         Console.WriteLine("  （上游 history.js 的 `promote(promotion)`），所以这条命令**不只是读**：");
         Console.WriteLine("  它会让这个内核接管这些会话并往同一份日志里写。");
         Console.WriteLine("  DSH Desktop 正开着时，两个内核会碰同一份日志 —— 建议关掉它再跑。");
+    }
+
+    /// <summary>
+    /// A3 的验收：**真发一条**，把 live 事件消费到 `turn/end`。
+    ///
+    /// 目标从哪来：`--harness-target <id>` 给了就用它；没给就挑一个 **`blank: true`
+    /// 的空会话**（优先当前工作区的）。
+    /// 为什么不默认挑「第一个有内容的会话」（那是 `--harness-prompt` 的做法）：
+    /// 那等于往用户自己的对话里插一句，不合适。
+    ///
+    /// 这条路径此前**一次都没跑过**（状态表里是 ❌ 而不是 ⚠️）：代码在，
+    /// 但没有任何一次运行证明它行为正确。第一次跑还被中途打断了 ——
+    /// 那次证明的是**发得出去**（`--load` 读回来看到内核回了「收到。」），
+    /// 而「客户端能不能把 live 流消费到 `turn/end`」是另一半，见下。
+    ///
+    /// 断言三条，第三条才是重点：
+    /// <list type="number">
+    ///   <item>回执 <c>accepted=true</c>（只表示**入队**，不表示回答完成）</item>
+    ///   <item>live 流上等到 <c>turn/end</c></item>
+    ///   <item>**没有** <c>assistant/chunk:finish</c> 那个失败块 —— 参 P3：
+    ///     模型失败不会抛到协议层，只从这个块里出来，界面不读它就是「发出去什么都没有」</item>
+    /// </list>
+    /// </summary>
+    private static async Task<int> PromptLiveAsync(
+        HarnessSessionClient client,
+        IReadOnlyList<ArcDeck.Dsh.Harness.HarnessSessionInfo> sessions,
+        string text,
+        string? targetId,
+        string? modelSpec,
+        string cwd)
+    {
+        ArcDeck.Dsh.Harness.HarnessSessionInfo? target;
+
+        if (targetId is not null)
+        {
+            target = sessions.FirstOrDefault(s => s.SessionId == targetId);
+            if (target is null)
+            {
+                Console.WriteLine($"✗ 列表里没有 {targetId}");
+                return 2;
+            }
+        }
+        else
+        {
+            var blanks = sessions.Where(s => !s.IsSubagent && s.Blank).ToList();
+
+            // 优先挑当前工作区的空会话 —— 会话的 cwd 决定工具在哪个目录里跑，
+            // 而「随便挑一个空会话」可能落在别的项目上。
+            target = blanks.FirstOrDefault(s =>
+                         string.Equals(s.WorkingDirectory, cwd, StringComparison.OrdinalIgnoreCase))
+                     ?? blanks.FirstOrDefault();
+
+            if (target is null)
+            {
+                Console.WriteLine("✗ 没有空会话（blank=true 的一个都没有）—— " +
+                                  "要么用 --harness-target 指定一个，要么先建一个");
+                return 2;
+            }
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("── 真发一条并消费 live 事件 ──────────────────");
+        Console.WriteLine($"  目标 {target.SessionId}" +
+                          (target.Blank ? "（空会话）" : $"（已有内容：{target.Title ?? "无标题"}）"));
+        Console.WriteLine($"  cwd  {target.WorkingDirectory ?? "(未知)"}" +
+                          (string.Equals(target.WorkingDirectory, cwd, StringComparison.OrdinalIgnoreCase)
+                              ? "  ← 就是当前工作区" : "  ← **不是**当前工作区"));
+        Console.WriteLine($"  输入 {text}");
+
+        // **对照实验用的开关。** P3：模型名不会被提前校验，填错时 prompt 照收、
+        // turn/start 照发，错误只在 finish.reason.failure 里。
+        // 要证明「我们读那个块」这句话有牙齿，就得真的造一次失败 ——
+        // 否则第三条断言在顺风路上永远是绿的，等于没验（参 P9 的规矩）。
+        if (modelSpec is not null)
+        {
+            var parts = modelSpec.Split('/', 2);
+            if (parts.Length != 2)
+            {
+                Console.WriteLine($"✗ --harness-model 要写成 provider/model，收到 {modelSpec}");
+                return 2;
+            }
+            await client.SelectModelAsync(target.SessionId, parts[0], parts[1]);
+            Console.WriteLine($"  已把这个会话的模型改成 {parts[0]} / {parts[1]}（对照实验用）");
+        }
+
+        // `withAssistantStream: true` —— 这是**界面**真正用的模式（要流式观感），
+        // 也是唯一会走 `replay: false` 那条折叠路径的模式。
+        var session = await client.OpenAsync(target.Address,
+            withAssistantStream: true, loadAllHistory: true);
+        Console.WriteLine($"  打开：{session.PagesLoaded} 页 / {session.SnapshotRecords} 条记录" +
+                          $"，发之前 {session.View.Messages.Count} 条消息");
+
+        // **记下发消息之前的消息条数。** 断言必须只看**这一轮**新增的部分 ——
+        // 否则会把历史里的失败块也算进来：实测把模型改回正确值之后仍然报
+        // 「模型失败」，因为上一轮那个**故意造的**失败还留在历史里
+        // （与 U17 同类：断言读错了范围，功能是好的）。
+        var messagesBefore = session.View.Messages.Count;
+
+        var accepted = await client.PromptAsync(target.SessionId, text);
+        Console.WriteLine($"  prompt 回执 accepted={accepted}（只表示入队）");
+        if (!accepted) return 1;
+
+        Console.WriteLine("  等 live 事件（最多 3 分钟，收到 turn/end 就停）…");
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+        var sawTurnEnd = false;
+        var deltas = 0;
+
+        // **停止条件走 `stopWhen`，不写在 onEvent 里** —— `turn/end` 不改投影，
+        // 所以 onEvent 根本不会被它触发（这个坑第一次跑就踩了：直方图里有
+        // `turn/end×1`，而「收到 turn/end 就停」写在 onEvent 里，于是等到超时）。
+        var histogram = await client.PumpAsync(session, (change, evt) =>
+        {
+            if (evt.Type == DshEventType.AssistantChunk) deltas++;
+
+            if (change.HasFlag(DshProjection.Change.Structure))
+            {
+                Console.WriteLine($"    [结构] {evt.Type} → {session.View.Messages.Count} 条消息");
+            }
+        }, cts.Token, stopWhen: evt =>
+        {
+            if (evt.Type != DshEventType.TurnEnd) return false;
+
+            // 收到了就停。不停的话这条流会一直等下去，
+            // 而「等一个不会来的东西」正是 P11 那个卡点的形状。
+            sawTurnEnd = true;
+            cts.Cancel();
+            return true;
+        });
+
+        Console.WriteLine("  live 事件：" + (histogram.Count == 0
+            ? "（一个都没收到）"
+            : string.Join(", ", histogram.OrderByDescending(kv => kv.Value)
+                .Select(kv => $"{kv.Key}×{kv.Value}"))));
+        Console.WriteLine($"  其中 assistant/chunk（流式增量）{deltas} 帧");
+
+        Console.WriteLine();
+        Console.WriteLine("── 这一轮新增的部分 ──────────────────────────");
+        var fresh = session.View.Messages.Skip(messagesBefore).ToList();
+        foreach (var message in fresh) PrintMessage(message);
+
+        // P3 的出口：模型失败只从这里出来。**只看这一轮**（见上面的 messagesBefore）。
+        var failures = fresh
+            .SelectMany(m => m.Blocks)
+            .Where(b => b.SourceType == "assistant/chunk:finish")
+            .Select(b => b.Text)
+            .ToList();
+
+        Console.WriteLine();
+        if (failures.Count > 0)
+        {
+            Console.WriteLine("✗ 模型失败（P3 的那个出口：`finish.reason.failure`）——");
+            foreach (var f in failures) Console.WriteLine("    " + f);
+            return 1;
+        }
+        if (!sawTurnEnd)
+        {
+            Console.WriteLine($"✗ 没等到 turn/end（live 事件 {histogram.Count} 种）—— " +
+                              "回答可能没跑完，也可能这条流不会结束");
+            return 1;
+        }
+
+        Console.WriteLine($"✓ 收到 turn/end，没有失败块；这一轮新增 {fresh.Count} 条消息" +
+                          $"（助手侧 {fresh.Count(m => !m.IsMine)} 条）");
+        return 0;
     }
 
     /// <summary>
