@@ -1,5 +1,6 @@
 using System.Text;
 using ArcDeck.Dsh;
+using ArcDeck.Dsh.Harness;
 using ArcDeck.Dsh.Runtime;
 using ArcDeck.Dsh.Sessions;
 using ArcDeck.Dsh.View;
@@ -33,6 +34,17 @@ internal static class Program
         var list = args.Contains("--list");
         var load = ArgValue(args, "--load");
         var verifyReload = args.Contains("--verify-reload");
+
+        // ── harness web 这条路（完整功能面）────────────────────────────
+        var harnessList = args.Contains("--harness-list");
+        var harnessVerify = ArgValue(args, "--harness-verify");
+        var harnessPrompt = ArgValue(args, "--harness-prompt");
+        var harnessCheckAll = args.Contains("--harness-check-all");
+
+        if (harnessList || harnessCheckAll || harnessVerify is not null || harnessPrompt is not null)
+        {
+            return await RunHarnessModeAsync(harnessList, harnessCheckAll, harnessVerify, harnessPrompt, cwd).ConfigureAwait(false);
+        }
 
         Console.WriteLine("Arc Deck · DSH 协议客户端");
         Console.WriteLine("──────────────────────────────────────────────");
@@ -381,6 +393,319 @@ internal static class Program
         {
             Console.WriteLine($"  … 另有 {tools - MaxToolCards} 个工具调用（界面里是可展开的卡片）");
         }
+    }
+
+    /// <summary>
+    /// harness web 这条路 —— 起内核、登录、用 **Remote 层**（完整功能面）。
+    ///
+    /// 与 SDK 那条路的区别见 <see cref="ArcDeck.Dsh.Harness.HarnessHost"/> 的类注释：
+    /// 这条路能列会话、读历史、改名、取消，因为它是 WebView 客户端用的那套 API。
+    /// </summary>
+    private static async Task<int> RunHarnessModeAsync(bool list, bool checkAll, string? verify, string? prompt, string cwd)
+    {
+        Console.WriteLine("Arc Deck · harness Remote 层（完整功能面）");
+        Console.WriteLine("──────────────────────────────────────────────");
+
+        var install = HarnessLocator.Locate();
+        if (install is null)
+        {
+            Console.WriteLine("✗ 找不到能跑 `dsh web` 的安装（要求 web profile 已装）。");
+            Console.WriteLine("  找过：ARC_DECK_DSH_ROOT、%LOCALAPPDATA%\\Programs\\DSH Desktop、");
+            Console.WriteLine("        %ProgramFiles%\\DSH Desktop；profile 要落在 <DSH_HOME>\\profiles\\web。");
+            return 2;
+        }
+
+        Console.WriteLine("✓ 找到安装:");
+        Console.WriteLine("  " + install);
+        Console.WriteLine();
+        Console.WriteLine("启动 harness web（--no-open，不会去拉起默认浏览器）…");
+
+        var started = DateTimeOffset.Now;
+        await using var host = await HarnessHost.StartAsync(install, diagnostic: m => Console.WriteLine("  " + m));
+        if (host is null)
+        {
+            Console.WriteLine("✗ 内核没起来或没登录成功");
+            return 2;
+        }
+
+        Console.WriteLine($"✓ 已登录（{DateTimeOffset.Now - started:hh\\:mm\\:ss\\.fff}）");
+        await using var client = await HarnessSessionClient.ConnectAsync(host);
+
+        var sessions = await client.ListSessionsAsync();
+        Console.WriteLine($"✓ session/list：{sessions.Count} 个会话" +
+                          $"（{sessions.Count(s => s.Running)} 个运行中，" +
+                          $"{sessions.Count(s => s.IsSubagent)} 个子 agent）");
+
+        if (list || (!checkAll && verify is null && prompt is null))
+        {
+            Console.WriteLine();
+            foreach (var s in sessions.Where(s => !s.IsSubagent).Take(15))
+            {
+                Console.WriteLine($"  {(s.Running ? "▶" : " ")} {s.SessionId}  {s.UpdatedAt:MM-dd HH:mm}  {s.Subtitle}");
+            }
+            return 0;
+        }
+
+        if (checkAll)
+        {
+            return await CheckAllHarnessSessionsAsync(client, install, sessions).ConfigureAwait(false);
+        }
+
+        // 目标会话：显式给的那个，否则第一个「有内容、不是子 agent」的。
+        var target = verify is not null
+            ? sessions.FirstOrDefault(s => s.SessionId == verify)
+            : sessions.FirstOrDefault(s => !s.IsSubagent && !s.Blank);
+
+        if (target is null)
+        {
+            Console.WriteLine($"✗ 没有可用会话{(verify is not null ? $"（找不到 {verify}）" : "")}");
+            return 1;
+        }
+
+        Console.WriteLine();
+        Console.WriteLine($"打开会话 {target.SessionId}（session/follow）…");
+
+        HarnessSessionStream session;
+        try
+        {
+            session = await client.OpenAsync(target.SessionId, withAssistantStream: false);
+        }
+        catch (HarnessRpcException ex)
+        {
+            // **这条错误要原样给人看。** 实测内核会报
+            // 「corrupt Zstandard session log: complete frame contains a torn JSONL record」
+            // —— 那是一个正在被写的大会话，重试或换一个会话就好。
+            // 界面上必须显示成「这个会话现在打不开」，而不是空白页。
+            Console.WriteLine($"✗ 打不开：{ex.Message}");
+            return 1;
+        }
+
+        Console.WriteLine($"✓ 快照 {session.SnapshotRecords} 条记录 · " +
+                          $"折叠 {session.FoldedEvents} 帧事件 · 跳过 {session.SkippedPackedRows} 行打包 · " +
+                          $"cursor={session.Cursor} · hasMore={session.HasMore}");
+
+        if (prompt is not null)
+        {
+            var accepted = await client.PromptAsync(target.SessionId, prompt);
+            Console.WriteLine($"→ prompt 回执 accepted={accepted}（只是入队）");
+            Console.WriteLine("等 live 事件（最多 60s，收到 turn/end 就停）…");
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            var histogram = await client.PumpAsync(session, (change, evt) =>
+            {
+                if (change.HasFlag(DshProjection.Change.Structure))
+                    Console.WriteLine($"  [结构] {evt.Type} → {session.View.Messages.Count} 条消息");
+            }, cts.Token);
+
+            Console.WriteLine("live 事件：" + (histogram.Count == 0
+                ? "（一个都没收到）"
+                : string.Join(", ", histogram.Select(kv => $"{kv.Key}×{kv.Value}"))));
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("── follow 出来的投影 ──────────────────────────");
+        Console.WriteLine($"会话投影：{session.View.Title}（{session.View.Subtitle}）");
+        Console.WriteLine($"模型：{session.View.ModelLabel ?? "（未见 request/header）"}");
+        Console.WriteLine("──────────────────────────────────────────────");
+        PrintMessage(session.View);
+
+        // ── 对账：Remote 层喂来的事件 vs 磁盘上的事实 ──────────────────
+        //
+        // 这是 web 这条路**唯一**能证明「线上拿到的和存下来的一致」的手段，
+        // 与 SDK 那条路的 `--verify-reload` 是同一个思路，但更硬：
+        // 它对的是**两个不同的数据来源**（内核 API 与日志文件），
+        // 而 SDK 那条对的是同一条会话的两个时刻。
+        if (verify is not null)
+        {
+            Console.WriteLine();
+            Console.WriteLine("── Remote 层 vs 日志重放 ─────────────────────");
+            // 快照是**一页**。`hasMore=true` 时下面这个比对只覆盖最新的一页，
+            // 而重放覆盖整份日志 —— 那必然报一堆假差异，所以先说清楚。
+            if (session.HasMore)
+            {
+                Console.WriteLine("! 这个会话还有更早的历史（hasMore=true）：快照只是最新一页，");
+                Console.WriteLine("  下面的比对**只覆盖这一页**，差异里可能全是「没翻到的部分」。");
+            }
+
+            var logInfo = DshSessionReader.Enumerate(install.HarnessHome)
+                .FirstOrDefault(s => s.SessionId == target.SessionId);
+
+            if (logInfo is null)
+            {
+                Console.WriteLine($"! 磁盘上找不到这个会话的日志 —— 只能验证到这一步");
+                return 0;
+            }
+
+            var replayed = DshSessionReader.Load(logInfo.Path);
+            var comparison = DshSessionReader.Compare(session.View, replayed.View);
+            Console.WriteLine($"重放：{replayed.EventCount} 帧事件 · 跳过 {replayed.PackedRowCount} 行打包 · " +
+                              $"{replayed.View.Messages.Count} 条消息");
+
+            // 两边的「跳过打包」计数**不可直接相减**：日志侧数的是文件里的行，
+            // 线上侧数的是内核重新打包后的记录。把线上侧的构成打出来，
+            // 差值才有得看 —— 实测同一会话是 4（线上）对 10（日志）。
+            Console.WriteLine("线上快照的记录构成：" + string.Join("、",
+                session.SnapshotRecordTypes.OrderByDescending(kv => kv.Value)
+                    .Select(kv => $"{kv.Key}×{kv.Value}")));
+
+            foreach (var line in comparison.Differences) Console.WriteLine("  " + line);
+            Console.WriteLine(comparison.IsEquivalent
+                ? "✓ 两条路一致"
+                : "✗ 两条路不一致（上面是差异）");
+            return comparison.IsEquivalent ? 0 : 1;
+        }
+
+        return 0;
+    }
+
+    /// <summary>
+    /// 对**每一个**真实会话跑一遍「follow 出来的投影 vs 日志重放」。
+    ///
+    /// 这是 web 这条路最接近回归测试的东西，也正是 SDK 那条路 `--check-all` 的对应物。
+    /// 为什么不能只验一个：卡住的那个 bug（`follow` 收下快照却没跳出循环）**只在一个
+    /// 不再有人说话的会话上显形** —— 每个已落盘的会话都是这种会话，所以拿一个验过
+    /// 已经说明了很多；但「很多」不等于「全部」，而这台机器上有 71 份日志，
+    /// 跑完的代价只有几分钟。
+    ///
+    /// 已知的**不是缺陷**的失败也要分开报：正在被写的会话可能落着半行
+    /// （参 P7），内核会以 `corrupt Zstandard session log` 拒开。那类失败要计进
+    /// 「打不开」而不是「不一致」—— 混在一起会让「不一致 = 0」这句话没有意义。
+    /// </summary>
+    private static async Task<int> CheckAllHarnessSessionsAsync(
+        HarnessSessionClient client,
+        ArcDeck.Dsh.Harness.HarnessInstall install,
+        IReadOnlyList<ArcDeck.Dsh.Harness.HarnessSessionInfo> sessions)
+    {
+        // 子 agent 会话与空会话没有可看的正文，但它们**照样要能打开** ——
+        // 所以不排除，只是不指望它们有内容。
+        var targets = sessions.ToList();
+
+        Console.WriteLine();
+        Console.WriteLine($"── 对 {targets.Count} 个会话逐一对账 ──────────────");
+
+        var equivalent = 0;
+        var mismatched = new List<string>();
+        var unopenable = new List<string>();
+        var paginated = 0;
+        var subagents = 0;
+        var noLog = 0;
+
+        foreach (var s in targets)
+        {
+            // **子 agent 会话要单独算。** 它们的地址不是 `{kind:'session', sessionId}` ——
+            // 内核明确拒绝：「subagent Sessions require their durable parent address」。
+            // 拿错的地址去试，会得到 44 条一模一样的「打不开」，把真正的问题埋掉。
+            // 这是**我们没实现**的能力（父地址形状尚未处理），不是会话坏了 ——
+            // 所以不试、也不计进失败（参铁律 2：不假装做了）。
+            if (s.IsSubagent)
+            {
+                subagents++;
+                Console.Write("s");
+                continue;
+            }
+
+            // 每个会话一个**独立的**短上限：这个循环里出现的挂死是我们要抓的
+            // 那类 bug 本身，不该让一个坏会话把整轮拖成几分钟。
+            HarnessSessionStream stream;
+            try
+            {
+                stream = await client.OpenAsync(s.SessionId, withAssistantStream: false,
+                    openBudget: TimeSpan.FromSeconds(20));
+            }
+            catch (HarnessRpcException ex)
+            {
+                unopenable.Add($"{s.SessionId}  [{ex.Code}] {FirstLine(ex.Message)}");
+                Console.Write("✗");
+                continue;
+            }
+
+            // **`hasMore` 必须看。** 快照是**一页**，不是全部历史：大会话上
+            // 线上只有最后一页（实测约 2500 条记录），拿它去和整份日志比，
+            // 得到的是「消息条数 线上 10 ≠ 重放 136」这种**假不一致**。
+            // 要比就得先用 `session/page` 往回翻到底 —— 那件事还没做，
+            // 所以这里如实报「只比了一页」，而不是把它算成不一致。
+            if (stream.HasMore)
+            {
+                paginated++;
+                Console.Write("…");
+                continue;
+            }
+
+            var logInfo = DshSessionReader.Enumerate(install.HarnessHome)
+                .FirstOrDefault(x => x.SessionId == s.SessionId);
+            if (logInfo is null)
+            {
+                noLog++;
+                Console.Write("?");
+                continue;
+            }
+
+            var replayed = DshSessionReader.Load(logInfo.Path);
+            var comparison = DshSessionReader.Compare(stream.View, replayed.View);
+            if (comparison.IsEquivalent)
+            {
+                equivalent++;
+                Console.Write("·");
+            }
+            else
+            {
+                mismatched.Add($"{s.SessionId}（线上 {stream.SnapshotRecords} 条记录 / " +
+                               $"{stream.View.Messages.Count} 条消息，重放 {replayed.EventCount} 帧 / " +
+                               $"{replayed.View.Messages.Count} 条消息）\n      " +
+                               string.Join("\n      ", comparison.Differences.Take(5)));
+                Console.Write("✗");
+            }
+        }
+
+        Console.WriteLine();
+        Console.WriteLine();
+        Console.WriteLine($"一致 {equivalent} · 不一致 {mismatched.Count} · " +
+                          $"只比了一页 {paginated} · 子 agent 跳过 {subagents} · " +
+                          $"打不开 {unopenable.Count} · 磁盘上没有日志 {noLog}");
+
+        if (mismatched.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("── 不一致的会话 ──────────────────────────────");
+            foreach (var line in mismatched) Console.WriteLine("  " + line);
+        }
+
+        if (unopenable.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("── 打不开的会话（内核自己报的日志损坏）─────────");
+            foreach (var line in unopenable) Console.WriteLine("  " + line);
+        }
+
+        if (subagents > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine($"  （另有 {subagents} 个子 agent 会话未尝试：它们的地址要带父地址，" +
+                              "客户端还没实现 —— 这是缺的功能，不是会话的问题）");
+        }
+
+        // 只要有一条**内容不一致**就不算通过。「打不开」同样让命令失败 ——
+        // 但它在上面被单独列出来了，读的人能分清是哪一种。
+        if (mismatched.Count == 0 && unopenable.Count == 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("✓ 全部会话：线上投影与日志重放一致");
+            return 0;
+        }
+
+        return 1;
+    }
+
+    private static string FirstLine(string s)
+    {
+        var i = s.IndexOf('\n');
+        return i < 0 ? s : s[..i] + "…";
+    }
+
+    /// <summary>把一个会话的全部消息打出来（CLI 侧的统一打印，实时与重放共用）。</summary>
+    private static void PrintMessage(DshSessionView view)
+    {
+        foreach (var message in view.Messages) PrintMessage(message);
     }
 
     private static int TotalText(DshSessionView view)

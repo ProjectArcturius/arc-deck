@@ -29,6 +29,8 @@ AppPackages/
 /probe-load*.log
 /probe-check*.log
 /probe-verify*.log
+# harness web 那条路的探针输出（换票、follow、Remote 层各方法）
+/probe-harness*.log
 /demo-out.log
 /demo-err.log
 
