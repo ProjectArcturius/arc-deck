@@ -11,20 +11,81 @@ public sealed record HarnessSessionInfo(
     bool Blank,
     string? WorkingDirectory,
     string? ParentSessionId,
-    bool IsSubagent)
+    bool IsSubagent,
+    /// <summary>
+    /// 子 agent 的调度方式（<c>one-shot</c> / <c>continuable</c>）。
+    ///
+    /// **这是子 agent 地址的必需字段**，来自列表项里那个顶层 <c>subagent</c> 对象：
+    /// <c>SessionAddress</c> 原先只会发普通会话的形状，于是 44 个子 agent 一律被拒为
+    /// 「subagent Sessions require their durable parent address」（参 P13）。
+    /// </summary>
+    string? SubagentMode = null,
+    /// <summary>子 agent 自己的名字（<c>subagent.label</c>）—— 列表上比 cwd 有用。</summary>
+    string? SubagentLabel = null,
+    /// <summary>
+    /// 会话标题，来自 <c>projections.values.title</c>。
+    ///
+    /// 注意这与 SDK 那条路的结论**不一样**：`AGENTS.md` 里写着「列表上拿不到标题，
+    /// 真标题要重载才知道」—— 那说的是**扫磁盘**（`DshSessionReader.Enumerate` 只读会话头）。
+    /// 而内核给的列表**带标题**，所以 harness 那条路的列表可以有真标题。
+    /// </summary>
+    string? Title = null,
+    /// <summary>
+    /// 列表项**原样**保留一份。
+    ///
+    /// 不是懒：协议没有版本协商（P2），而我们已经因为「schema 里有、实际却不发」
+    /// 猜错过一次（`subagent.mode` 就在这一类）。留着原文，下次再对不上时
+    /// 不用再写一个探针去把同一份 JSON 捞回来。
+    /// </summary>
+    JsonObject? Raw = null)
 {
-    /// <summary>列表上显示的那行副标题。真实标题在 <c>session/title</c> 事件里，要打开才知道。</summary>
+    /// <summary>这条路打开这个会话时要用的地址（普通会话与子 agent 是两种形状）。</summary>
+    public HarnessAddress Address => new(SessionId, ParentSessionId, SubagentMode);
+
+    /// <summary>列表上显示的那行副标题。</summary>
     public string Subtitle
     {
         get
         {
             var parts = new List<string>();
-            if (WorkingDirectory is { Length: > 0 }) parts.Add(WorkingDirectory);
+            if (Title is { Length: > 0 }) parts.Add(Title);
+            if (SubagentLabel is { Length: > 0 }) parts.Add($"「{SubagentLabel}」");
+            if (WorkingDirectory is { Length: > 0 } && Title is not { Length: > 0 }) parts.Add(WorkingDirectory);
             if (IsSubagent) parts.Add("子 agent");
             if (Running) parts.Add("运行中");
             return string.Join(" · ", parts);
         }
     }
+}
+
+/// <summary>
+/// 一个会话的**地址** —— 普通会话与子 agent 是两种形状。
+///
+/// 从上游 `typert.host.js` 的 schema 读出：
+/// <code>
+/// { kind:'session',   sessionId }
+/// { kind:'subagent',  parentSessionId, childSessionId, mode:'one-shot'|'continuable' }
+/// </code>
+/// 两种形状**不通用**：用普通地址开子 agent 会被拒为
+/// 「subagent Sessions require their durable parent address」。参 P13。
+/// </summary>
+public sealed record HarnessAddress(string SessionId, string? ParentSessionId = null, string? SubagentMode = null)
+{
+    /// <summary>子 agent 地址要四样齐全，缺一样就只能按普通会话发（然后被内核拒）。</summary>
+    public bool IsSubagent =>
+        !string.IsNullOrEmpty(ParentSessionId) && !string.IsNullOrEmpty(SubagentMode);
+
+    public static HarnessAddress OfSession(string sessionId) => new(sessionId);
+
+    public JsonObject ToJson() => IsSubagent
+        ? new JsonObject
+        {
+            ["kind"] = "subagent",
+            ["parentSessionId"] = ParentSessionId,
+            ["childSessionId"] = SessionId,
+            ["mode"] = SubagentMode,
+        }
+        : new JsonObject { ["kind"] = "session", ["sessionId"] = SessionId };
 }
 
 /// <summary>一次 follow 打开的结果：快照 + 一条可以继续读的流。</summary>
@@ -145,6 +206,18 @@ public sealed class HarnessSessionClient : IAsyncDisposable
             var id = o["sessionId"]?.GetValue<string>();
             if (string.IsNullOrEmpty(id)) continue;
 
+            var values = o["projections"]?["values"];
+
+            // 子 agent 描述符在 **projections.values.subagent** 里，形状 `{ mode, label?, seq }`。
+            //
+            // 这一处曾经读错**位置**：上游 schema 打印出来的缩进让人以为它是列表项的
+            // 顶层字段（`items[].subagent`），于是 `o["subagent"]` 永远是 null、
+            // 44 个子 agent 继续用普通地址去开、继续被拒。
+            // **原文才是事实**：`--harness-list-raw` 打出来一看，
+            // 连一个空会话的 values 里都有 `"subagent": null`。
+            // 所以这里先读 values，再退回顶层（两种情况都容错）。
+            var subagent = (values?["subagent"] as JsonObject) ?? (o["subagent"] as JsonObject);
+
             result.Add(new HarnessSessionInfo(
                 SessionId: id!,
                 UpdatedAt: FromMs(o["updatedAt"]?.GetValue<long>() ?? 0),
@@ -152,7 +225,15 @@ public sealed class HarnessSessionClient : IAsyncDisposable
                 Blank: o["blank"]?.GetValue<bool>() ?? false,
                 WorkingDirectory: o["cwd"]?.GetValue<string>(),
                 ParentSessionId: o["parentSessionId"]?.GetValue<string>(),
-                IsSubagent: o["origin"]?.GetValue<string>() == "subagent"));
+                IsSubagent: o["origin"]?.GetValue<string>() == "subagent",
+                // 子 agent 描述符是**列表项里一个顶层对象**（不是 projections 里的），
+                // 形状：{ mode, label?, seq }。mode 是打开它时地址的必需字段。
+                SubagentMode: subagent?["mode"]?.GetValue<string>(),
+                SubagentLabel: subagent?["label"]?.GetValue<string>(),
+                // 标题在 projections.values.title —— 内核**顺手就给**了，
+                // 不用为了拿标题去重载每一个会话。
+                Title: values?["title"]?.GetValue<string>(),
+                Raw: o));
         }
 
         return result;
@@ -171,16 +252,18 @@ public sealed class HarnessSessionClient : IAsyncDisposable
     /// 界面上的「往上滚加载更早」要的也是这件事。
     /// </summary>
     public async Task<HarnessSessionStream> OpenAsync(
-        string sessionId,
+        HarnessAddress address,
         bool withAssistantStream = true,
         int maxMessages = 200,
         TimeSpan? openBudget = null,
         bool loadAllHistory = false,
         CancellationToken cancellationToken = default)
     {
+        var sessionId = address.SessionId;
+
         // 与 CheckStreamRoutingAsync 共用同一份请求构造 —— 两处各写一遍的话，
         // 「探针验过的东西」与「产品真正发的请求」就有分叉的余地。
-        var request = FollowRequest(sessionId, withAssistantStream, maxMessages);
+        var request = FollowRequest(address, withAssistantStream, maxMessages);
 
         // `follow(request, signal)` → wire 字段是 `request`。
         var stream = await _mux.OpenAsync("session/follow",
@@ -289,7 +372,7 @@ public sealed class HarnessSessionClient : IAsyncDisposable
             var oldest = FirstRecordSeq(pages[^1]);
             if (oldest <= 0) break; // 到头了（throughSeq=-1 会回一个空页，见上游）
 
-            var page = await PageAsync(sessionId, oldest - 1, maxMessages, cancellationToken).ConfigureAwait(false);
+            var page = await PageAsync(address, oldest - 1, maxMessages, cancellationToken).ConfigureAwait(false);
             var pageOldest = FirstRecordSeq(page.Records);
 
             // **无进展就停。** 页取空了、或者游标没往回走，都说明再翻也不会前进 ——
@@ -357,14 +440,14 @@ public sealed class HarnessSessionClient : IAsyncDisposable
     /// <see cref="FirstRecordSeq"/> 递减而不是靠 -1。
     /// </summary>
     public async Task<HarnessHistoryPage> PageAsync(
-        string sessionId,
+        HarnessAddress address,
         long throughSeq,
         int maxMessages = 200,
         CancellationToken cancellationToken = default)
     {
         var request = new JsonObject
         {
-            ["address"] = SessionAddress(sessionId),
+            ["address"] = address.ToJson(),
             ["throughSeq"] = throughSeq,
             ["maxMessages"] = maxMessages,
         };
@@ -389,11 +472,12 @@ public sealed class HarnessSessionClient : IAsyncDisposable
     /// 所以先筛一遍，并把每一步的结果都报出来。
     /// </summary>
     public async Task<HarnessSnapshotProbe> ProbeSnapshotAsync(
-        string sessionId,
+        HarnessAddress address,
         CancellationToken cancellationToken = default)
     {
+        var sessionId = address.SessionId;
         var stream = await _mux.OpenAsync("session/follow",
-            new JsonObject { ["request"] = FollowRequest(sessionId, false) }, cancellationToken).ConfigureAwait(false);
+            new JsonObject { ["request"] = FollowRequest(address, false) }, cancellationToken).ConfigureAwait(false);
 
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         budget.CancelAfter(TimeSpan.FromSeconds(30));
@@ -442,16 +526,18 @@ public sealed class HarnessSessionClient : IAsyncDisposable
     /// 而不是被我们自己的参数掩盖掉。
     /// </summary>
     public async Task<HarnessMuxCheck> CheckStreamRoutingAsync(
-        string sessionA,
-        string sessionB,
+        HarnessAddress addressA,
+        HarnessAddress addressB,
         CancellationToken cancellationToken = default)
     {
         var notes = new List<string>();
+        var sessionA = addressA.SessionId;
+        var sessionB = addressB.SessionId;
 
         var streamA = await _mux.OpenAsync("session/follow",
-            new JsonObject { ["request"] = FollowRequest(sessionA, false) }, cancellationToken).ConfigureAwait(false);
+            new JsonObject { ["request"] = FollowRequest(addressA, false) }, cancellationToken).ConfigureAwait(false);
         var streamB = await _mux.OpenAsync("session/follow",
-            new JsonObject { ["request"] = FollowRequest(sessionB, false) }, cancellationToken).ConfigureAwait(false);
+            new JsonObject { ["request"] = FollowRequest(addressB, false) }, cancellationToken).ConfigureAwait(false);
 
         notes.Add($"开了两条流：A={streamA.StreamId[..8]} B={streamB.StreamId[..8]}（同一条 WS）");
 
@@ -477,11 +563,11 @@ public sealed class HarnessSessionClient : IAsyncDisposable
     /// <summary>
     /// `session/follow` 的请求体。`follow(request, signal)` → wire 字段是 `request`。
     /// </summary>
-    private static JsonObject FollowRequest(string sessionId, bool withAssistantStream, int maxMessages = 200)
+    private static JsonObject FollowRequest(HarnessAddress address, bool withAssistantStream, int maxMessages = 200)
     {
         var request = new JsonObject
         {
-            ["address"] = SessionAddress(sessionId),
+            ["address"] = address.ToJson(),
             ["maxMessages"] = maxMessages,
         };
         if (withAssistantStream) request["assistantStream"] = true;
@@ -512,18 +598,6 @@ public sealed class HarnessSessionClient : IAsyncDisposable
             return null;
         }
     }
-
-    /// <summary>
-    /// 会话地址：普通会话与子 agent 是两种形状（见 P13）。
-    ///
-    /// 子 agent 是**另一种形状**：<c>{ kind:'subagent', parentSessionId,
-    /// childSessionId, mode:'one-shot'|'continuable' }</c>（从上游
-    /// `typert.host.js` 的 page 参数 schema 读出）。拿普通会话地址去开子 agent
-    /// 会被拒为「subagent Sessions require their durable parent address」——
-    /// 那 44 个会话就是卡在这里，**尚未实现**（参 P13）。
-    /// </summary>
-    private static JsonObject SessionAddress(string sessionId) =>
-        new() { ["kind"] = "session", ["sessionId"] = sessionId };
 
     /// <summary>
     /// 把 <c>session/follow</c> 后续的 live 帧折叠进视图，直到 <paramref name="until"/> 取消。

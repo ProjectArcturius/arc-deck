@@ -41,10 +41,11 @@ internal static class Program
         var harnessPrompt = ArgValue(args, "--harness-prompt");
         var harnessCheckAll = args.Contains("--harness-check-all");
         var harnessMuxCheck = args.Contains("--harness-mux-check");
+        var harnessRaw = args.Contains("--harness-list-raw");
 
-        if (harnessList || harnessCheckAll || harnessMuxCheck || harnessVerify is not null || harnessPrompt is not null)
+        if (harnessList || harnessCheckAll || harnessMuxCheck || harnessRaw || harnessVerify is not null || harnessPrompt is not null)
         {
-            return await RunHarnessModeAsync(harnessList, harnessCheckAll, harnessMuxCheck, harnessVerify, harnessPrompt, cwd).ConfigureAwait(false);
+            return await RunHarnessModeAsync(harnessList || harnessRaw, harnessCheckAll, harnessMuxCheck, harnessRaw, harnessVerify, harnessPrompt, cwd).ConfigureAwait(false);
         }
 
         Console.WriteLine("Arc Deck · DSH 协议客户端");
@@ -402,7 +403,7 @@ internal static class Program
     /// 与 SDK 那条路的区别见 <see cref="ArcDeck.Dsh.Harness.HarnessHost"/> 的类注释：
     /// 这条路能列会话、读历史、改名、取消，因为它是 WebView 客户端用的那套 API。
     /// </summary>
-    private static async Task<int> RunHarnessModeAsync(bool list, bool checkAll, bool muxCheck, string? verify, string? prompt, string cwd)
+    private static async Task<int> RunHarnessModeAsync(bool list, bool checkAll, bool muxCheck, bool listRaw, string? verify, string? prompt, string cwd)
     {
         Console.WriteLine("Arc Deck · harness Remote 层（完整功能面）");
         Console.WriteLine("──────────────────────────────────────────────");
@@ -444,6 +445,26 @@ internal static class Program
             {
                 Console.WriteLine($"  {(s.Running ? "▶" : " ")} {s.SessionId}  {s.UpdatedAt:MM-dd HH:mm}  {s.Subtitle}");
             }
+
+            if (listRaw)
+            {
+                // schema 的缩进会骗人：`subagent` 在**实际 payload** 里是
+                // `projections.values.subagent`，不是列表项的顶层字段。
+                // 所以这里把「我们真正解析的那几个位置」单独打出来。
+                Console.WriteLine();
+                Console.WriteLine("── 我们解析的那几个位置（一个普通会话 + 一个子 agent）──");
+                foreach (var s in sessions.Where(x => x.IsSubagent).Take(1)
+                             .Concat(sessions.Where(x => !x.IsSubagent).Take(1)))
+                {
+                    var values = s.Raw?["projections"]?["values"];
+                    Console.WriteLine($"  {(s.IsSubagent ? "子 agent" : "普通")} {s.SessionId}");
+                    Console.WriteLine($"    values.title    = {values?["title"]?.ToJsonString() ?? "(缺)"}");
+                    Console.WriteLine($"    values.subagent = {values?["subagent"]?.ToJsonString() ?? "(缺)"}");
+                    Console.WriteLine($"    → 解析成 mode={s.SubagentMode ?? "(null)"} label={s.SubagentLabel ?? "(null)"}");
+                    Console.WriteLine();
+                }
+            }
+
             return 0;
         }
 
@@ -458,6 +479,7 @@ internal static class Program
         }
 
         // 目标会话：显式给的那个，否则第一个「有内容、不是子 agent」的。
+        // **地址从列表项取**，因为子 agent 要的是另一种地址形状（带父会话与 mode）。
         var target = verify is not null
             ? sessions.FirstOrDefault(s => s.SessionId == verify)
             : sessions.FirstOrDefault(s => !s.IsSubagent && !s.Blank);
@@ -474,7 +496,7 @@ internal static class Program
         HarnessSessionStream session;
         try
         {
-            session = await client.OpenAsync(target.SessionId, withAssistantStream: false,
+            session = await client.OpenAsync(target.Address, withAssistantStream: false,
                 loadAllHistory: true);
         }
         catch (HarnessRpcException ex)
@@ -608,13 +630,13 @@ internal static class Program
         Console.WriteLine("── 筛两个能打开的会话 ────────────────────────");
         WarnActivation();
 
-        var usable = new List<string>();
+        var usable = new List<ArcDeck.Dsh.Harness.HarnessSessionInfo>();
         foreach (var candidate in candidates)
         {
-            var probe = await client.ProbeSnapshotAsync(candidate.SessionId);
+            var probe = await client.ProbeSnapshotAsync(candidate.Address);
             if (probe.Ok)
             {
-                usable.Add(candidate.SessionId);
+                usable.Add(candidate);
                 Console.WriteLine($"  ✓ {probe.SessionIdSeen ?? candidate.SessionId}" +
                                   (probe.SessionIdSeen != candidate.SessionId
                                       ? $"  ← 请求的是 {candidate.SessionId}，内核回的是别的东西"
@@ -636,7 +658,7 @@ internal static class Program
         Console.WriteLine();
         Console.WriteLine("── 同一条连接上同时开两条 session/follow ──────");
 
-        var result = await client.CheckStreamRoutingAsync(usable[0], usable[1]);
+        var result = await client.CheckStreamRoutingAsync(usable[0].Address, usable[1].Address);
         foreach (var note in result.Notes) Console.WriteLine("  " + note);
 
         Console.WriteLine(result.Ok
@@ -675,39 +697,34 @@ internal static class Program
         var mismatched = new List<string>();
         var unopenable = new List<string>();
         var paginated = 0;
-        var subagents = 0;
+        var subagentOk = 0;
         var noLog = 0;
         var totalPages = 0;
         var maxPages = 0;
 
         foreach (var s in targets)
         {
-            // **子 agent 会话要单独算。** 它们的地址不是 `{kind:'session', sessionId}` ——
-            // 内核明确拒绝：「subagent Sessions require their durable parent address」。
-            // 拿错的地址去试，会得到 44 条一模一样的「打不开」，把真正的问题埋掉。
-            // 这是**我们没实现**的能力（父地址形状尚未处理），不是会话坏了 ——
-            // 所以不试、也不计进失败（参铁律 2：不假装做了）。
-            if (s.IsSubagent)
-            {
-                subagents++;
-                Console.Write("s");
-                continue;
-            }
-
             // 每个会话一个**独立的**短上限：这个循环里出现的挂死是我们要抓的
             // 那类 bug 本身，不该让一个坏会话把整轮拖成几分钟。
+            //
+            // 地址从列表项来 —— 子 agent 要的是另一种形状（带父会话与 mode）。
+            // 列表项里没有 `subagent.mode` 时退回普通地址，那会被内核拒，
+            // 而那条拒绝信息本身就是要报出来的东西。
             HarnessSessionStream stream;
             try
             {
-                stream = await client.OpenAsync(s.SessionId, withAssistantStream: false,
+                stream = await client.OpenAsync(s.Address, withAssistantStream: false,
                     openBudget: TimeSpan.FromSeconds(60), loadAllHistory: true);
             }
             catch (HarnessRpcException ex)
             {
-                unopenable.Add($"{s.SessionId}  [{ex.Code}] {FirstLine(ex.Message)}");
+                unopenable.Add($"{s.SessionId}{(s.IsSubagent ? "（子 agent）" : "")}" +
+                               $"  [{ex.Code}] {FirstLine(ex.Message)}");
                 Console.Write("✗");
                 continue;
             }
+
+            if (s.IsSubagent) subagentOk++;
 
             // **`hasMore` 必须看。** 快照是**一页**，不是全部历史。现在
             // `loadAllHistory: true` 会往回翻到底，所以正常情况下这里不该再为 true；
@@ -755,8 +772,9 @@ internal static class Program
         Console.WriteLine();
         Console.WriteLine();
         Console.WriteLine($"一致 {equivalent} · 不一致 {mismatched.Count} · " +
-                          $"只比了一页 {paginated} · 子 agent 跳过 {subagents} · " +
-                          $"打不开 {unopenable.Count} · 磁盘上没有日志 {noLog}");
+                          $"只比了一页 {paginated} · 打不开 {unopenable.Count} · " +
+                          $"磁盘上没有日志 {noLog}");
+        Console.WriteLine($"其中子 agent 会话 {subagentOk} 个 —— 它们用的是**父地址**那种形状");
         Console.WriteLine($"往回翻了 {totalPages} 页（最多的一个会话 {maxPages} 页）" +
                           $"—— 1 页意味着那条会话的快照本来就装下了全部历史");
 
@@ -770,15 +788,8 @@ internal static class Program
         if (unopenable.Count > 0)
         {
             Console.WriteLine();
-            Console.WriteLine("── 打不开的会话（内核自己报的日志损坏）─────────");
+            Console.WriteLine("── 打不开的会话（内核自己的说法，逐条原样上抛）───");
             foreach (var line in unopenable) Console.WriteLine("  " + line);
-        }
-
-        if (subagents > 0)
-        {
-            Console.WriteLine();
-            Console.WriteLine($"  （另有 {subagents} 个子 agent 会话未尝试：它们的地址要带父地址，" +
-                              "客户端还没实现 —— 这是缺的功能，不是会话的问题）");
         }
 
         // 只要有一条**内容不一致**就不算通过。「打不开」同样让命令失败 ——
