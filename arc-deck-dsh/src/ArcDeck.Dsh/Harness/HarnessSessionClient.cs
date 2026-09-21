@@ -178,12 +178,9 @@ public sealed class HarnessSessionClient : IAsyncDisposable
         bool loadAllHistory = false,
         CancellationToken cancellationToken = default)
     {
-        var request = new JsonObject
-        {
-            ["address"] = new JsonObject { ["kind"] = "session", ["sessionId"] = sessionId },
-            ["maxMessages"] = maxMessages,
-        };
-        if (withAssistantStream) request["assistantStream"] = true;
+        // 与 CheckStreamRoutingAsync 共用同一份请求构造 —— 两处各写一遍的话，
+        // 「探针验过的东西」与「产品真正发的请求」就有分叉的余地。
+        var request = FollowRequest(sessionId, withAssistantStream, maxMessages);
 
         // `follow(request, signal)` → wire 字段是 `request`。
         var stream = await _mux.OpenAsync("session/follow",
@@ -383,7 +380,141 @@ public sealed class HarnessSessionClient : IAsyncDisposable
     }
 
     /// <summary>
-    /// 一个**普通会话**的地址。
+    /// 试开一个会话、只读到快照为止，回报「拿到了谁的快照」或「内核报了什么」。
+    ///
+    /// 分流探针需要**两个真能打开的**会话，而挑会话不能只看时间 ——
+    /// 实测按 `updatedAt` 取最新的两个，正好落在两份**损坏的**日志上
+    /// （一份正在被写、一份 seq gap，参 P14），于是探针报「串帧了」，
+    /// 而真实原因是「打不开」。**失败的断言指向错误的方向，比没有断言更糟**（参 U13/U17）。
+    /// 所以先筛一遍，并把每一步的结果都报出来。
+    /// </summary>
+    public async Task<HarnessSnapshotProbe> ProbeSnapshotAsync(
+        string sessionId,
+        CancellationToken cancellationToken = default)
+    {
+        var stream = await _mux.OpenAsync("session/follow",
+            new JsonObject { ["request"] = FollowRequest(sessionId, false) }, cancellationToken).ConfigureAwait(false);
+
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(TimeSpan.FromSeconds(30));
+
+        try
+        {
+            while (true)
+            {
+                var frame = await stream.NextAsync(budget.Token).ConfigureAwait(false);
+                if (frame is null) return new HarnessSnapshotProbe(sessionId, false, null, "流在给出快照前就结束了");
+
+                if (frame.Value.Kind == HarnessMux.MuxFrameKind.Error)
+                {
+                    // 只取第一行：内核的错误正文很长（带 details 的 JSON 形状），
+                    // 整段塞进一行会把探针的输出淹掉。
+                    var message = frame.Value.Error?.Message ?? "（错误帧没带消息）";
+                    var newline = message.IndexOf('\n');
+                    return new HarnessSnapshotProbe(sessionId, false, null,
+                        newline < 0 ? message : message[..newline] + "…");
+                }
+                if (frame.Value.Kind != HarnessMux.MuxFrameKind.Item) continue;
+
+                var value = frame.Value.Value as JsonObject;
+                if (value?["type"]?.GetValue<string>() != "snapshot") continue;
+                return new HarnessSnapshotProbe(sessionId, true, value["header"]?["id"]?.GetValue<string>(), null);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            return new HarnessSnapshotProbe(sessionId, false, null, "30s 内没有给出快照");
+        }
+    }
+
+    /// <summary>一次「试着打开」的结果。</summary>
+    public sealed record HarnessSnapshotProbe(string Requested, bool Ok, string? SessionIdSeen, string? Error);
+
+    /// <summary>
+    /// 在**同一条** mux 连接上同时开两条流，检查每一条只收到自己的帧。
+    ///
+    /// 为什么需要这个探针：分流这件事在只有一条流时**完全看不出来** ——
+    /// 共用一个队列也会「正常工作」。所以「按 streamId 分好了」这句话
+    /// 只有同时开两条流才算被证明过（参 P9：论证可以写，别当成证据）。
+    ///
+    /// 判据用快照自带的 <c>header.id</c>：它是内核给的会话身份，
+    /// 不是我们请求时填的那个串 —— 所以「A 流拿到了 B 的快照」会当场露出来，
+    /// 而不是被我们自己的参数掩盖掉。
+    /// </summary>
+    public async Task<HarnessMuxCheck> CheckStreamRoutingAsync(
+        string sessionA,
+        string sessionB,
+        CancellationToken cancellationToken = default)
+    {
+        var notes = new List<string>();
+
+        var streamA = await _mux.OpenAsync("session/follow",
+            new JsonObject { ["request"] = FollowRequest(sessionA, false) }, cancellationToken).ConfigureAwait(false);
+        var streamB = await _mux.OpenAsync("session/follow",
+            new JsonObject { ["request"] = FollowRequest(sessionB, false) }, cancellationToken).ConfigureAwait(false);
+
+        notes.Add($"开了两条流：A={streamA.StreamId[..8]} B={streamB.StreamId[..8]}（同一条 WS）");
+
+        // **同时**等两条流，而不是 A 读完再读 B：串帧的要害正是并发 ——
+        // 顺序读会让「共用一个队列」也有很大机会蒙对。
+        var readA = ReadSnapshotSessionIdAsync(streamA, cancellationToken);
+        var readB = ReadSnapshotSessionIdAsync(streamB, cancellationToken);
+        await Task.WhenAll(readA, readB).ConfigureAwait(false);
+
+        var idA = readA.Result;
+        var idB = readB.Result;
+
+        notes.Add($"A 的快照 header.id={idA ?? "(没读到快照)"}");
+        notes.Add($"B 的快照 header.id={idB ?? "(没读到快照)"}");
+
+        var ok = idA == sessionA && idB == sessionB;
+        return new HarnessMuxCheck(ok, idA, idB, notes);
+    }
+
+    /// <summary>两条流各自的路由检查结果。</summary>
+    public sealed record HarnessMuxCheck(bool Ok, string? SessionIdSeenByA, string? SessionIdSeenByB, List<string> Notes);
+
+    /// <summary>
+    /// `session/follow` 的请求体。`follow(request, signal)` → wire 字段是 `request`。
+    /// </summary>
+    private static JsonObject FollowRequest(string sessionId, bool withAssistantStream, int maxMessages = 200)
+    {
+        var request = new JsonObject
+        {
+            ["address"] = SessionAddress(sessionId),
+            ["maxMessages"] = maxMessages,
+        };
+        if (withAssistantStream) request["assistantStream"] = true;
+        return request;
+    }
+
+    /// <summary>读到 <c>snapshot</c> 帧并回它的 <c>header.id</c>；读不到返回 null。</summary>
+    private static async Task<string?> ReadSnapshotSessionIdAsync(HarnessStream stream, CancellationToken cancellationToken)
+    {
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(TimeSpan.FromSeconds(30));
+
+        try
+        {
+            while (true)
+            {
+                var frame = await stream.NextAsync(budget.Token).ConfigureAwait(false);
+                if (frame is null) return null;
+                if (frame.Value.Kind != HarnessMux.MuxFrameKind.Item) continue;
+
+                var value = frame.Value.Value as JsonObject;
+                if (value?["type"]?.GetValue<string>() != "snapshot") continue;
+                return value["header"]?["id"]?.GetValue<string>();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 会话地址：普通会话与子 agent 是两种形状（见 P13）。
     ///
     /// 子 agent 是**另一种形状**：<c>{ kind:'subagent', parentSessionId,
     /// childSessionId, mode:'one-shot'|'continuable' }</c>（从上游

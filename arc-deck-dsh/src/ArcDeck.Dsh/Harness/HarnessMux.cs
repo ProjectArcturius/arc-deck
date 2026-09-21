@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json.Nodes;
@@ -23,9 +24,10 @@ namespace ArcDeck.Dsh.Harness;
 /// { "type":"end",   "streamId":"…" }
 /// </code>
 ///
-/// 一条物理 WebSocket 上可以开多条逻辑流（靠 <c>streamId</c> 分流），
-/// 但本客户端每个订阅各开一条 —— 少了多路复用的簿记，
-/// 而 WebSocket 连接的代价在这个规模上可以忽略。
+/// 一条物理 WebSocket 上可以开多条逻辑流（靠 <c>streamId</c> 分流）——
+/// 这里**就是**这么做的：每条流一个信箱，帧按 streamId 投递。
+/// 早先所有流共用一个队列（读了 streamId 却没用它），只有一条流时看不出问题，
+/// 见 <c>_streams</c> 的注释。
 ///
 /// ## 认证走 Cookie 头
 ///
@@ -39,8 +41,21 @@ public sealed class HarnessMux : IAsyncDisposable
 {
     private readonly HarnessHost _host;
     private readonly ClientWebSocket _socket = new();
-    private readonly Channel<MuxFrame> _frames = Channel.CreateUnbounded<MuxFrame>();
     private readonly CancellationTokenSource _cts = new();
+
+    /// <summary>
+    /// **每条逻辑流一个信箱**，按 <c>streamId</c> 分流。
+    ///
+    /// 原先所有流的帧进**同一个** channel，而分发时读了 `streamId` 却没拿它做任何事 ——
+    /// 于是两个流的帧混在一个队列里，「谁读到哪一帧」纯看运气。
+    /// 现在只有一条流时看不出问题，但 `session/follow` + `session/control`
+    /// 是界面上迟早要同时开的；那时症状会是「控制流收到了对话事件」，
+    /// 看起来像**内核的错**，而不像我们的。
+    ///
+    /// 用 <see cref="ConcurrentDictionary{TKey,TValue}"/> 而不是普通字典：
+    /// 写入发生在 WS 泵线程上，读写在调用方线程上。
+    /// </summary>
+    private readonly ConcurrentDictionary<string, Channel<MuxFrame>> _streams = new(StringComparer.Ordinal);
 
     private Task? _pump;
     private bool _disposed;
@@ -106,6 +121,12 @@ public sealed class HarnessMux : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         var streamId = Guid.NewGuid().ToString();
+
+        // **先登记信箱，再发 open。** 反过来的话，一条回得很快的流
+        // （快照就是第一个 item）可能在登记之前就到了，那一帧会被当成
+        // 「没有登记的流」丢掉 —— 症状又是「流打开了但一条都不来」。
+        var reader = RegisterStream(streamId);
+
         var open = new JsonObject
         {
             ["type"] = "open",
@@ -116,7 +137,25 @@ public sealed class HarnessMux : IAsyncDisposable
 
         await SendAsync(open, cancellationToken).ConfigureAwait(false);
         Note($"[open] {endpoint} streamId={streamId[..8]}");
-        return new HarnessStream(this, streamId);
+        return new HarnessStream(this, streamId, reader);
+    }
+
+    private ChannelReader<MuxFrame> RegisterStream(string streamId)
+    {
+        var channel = Channel.CreateUnbounded<MuxFrame>();
+        if (!_streams.TryAdd(streamId, channel))
+        {
+            throw new InvalidOperationException($"streamId 撞了：{streamId}");
+        }
+        return channel.Reader;
+    }
+
+    /// <summary>结束一条流：把最后那一帧写进去再关掉信箱，读者不会漏掉错误。</summary>
+    private void CompleteStream(string streamId, MuxFrame? final)
+    {
+        if (!_streams.TryRemove(streamId, out var channel)) return;
+        if (final is not null) channel.Writer.TryWrite(final.Value);
+        channel.Writer.TryComplete();
     }
 
     internal async Task SendAsync(JsonObject frame, CancellationToken cancellationToken)
@@ -126,11 +165,11 @@ public sealed class HarnessMux : IAsyncDisposable
     }
 
     /// <summary>异步读一条逻辑流的下一帧。流结束时返回 null。</summary>
-    internal async Task<MuxFrame?> NextAsync(CancellationToken cancellationToken)
+    internal static async Task<MuxFrame?> ReadAsync(ChannelReader<MuxFrame> reader, CancellationToken cancellationToken)
     {
         try
         {
-            return await _frames.Reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+            return await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (ChannelClosedException)
         {
@@ -173,7 +212,7 @@ public sealed class HarnessMux : IAsyncDisposable
                     result = await _socket.ReceiveAsync(buffer, cancellationToken).ConfigureAwait(false);
                     if (result.MessageType == WebSocketMessageType.Close)
                     {
-                        _frames.Writer.TryComplete();
+                        CompleteAllStreams();
                         return;
                     }
                     message.Write(buffer, 0, result.Count);
@@ -190,13 +229,23 @@ public sealed class HarnessMux : IAsyncDisposable
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
+            // 连接层炸了：**每一条**在等的流都要醒过来，否则调用方会永久挂住。
             Note($"[pump 异常] {ex.GetType().Name}: {ex.Message}");
-            _frames.Writer.TryWrite(new MuxFrame(MuxFrameKind.Error, null,
+            CompleteAllStreams(new MuxFrame(MuxFrameKind.Error, null,
                 new HarnessRpcException("mux-failure", ex.Message, null)));
         }
         finally
         {
-            _frames.Writer.TryComplete();
+            CompleteAllStreams();
+        }
+    }
+
+    /// <summary>把所有还在等的流一起收掉（连接断了、或者我们自己在关）。</summary>
+    private void CompleteAllStreams(MuxFrame? final = null)
+    {
+        foreach (var streamId in _streams.Keys)
+        {
+            CompleteStream(streamId, final);
         }
     }
 
@@ -210,20 +259,28 @@ public sealed class HarnessMux : IAsyncDisposable
         var streamId = frame["streamId"]?.GetValue<string>();
         if (string.IsNullOrEmpty(streamId)) return;
 
+        // **按 streamId 投递到它自己的信箱。** 收不到就是没有登记的流 ——
+        // 记一笔，因为「帧静静消失」这类问题只有线上轨迹能看出来。
+        if (!_streams.TryGetValue(streamId, out var channel))
+        {
+            Note($"[drop] 没有登记的流 {streamId[..Math.Min(8, streamId.Length)]}");
+            return;
+        }
+
         switch (frame["type"]?.GetValue<string>())
         {
             case "item":
-                _frames.Writer.TryWrite(new MuxFrame(MuxFrameKind.Item,
+                channel.Writer.TryWrite(new MuxFrame(MuxFrameKind.Item,
                     frame.TryGetPropertyValue("value", out var v) ? v : null, null));
                 break;
 
             case "end":
-                _frames.Writer.TryWrite(new MuxFrame(MuxFrameKind.End, null, null));
+                CompleteStream(streamId, new MuxFrame(MuxFrameKind.End, null, null));
                 break;
 
             case "error":
                 var error = frame["error"] as JsonObject;
-                _frames.Writer.TryWrite(new MuxFrame(MuxFrameKind.Error, null, new HarnessRpcException(
+                CompleteStream(streamId, new MuxFrame(MuxFrameKind.Error, null, new HarnessRpcException(
                     error?["code"]?.GetValue<string>() ?? "unknown",
                     error?["message"]?.GetValue<string>() ?? "（无消息）",
                     error?["details"])));
@@ -237,7 +294,7 @@ public sealed class HarnessMux : IAsyncDisposable
         _disposed = true;
 
         _cts.Cancel();
-        _frames.Writer.TryComplete();
+        CompleteAllStreams();
 
         try
         {
@@ -260,17 +317,23 @@ public sealed class HarnessMux : IAsyncDisposable
 public sealed class HarnessStream
 {
     private readonly HarnessMux _mux;
+    private readonly ChannelReader<HarnessMux.MuxFrame> _reader;
 
-    internal HarnessStream(HarnessMux mux, string streamId)
+    internal HarnessStream(HarnessMux mux, string streamId, ChannelReader<HarnessMux.MuxFrame> reader)
     {
         _mux = mux;
+        _reader = reader;
         StreamId = streamId;
     }
 
     public string StreamId { get; }
 
+    /// <summary>
+    /// 读**这条流**的下一帧 —— 读的是它自己的信箱，
+    /// 所以同一个连接上别的流的流量不会插进来（也不会被它抢走）。
+    /// </summary>
     public Task<HarnessMux.MuxFrame?> NextAsync(CancellationToken cancellationToken = default)
-        => _mux.NextAsync(cancellationToken);
+        => HarnessMux.ReadAsync(_reader, cancellationToken);
 
     /// <summary>取消这条逻辑流（不影响同一条连接上的其他流）。</summary>
     public Task CancelAsync(CancellationToken cancellationToken = default)

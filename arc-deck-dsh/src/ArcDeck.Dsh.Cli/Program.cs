@@ -40,10 +40,11 @@ internal static class Program
         var harnessVerify = ArgValue(args, "--harness-verify");
         var harnessPrompt = ArgValue(args, "--harness-prompt");
         var harnessCheckAll = args.Contains("--harness-check-all");
+        var harnessMuxCheck = args.Contains("--harness-mux-check");
 
-        if (harnessList || harnessCheckAll || harnessVerify is not null || harnessPrompt is not null)
+        if (harnessList || harnessCheckAll || harnessMuxCheck || harnessVerify is not null || harnessPrompt is not null)
         {
-            return await RunHarnessModeAsync(harnessList, harnessCheckAll, harnessVerify, harnessPrompt, cwd).ConfigureAwait(false);
+            return await RunHarnessModeAsync(harnessList, harnessCheckAll, harnessMuxCheck, harnessVerify, harnessPrompt, cwd).ConfigureAwait(false);
         }
 
         Console.WriteLine("Arc Deck · DSH 协议客户端");
@@ -401,7 +402,7 @@ internal static class Program
     /// 与 SDK 那条路的区别见 <see cref="ArcDeck.Dsh.Harness.HarnessHost"/> 的类注释：
     /// 这条路能列会话、读历史、改名、取消，因为它是 WebView 客户端用的那套 API。
     /// </summary>
-    private static async Task<int> RunHarnessModeAsync(bool list, bool checkAll, string? verify, string? prompt, string cwd)
+    private static async Task<int> RunHarnessModeAsync(bool list, bool checkAll, bool muxCheck, string? verify, string? prompt, string cwd)
     {
         Console.WriteLine("Arc Deck · harness Remote 层（完整功能面）");
         Console.WriteLine("──────────────────────────────────────────────");
@@ -436,7 +437,7 @@ internal static class Program
                           $"（{sessions.Count(s => s.Running)} 个运行中，" +
                           $"{sessions.Count(s => s.IsSubagent)} 个子 agent）");
 
-        if (list || (!checkAll && verify is null && prompt is null))
+        if (list || (!checkAll && !muxCheck && verify is null && prompt is null))
         {
             Console.WriteLine();
             foreach (var s in sessions.Where(s => !s.IsSubagent).Take(15))
@@ -449,6 +450,11 @@ internal static class Program
         if (checkAll)
         {
             return await CheckAllHarnessSessionsAsync(client, install, sessions).ConfigureAwait(false);
+        }
+
+        if (muxCheck)
+        {
+            return await MuxCheckAsync(client, sessions).ConfigureAwait(false);
         }
 
         // 目标会话：显式给的那个，否则第一个「有内容、不是子 agent」的。
@@ -556,6 +562,65 @@ internal static class Program
         }
 
         return 0;
+    }
+
+    /// <summary>
+    /// A4 的验收：同一条 WS 上开**两条**流，看每条是否只收到自己的帧。
+    ///
+    /// 为什么必须真的开两条：分流这件事在只有一条流时**完全看不出来** ——
+    /// 共用一个队列也会「正常工作」。所以这个检查的存在本身就是那个断言的一部分。
+    /// </summary>
+    private static async Task<int> MuxCheckAsync(
+        HarnessSessionClient client,
+        IReadOnlyList<ArcDeck.Dsh.Harness.HarnessSessionInfo> sessions)
+    {
+        // 挑两个**真能打开**的普通会话。按时间取最新的两个会正好落在两份损坏的
+        // 日志上（P14），那时探针会报「串帧了」而真实原因是「打不开」——
+        // 所以先筛一遍，并把每一步结果都打出来。
+        var candidates = sessions
+            .Where(s => !s.IsSubagent && !s.Blank)
+            .OrderByDescending(s => s.UpdatedAt)
+            .Take(8)
+            .ToList();
+
+        Console.WriteLine();
+        Console.WriteLine("── 筛两个能打开的会话 ────────────────────────");
+
+        var usable = new List<string>();
+        foreach (var candidate in candidates)
+        {
+            var probe = await client.ProbeSnapshotAsync(candidate.SessionId);
+            if (probe.Ok)
+            {
+                usable.Add(candidate.SessionId);
+                Console.WriteLine($"  ✓ {probe.SessionIdSeen ?? candidate.SessionId}" +
+                                  (probe.SessionIdSeen != candidate.SessionId
+                                      ? $"  ← 请求的是 {candidate.SessionId}，内核回的是别的东西"
+                                      : ""));
+                if (usable.Count == 2) break;
+            }
+            else
+            {
+                Console.WriteLine($"  ✗ {candidate.SessionId}  {probe.Error}");
+            }
+        }
+
+        if (usable.Count < 2)
+        {
+            Console.WriteLine($"✗ 只找到 {usable.Count} 个能打开的会话 —— 探针验不了");
+            return 1;
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("── 同一条连接上同时开两条 session/follow ──────");
+
+        var result = await client.CheckStreamRoutingAsync(usable[0], usable[1]);
+        foreach (var note in result.Notes) Console.WriteLine("  " + note);
+
+        Console.WriteLine(result.Ok
+            ? "✓ 两条流各收到自己的快照（header.id 与请求逐字相同）"
+            : "✗ 串帧了：某条流收到了另一条会话的快照");
+        return result.Ok ? 0 : 1;
     }
 
     /// <summary>
