@@ -205,16 +205,35 @@ mux 的 channel 是无界的。
 
 两条都是 `--harness-check-all` 在 71 个真实会话上量出来的：
 
-**一页。** 大会话上线上只给最后一页（实测约 2500 条记录 / 2 千多帧），
+**一页 —— 所以要往回翻。** 大会话上线上只给最后一页（实测约 2500 条记录 / 2 千多帧），
 `hasMore = true`。拿一页去比整份日志会得到**假不一致** —— 第一版就这么报了
-11 条「消息条数 线上 10 ≠ 重放 136」。真要比得先用 `session/page` 按
-`throughSeq` 往回翻到底。**这件事还没做**，所以检查项现在如实报「只比了一页」
-（10 个），而不是把它算成不一致。
+11 条「消息条数 线上 10 ≠ 重放 136」。
 
-**子 agent 要父地址。** 对子 agent 用 `{kind:'session', sessionId}` 会被内核拒绝：
-`subagent Sessions require their durable parent address`。44 个子 agent 会话
-都在这一条上，长得一模一样 —— 混进「打不开」会把真问题埋掉。
-**父地址的形状尚未实现**，客户端目前是明确跳过它们。
+`session/page` 的契约（从上游 `types/history.js` 的 `page` 读出）有三处反直觉：
+
+- **`throughSeq` 是必需字段**，且 `-1` 表示「到头了」（返回**空页**），
+  **不是**「整条日志」—— 所以往回翻不能靠 -1 收尾
+- 下一页的游标是**本页第一条记录的 seq 减一**。上游 `paginate` 返回
+  `events.slice(cut, end)`，`cut` 就是第一条事件的 seq（日志 seq 是稠密零基前缀，
+  位置即 seq）；而 `page` 会校验 `sourceLog[throughSeq].seq === throughSeq`，
+  差一个就报 `session log does not contain through seq N`
+- 形参名是 `request`，**不是** `session/list` 那个 `_request`
+
+**已实现**（`OpenAsync(loadAllHistory: true)`）：翻到底再按时间顺序折叠 ——
+快照那一页必须先攒着不折，因为往回翻的页比它更早。翻页循环有**无进展就停**的闸
+（页取空、或游标没往回走），上限 500 页只是保险。
+
+**子 agent 要父地址**（**仍未实现**）。对子 agent 用 `{kind:'session', sessionId}`
+会被内核拒绝：`subagent Sessions require their durable parent address`。
+44 个子 agent 会话都卡在这一条上，长得一模一样 —— 混进「打不开」会把真问题埋掉。
+
+地址形状**已经从 page 的参数 schema 里读出来了**，但还差一个数据来源：
+
+```
+{ kind: 'subagent', parentSessionId, childSessionId, mode: 'one-shot' | 'continuable' }
+```
+
+`mode` 不在 `session/list` 给我们的字段里 —— 要实现得先确认那个值从哪来。
 
 #### P14 · 两份真实日志，内核与我们都打不开（成因未查证）
 
@@ -714,10 +733,10 @@ SDK 里 152 处引用、0 处定义。
 | `arc-deck-dsh` 会话重载（读回已存会话） | ✅ **已实测**：真实日志全部通过重放不变式（**现有 71 份里有 1 份失败** —— 那份日志确实坏了，两份独立读数都指向它，见 P14）；`dsh-cli --verify-reload` **同一条会话**实时 vs 重放逐块一致（参 P7/P9） |
 | `arc-deck-dsh` 会话列表（列磁盘上的会话） | ✅ **已实测**：`--list` 列出会话并标出属于当前工作区的那些。只读会话头、**不解压全文**；所以列表上拿不到标题（真标题要重载才知道，见 `DshSessionReader.Enumerate` 的注释） |
 | `arc-deck-dsh` 工具卡 / 思考块 | ✅ 已实现（工具卡带标题与结果、思考块默认折叠）。界面侧未接，所以「折叠」这个交互本身**没实测** |
-| `arc-deck-dsh` **harness web / Remote 层**（会话列表、打开、对账） | ✅ **已实测**：71 个会话里 **15 个逐块对账一致、0 不一致**（`--harness-check-all`）；`--harness-verify` 单条会话「两条路一致」。路上修掉两处：`follow` 打开挂死（P11）与 WS 分块撕开汉字（P12） |
+| `arc-deck-dsh` **harness web / Remote 层**（会话列表、打开、翻页、对账） | ✅ **已实测**：71 个会话里 **25 个逐块对账一致、0 不一致**（`--harness-check-all`，往回翻了 85 页）；`--harness-verify` 单条会话「两条路一致」。路上修掉两处：`follow` 打开挂死（P11）与 WS 分块撕开汉字（P12） |
 | `arc-deck-dsh` harness **发消息**（`--harness-prompt`） | ❌ **未实测**：代码写了，**一次都没跑过** —— 跑它会往**真实会话**里发一条消息，所以没有擅自跑（铁律 2） |
-| `arc-deck-dsh` harness **往回翻页**（`session/page`） | ❌ **未做**：所以大会话只对得上最新一页（10 个会话属于这一类，见 P13） |
-| `arc-deck-dsh` harness **子 agent 会话** | ❌ **未实现**：它们的地址要带父地址，客户端现在明确跳过（44 个，见 P13） |
+| `arc-deck-dsh` harness **往回翻页**（`session/page`） | ✅ **已实测**：`loadAllHistory` 翻到底再按时间顺序折叠；25 个会话全部「历史取全=True」，最多的一个 17 页（参 P13） |
+| `arc-deck-dsh` harness **子 agent 会话** | ❌ **未实现**：地址形状已从上游 schema 读出，但差 `mode` 的数据来源；客户端现在明确跳过（44 个，见 P13） |
 | `uwp/` 数据 | ⚠️ 全部是示例数据（`Models/Store.cs`、`Store.Tools`），未接协议；协议层已能供数据但**尚未接线** |
 
 ### 还没实测的部分
