@@ -26,6 +26,9 @@ AppPackages/
 /probe-err.log
 /probe-sdk.log
 /probe-cli*.log
+/probe-load*.log
+/probe-check*.log
+/probe-verify*.log
 /demo-out.log
 /demo-err.log
 

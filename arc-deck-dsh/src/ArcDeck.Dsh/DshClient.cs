@@ -31,6 +31,7 @@ public sealed class DshClient : IAsyncDisposable
     private readonly Dictionary<string, DshSessionView> _views = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DshProjection> _projections = new(StringComparer.Ordinal);
     private readonly DshRuntime _runtime;
+    private bool _disposed;
 
     public event EventHandler<DshSessionChangedEventArgs>? SessionChanged;
     public event EventHandler<DshStatusChangedEventArgs>? StatusChanged;
@@ -179,8 +180,18 @@ public sealed class DshClient : IAsyncDisposable
         });
     }
 
+    /// <summary>
+    /// 关掉客户端与内核。
+    ///
+    /// **幂等**：调用方可能想「主动收尾一次，再让 using 兜底」——
+    /// 那正是 CLI 的 <c>--verify-reload</c> 要做的事（要先让内核落盘，
+    /// 才能重放它刚写出来的日志）。第二次进入必须是空操作而不是异常。
+    /// </summary>
     public async ValueTask DisposeAsync()
     {
+        if (_disposed) return;
+        _disposed = true;
+
         // 先走协议的 shutdown（上游会 dispose 根运行时并落盘），再断进程。
         // 直接 Kill 会让最后一段会话日志丢掉 —— 表现是「重开会话少了几条消息」。
         try

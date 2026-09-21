@@ -18,6 +18,22 @@ public static class DshEventType
     public const string RequestHeader = "request/header";
     public const string RequestContext = "request/context";
     public const string Error = "error";
+
+    // ── 打包行：日志的**压缩编码**，不是事件 ─────────────────────────────
+    //
+    // 上游把连续的同类增量块压成一行（实测：一份 5127 行的日志里，1552 帧
+    // `assistant/chunk` 与 1552 行 `tool-call-chunks` 并存，而真正的
+    // `text-delta` 只有 1 帧 —— 绝大多数正文增量都在 `text-chunks` 里）。
+    // 打包行没有 `seq`，形状也与事件不同。
+    //
+    // 读日志时**必须显式跳过**：展开它们会把内容写两遍，而靠「不认识就忽略」
+    // 那条兜底规则会让后人以为这是漏掉的类型，而不是刻意跳过的。
+    public const string PackedTextChunks = "text-chunks";
+    public const string PackedReasoningChunks = "reasoning-chunks";
+    public const string PackedToolCallChunks = "tool-call-chunks";
+
+    /// <summary>日志首行那一帧会话头（不是事件，没有 seq）。</summary>
+    public const string SessionHeader = "session";
 }
 
 /// <summary>

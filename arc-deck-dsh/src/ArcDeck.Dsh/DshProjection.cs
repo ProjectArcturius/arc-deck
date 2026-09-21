@@ -6,50 +6,74 @@ namespace ArcDeck.Dsh;
 /// <summary>
 /// 把一个会话的事件流折叠成界面能画的视图。
 ///
+/// ## 一条消息 = 一轮，不是一步
+///
+/// 内核的 <c>turn</c> 是「用户说一次话」，<c>step</c> 是这一轮里模型的一次调用。
+/// 一次 agentic 的运行会有**几十到几百个 step**（实测本机一份会话：1 轮 238 步，
+/// 每步两三个 <c>tool-call</c> 块）。
+///
+/// 早先按 step 建消息，结果是 238 个气泡、其中绝大多数只有一个工具卡 ——
+/// 列表被拆得没法读。所以按 <c>turn</c> 归并：一轮一条助手消息，
+/// 里面按顺序放正文段、工具卡、思考块。
+///
 /// ## 为什么要有「权威文本」这个概念
 ///
-/// 助手的正文在事件流里出现**两次**，而且形状不同：
+/// 正文在事件流里出现**两次**，形状不同：
 ///
-///   · <c>assistant/chunk</c> 的 <c>text-delta</c> —— 逐 token 的增量，用来做流式观感
+///   · <c>assistant/chunk</c> 的 <c>text-delta</c> —— 逐 token 增量（只用于实时流式）
 ///   · <c>assistant/message</c> 的 <c>message.content[]</c> —— 该步的**权威全文**
 ///
-/// 只认前者，会话重载后正文取决于「增量有没有全部落盘」；只认后者，就完全没有
-/// 流式。两条都用而不区分，界面会出现**正文写两遍**。所以这里显式记一个
-/// <see cref="EntryState.Authoritative"/>：权威文本一到，整块被替换，后续增量不再追加。
+/// 两条都用而不区分，界面会出现**正文写两遍**。所以：注入模式（实时）消费增量，
+/// 重放模式（读日志）**只看权威全文**。
 ///
-/// ## 为什么保留原文
+/// ## 为什么重放必须走同一条折叠路径
 ///
-/// 上游的事件词汇比本客户端认识的宽（reasoning、subagent、compaction、checkpoint……）。
-/// 认不出来的**不能丢** —— 丢掉之后「这里发生过一件事」这个信息就没了，
-/// 而它往往正是解释「为什么界面看起来卡住了」的那条。
-/// 所以认不出的落到 <see cref="DshBlockKind.Unknown"/>，原文照收（但有上限）。
+/// 日志里没有「消息」，只有事件 —— 哪个显示、哪个不显示完全取决于折叠规则。
+/// 另写一份「读日志」的逻辑会立刻产生第二个真相源，而两者的差异只在特定会话上
+/// 才显形（比如带工具调用的那几步）。所以重载复用本类，只是把
+/// <see cref="DshProjection(DshSessionView, bool)"/> 的 replay 打开。
 /// </summary>
 public sealed class DshProjection
 {
     /// <summary>认不出来的事件保留多少条原文。</summary>
     private const int MaxRecordedEvents = 200;
 
+    private readonly bool _replay;
     private readonly DshSessionView _view;
-    private readonly Dictionary<string, EntryState> _entries = new();
+    private readonly Dictionary<string, DshMessageView> _messagesById = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DshBlock> _toolsByCallId = new(StringComparer.Ordinal);
+
+    /// <summary>每一轮的助手消息 —— 键是 turn。见类注释里的「一条消息 = 一轮」。</summary>
+    private readonly Dictionary<int, DshMessageView> _assistantByTurn = new();
+
+    /// <summary>正在流式追加的那条消息（实时模式）。权威全文一到就置空。</summary>
+    private DshMessageView? _streaming;
+    private DshBlock? _streamingParagraph;
+    private string? _streamingKey;
+
+    private int _unknownCount;
+    private int _currentTurn = -1;
+
+    /// <param name="replay">
+    /// true = 从落盘日志重放：**忽略流式增量**，只认权威全文与工具事件。
+    /// 日志里那些增量要么被压缩成打包行、要么与权威全文重复，都不该再叠一遍。
+    /// </param>
+    public DshProjection(DshSessionView view, bool replay = false)
+    {
+        _view = view;
+        _replay = replay;
+    }
+
+    public DshSessionView View => _view;
 
     /// <summary>
     /// 内核内部簿记事件的原文（顺序即到达顺序）。
-    ///
-    /// 界面上不画，但**不能扔** —— 它们是「这里发生过一件事」的唯一痕迹，
-    /// 而「为什么界面看起来卡住了」的答案常常就在里面。
+    /// 界面上不画，但**不能扔** —— 它们是「这里发生过一件事」的唯一痕迹。
     /// </summary>
     public List<DshBlock> Recorded { get; } = new();
 
     /// <summary>出现过的所有事件类型（含认得的）。排查「少了哪一类事件」时用它。</summary>
     public HashSet<string> RecordedTypes { get; } = new(StringComparer.Ordinal);
-
-    private int _unknownCount;
-    private int _currentTurn;
-
-    public DshProjection(DshSessionView view) => _view = view;
-
-    public DshSessionView View => _view;
 
     /// <summary>投影后发生了什么变化 —— 界面据此决定「更新哪一块」，而不是整页重画。</summary>
     [Flags]
@@ -61,13 +85,6 @@ public sealed class DshProjection
         Status = 4,      // 运行状态或标题变了
     }
 
-    private sealed class EntryState
-    {
-        public DshMessageView Message { get; init; } = null!;
-        public bool Authoritative { get; set; }
-        public bool IsToolCard { get; init; }
-    }
-
     public Change Apply(DshSessionEvent evt)
     {
         var change = Change.None;
@@ -76,8 +93,12 @@ public sealed class DshProjection
         switch (evt.Type)
         {
             case DshEventType.TurnStart:
-                _currentTurn++;
+                // turn 是**从 1 开始**的（实测：一份日志里只有 `turn:1` 与 `turn:2`，
+                // 没有 `turn:0`）。所以不能用它当索引去加一 —— 那样会多报一轮，
+                // 而「轮数偏一」这种错在界面上看不出来，只会在对账时暴露。
+                _currentTurn = evt.Data?["turn"]?.GetValue<int>() ?? _currentTurn + 1;
                 _view.TurnCount = Math.Max(_view.TurnCount, _currentTurn);
+                ResetStream();
                 break;
 
             case DshEventType.UserMessage:
@@ -85,7 +106,7 @@ public sealed class DshProjection
                 break;
 
             case DshEventType.AssistantChunk:
-                change |= AppendTextDelta(evt);
+                change |= ApplyChunk(evt);
                 break;
 
             case DshEventType.AssistantMessage:
@@ -108,13 +129,19 @@ public sealed class DshProjection
                 change |= AppendError(evt);
                 break;
 
-            // 下面这些是**边界**事件：它们改变的是「进行中」的语义，
-            // 但界面此刻不需要新块（轮次计数在 turn/start 里已经记过）。
-            // 显式列出来，而不是丢到 default —— 这样新增一种边界事件时，
+            // 边界事件：改变的是「进行中」的语义，界面此刻不需要新块。
+            // 显式列出来而不是丢到 default —— 新增一种边界事件时，
             // 读代码的人能看出它是被判断过、而不是被漏掉的。
             case DshEventType.TurnEnd:
             case DshEventType.StepStart:
             case DshEventType.StepEnd:
+                break;
+
+            // 打包行是日志的**压缩编码**，不是事件：它们的内容与权威全文重复，
+            // 重放时展开会写两遍。这里显式跳过，而不是靠「不认识」兜底。
+            case DshEventType.PackedTextChunks:
+            case DshEventType.PackedReasoningChunks:
+            case DshEventType.PackedToolCallChunks:
                 break;
 
             default:
@@ -123,6 +150,13 @@ public sealed class DshProjection
         }
 
         return change;
+    }
+
+    private void ResetStream()
+    {
+        _streaming = null;
+        _streamingParagraph = null;
+        _streamingKey = null;
     }
 
     // ── 自己的消息 ───────────────────────────────────────────────────────
@@ -142,29 +176,71 @@ public sealed class DshProjection
         var text = JoinTextBlocks(data["content"]);
         if (string.IsNullOrWhiteSpace(text)) return Change.None;
 
+        // 内核自己注入的提醒也带 kind=user（实测：system-reminder 与技能清单
+        // 就是另外那几条）。它们有固定标记，按标记排掉，而不是按长度猜。
+        if (LooksLikeInjectedContext(text)) return Change.None;
+
         var message = new DshMessageView { IsMine = true, Meta = evt.Time.ToString("HH:mm") };
         message.Blocks.Add(DshBlock.Paragraph(text));
         _view.Messages.Add(message);
+
+        // 新的一轮从这一句开始 —— 之后助手输出要开一条新的助手消息。
+        ResetStream();
         return Change.Structure;
     }
 
-    // ── 助手正文 ─────────────────────────────────────────────────────────
+    /// <summary>
+    /// 内核注入的上下文长得就像用户消息，只能按内容的固定标记认。
+    /// 实测见过的开头：<c>&lt;system-reminder&gt;</c>、
+    /// <c>A skill is a reusable set of task-specific instructions</c>。
+    /// </summary>
+    private static bool LooksLikeInjectedContext(string text)
+    {
+        var head = text.TrimStart();
+        return head.StartsWith("<system-reminder>", StringComparison.OrdinalIgnoreCase)
+               || head.StartsWith("<workspace_instructions>", StringComparison.OrdinalIgnoreCase)
+               || head.StartsWith("A skill is a reusable set of task-specific instructions", StringComparison.Ordinal)
+               || head.StartsWith("Current runtime context.", StringComparison.Ordinal);
+    }
 
-    private Change AppendTextDelta(DshSessionEvent evt)
+    // ── 助手输出 ─────────────────────────────────────────────────────────
+
+    /// <summary>取（必要时新建）本轮那条助手消息。</summary>
+    private DshMessageView AssistantFor(int turn, DateTimeOffset time)
+    {
+        if (_assistantByTurn.TryGetValue(turn, out var existing))
+        {
+            existing.LastStepTime = time;
+            return existing;
+        }
+
+        var message = new DshMessageView
+        {
+            IsMine = false,
+            GroupKey = $"turn:{turn}",
+            Meta = $"第 {turn} 轮",
+            TurnCountHint = turn,
+            FirstStepTime = time,
+            LastStepTime = time,
+        };
+        _assistantByTurn[turn] = message;
+        _view.Messages.Add(message);
+        return message;
+    }
+
+    private Change ApplyChunk(DshSessionEvent evt)
     {
         if (evt.Data is not JsonObject data) return Change.None;
+        if (data["chunk"] is not JsonObject chunk) return Change.None;
 
-        var chunk = data["chunk"];
-        if (chunk is not JsonObject c) return Change.None;
-
-        var kind = c["type"]?.GetValue<string>();
+        var kind = chunk["type"]?.GetValue<string>();
 
         // finish 块是**模型失败的唯一出口**：请求没成、余额不足、鉴权失败之类
         // 都不会抛到协议层，只会在这里带一个 reason.failure。第一次端到端跑
-        // 时正是因为不读它，界面表现为「发出去以后什么都没有」，无从排查。
+        // 时正因为不读它，界面表现为「发出去以后什么都没有」，无从排查。
         if (string.Equals(kind, DshChunkType.Finish, StringComparison.Ordinal))
         {
-            var failure = c["reason"]?["failure"]?["message"]?.GetValue<string>();
+            var failure = chunk["reason"]?["failure"]?["message"]?.GetValue<string>();
             if (string.IsNullOrWhiteSpace(failure)) return Change.None;
 
             var message = new DshMessageView { IsMine = false, Meta = $"失败 · {evt.Time:HH:mm}" };
@@ -178,136 +254,179 @@ public sealed class DshProjection
 
         if (!string.Equals(kind, DshChunkType.TextDelta, StringComparison.Ordinal)) return Change.None;
 
-        var delta = c["text"]?.GetValue<string>();
+        // 重放模式不消费增量：日志里的正文由权威全文负责，
+        // 增量要么被压缩成打包行、要么与权威全文重复。
+        if (_replay) return Change.None;
+
+        var delta = chunk["text"]?.GetValue<string>();
         if (string.IsNullOrEmpty(delta)) return Change.None;
 
-        var key = GroupKey(evt, c);
+        var turn = data["turn"]?.GetValue<int>() ?? Math.Max(_currentTurn, 0);
+        var step = data["step"]?.GetValue<int>() ?? 0;
+        var index = chunk["index"]?.GetValue<int>() ?? 0;
 
-        if (!_entries.TryGetValue(key, out var state))
+        // 同一步里模型可以同时产出正文块与思考块（index 不同）。不分开会让
+        // 思考的增量混进正文 —— 所以流式段落按 (turn, step, index) 区分。
+        var key = $"{turn}:{step}:{index}";
+
+        var change = Change.None;
+        if (_streaming is null || _streamingKey != key)
         {
-            var message = new DshMessageView { IsMine = false, GroupKey = key };
-            message.Blocks.Add(DshBlock.Paragraph(string.Empty));
-            state = new EntryState { Message = message };
-            _entries[key] = state;
-            _view.Messages.Add(message);
+            _streaming = AssistantFor(turn, evt.Time);
+            _streamingKey = key;
+            _streamingParagraph = DshBlock.Paragraph(string.Empty);
+            _streamingParagraph.IsStreaming = true;
+            _streaming.Blocks.Add(_streamingParagraph);
+            change |= Change.Structure;
         }
 
-        // 权威全文已经到了 → 增量是旧的重复投递，丢弃（这正是「正文写两遍」的根因）。
-        if (state.Authoritative) return Change.None;
-
-        var paragraph = state.Message.Blocks[0];
-        paragraph.Text += delta;
-        return Change.Text;
+        _streamingParagraph!.Text += delta;
+        return change | Change.Text;
     }
 
     private Change ApplyAssistantMessage(DshSessionEvent evt)
     {
         if (evt.Data is not JsonObject data) return Change.None;
-
-        var turn = data["turn"]?.GetValue<int>() ?? 0;
-        var step = data["step"]?.GetValue<int>() ?? 0;
-        var key = $"a:{turn}:{step}";
-
         if (data["message"] is not JsonObject message) return Change.None;
 
-        if (!_entries.TryGetValue(key, out var state))
+        var turn = data["turn"]?.GetValue<int>() ?? Math.Max(_currentTurn, 0);
+        var step = data["step"]?.GetValue<int>() ?? 0;
+
+        var target = AssistantFor(turn, evt.Time);
+        target.StepCount++;
+
+        var messageId = message["id"]?.GetValue<string>() ?? $"{turn}:{step}";
+        _messagesById[messageId] = target;
+
+        // 权威全文取代同一步的流式增量。整块重建那一小段而不是整条消息：
+        // 一步里可能先出正文、再出工具调用，把整条清空会把前面的内容抹掉。
+        DropStreamingParagraph(target);
+
+        foreach (var item in message["content"] as JsonArray ?? new JsonArray())
         {
-            // 流式阶段建的条目挂在 `a:{turn}:{step}:{index}` 上（index 要区分
-            // 正文块与思考块），而权威全文是**按步**给的 —— 键不同，所以这里
-            // 得先按步找一遍。找不到就会多出一条重复的助手消息：
-            // 实测第一次跑通时，界面上「收到」出现了两次，就是这么来的。
-            state = FindStreamedEntry(turn, step);
+            if (item is not JsonObject block) continue;
 
-            if (state is null)
-            {
-                var view = new DshMessageView { IsMine = false, GroupKey = key };
-                state = new EntryState { Message = view };
-                _view.Messages.Add(view);
-            }
-
-            // 让后续的增量投递也认得这条 —— 权威全文之后还会来同一步的 finish 块。
-            state.Message.GroupKey = key;
-            _entries[key] = state;
-        }
-
-        // 权威全文覆盖同一步的流式增量。整块重建而不是逐段比对：
-        // 「同一步里权威文本与增量不一致」这件事本身不该被容忍，
-        // 以权威为准是唯一能保持不变量的做法。
-        state.Message.Blocks.Clear();
-        state.Message.Meta = Meta(data, evt);
-
-        foreach (var block in message["content"] as JsonArray ?? new JsonArray())
-        {
-            if (block is not JsonObject b) continue;
-
-            switch (b["type"]?.GetValue<string>())
+            switch (block["type"]?.GetValue<string>())
             {
                 case "text":
-                    var text = b["text"]?.GetValue<string>();
-                    if (!string.IsNullOrEmpty(text)) state.Message.Blocks.Add(DshBlock.Paragraph(text!));
+                    var text = block["text"]?.GetValue<string>();
+                    if (!string.IsNullOrEmpty(text)) target.Blocks.Add(DshBlock.Paragraph(text!));
                     break;
 
                 case "tool-call":
-                    var callId = b["id"]?.GetValue<string>();
-                    var name = b["name"]?.GetValue<string>() ?? "tool";
-                    var args = b["arguments"]?.ToString() ?? "{}";
-                    var tool = DshBlockForTool(name, callId, args);
-                    state.Message.Blocks.Add(tool);
+                    var callId = block["id"]?.GetValue<string>();
+                    var name = block["name"]?.GetValue<string>() ?? "工具";
+                    var args = block["arguments"]?.ToString() ?? "{}";
+                    var tool = NewToolBlock(name, callId, args);
+                    target.Blocks.Add(tool);
                     if (callId is not null) _toolsByCallId[callId] = tool;
                     break;
 
-                // reasoning 等将来再画。**显式记下来而不是当没有** ——
-                // 界面上看不到思考过程，读代码的人应该能一眼看出这是没做，不是漏了。
+                case "reasoning":
+                    // 思考块收进来、**默认折叠**。实测一份 238 步的会话里
+                    // reasoning 比正文还多；全展开会把正文彻底淹掉。
+                    var reasoning = block["text"]?.GetValue<string>();
+                    if (!string.IsNullOrEmpty(reasoning))
+                    {
+                        var rb = DshBlock.Paragraph(reasoning!);
+                        rb.Kind = DshBlockKind.Reasoning;
+                        rb.SourceType = "reasoning";
+                        target.Blocks.Add(rb);
+                    }
+                    break;
+
+                // 将来出现新的块类型时**保留原文而不是丢掉** ——
+                // 丢掉之后「这里发生过一件事」这个信息就没了。
                 default:
+                    var raw = DshBlock.Paragraph(item.ToJsonString(Transport.JsonRpcLineTransport.JsonOptions));
+                    raw.Kind = DshBlockKind.Unknown;
+                    raw.SourceType = $"message.content:{block["type"]?.GetValue<string>()}";
+                    target.Blocks.Add(raw);
                     break;
             }
         }
 
-        state.Authoritative = true;
+        ResetStream();
         return Change.Structure;
     }
 
-    private static string Meta(JsonObject data, DshSessionEvent evt)
-    {
-        var turn = data["turn"]?.GetValue<int>() ?? 0;
-        return $"第 {turn} 轮 · {evt.Time:HH:mm}";
-    }
-
     /// <summary>
-    /// 找这一步在流式阶段建出来的条目。
+    /// 丢掉还在流的那一段 —— 它的权威版本马上要进来了。
     ///
-    /// 流式的键带 <c>index</c>（正文块与思考块要分开），权威全文不带。
-    /// 所以按前缀扫一遍 —— 用 <c>_entries</c> 的键而不是消息列表，是因为
-    /// 一个会话里同一步只可能有一个这样的条目。
+    /// 只丢标记为 <see cref="DshBlock.IsStreaming"/> 的块，不碰已经定稿的段。
     /// </summary>
-    private EntryState? FindStreamedEntry(int turn, int step)
+    private static void DropStreamingParagraph(DshMessageView message)
     {
-        var prefix = $"a:{turn}:{step}:";
-        foreach (var (key, state) in _entries)
+        for (var i = message.Blocks.Count - 1; i >= 0; i--)
         {
-            if (key.StartsWith(prefix, StringComparison.Ordinal)) return state;
+            if (message.Blocks[i].IsStreaming) message.Blocks.RemoveAt(i);
         }
-        return null;
     }
 
     // ── 工具 ─────────────────────────────────────────────────────────────
 
-    private static DshBlock DshBlockForTool(string name, string? callId, string arguments) => new()
+    private static DshBlock NewToolBlock(string name, string? callId, string arguments)
     {
-        Kind = DshBlockKind.Tool,
-        ToolName = name,
-        CallId = callId,
-        ToolArguments = arguments,
-        Text = string.Empty,
-    };
+        var block = new DshBlock
+        {
+            Kind = DshBlockKind.Tool,
+            ToolName = name,
+            CallId = callId,
+            ToolArguments = arguments,
+            RawInput = arguments,
+            Title = ToolTitle(name, arguments),
+        };
+
+        // 原始参数留在子块里：解析出来的是给人看的标题，原文是排查时唯一能信的
+        // 东西（每个工具的参数形状都不一样）。
+        var argBlock = DshBlock.Paragraph(arguments);
+        argBlock.Kind = DshBlockKind.Raw;
+        argBlock.SourceType = "tool.arguments";
+        block.Children.Add(argBlock);
+
+        return block;
+    }
+
+    /// <summary>
+    /// 工具卡的一行标题。
+    ///
+    /// 参数是 JSON 字符串，里面对人最有用的字段因工具而异 ——
+    /// 与其猜结构，不如按**已知的几个字段名**取，取不到就退回工具名本身。
+    /// 猜错的代价是一行误导性的标题，那比没有标题更糟。
+    /// </summary>
+    private static string ToolTitle(string name, string arguments)
+    {
+        try
+        {
+            if (JsonNode.Parse(arguments) is JsonObject args)
+            {
+                foreach (var field in new[]
+                         {
+                             "command", "file_path", "path", "pattern", "url",
+                             "query", "description", "prompt", "goal", "job_id",
+                         })
+                {
+                    var value = args[field]?.GetValue<string>();
+                    if (string.IsNullOrWhiteSpace(value)) continue;
+                    value = value.Replace('\r', ' ').Replace('\n', ' ').Trim();
+                    return value.Length <= 90 ? value : value[..90] + "…";
+                }
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            // 参数不是 JSON（工具可能收到自由文本）——回退到工具名。
+        }
+
+        return name;
+    }
 
     private Change ApplyToolResult(DshSessionEvent evt)
     {
         if (evt.Data is not JsonObject data) return Change.None;
         if (data["message"] is not JsonObject message) return Change.None;
 
-        var content = message["content"] as JsonArray;
-        var first = content?.FirstOrDefault() as JsonObject;
+        var first = (message["content"] as JsonArray)?.FirstOrDefault() as JsonObject;
         var callId = first?["toolCallId"]?.GetValue<string>();
         if (callId is null) return Change.None;
 
@@ -316,19 +435,23 @@ public sealed class DshProjection
 
         if (!_toolsByCallId.TryGetValue(callId, out var tool))
         {
-            // 结果先到、调用没到 —— 正常不该发生，但重放截断的日志时会出现。
-            // 建一个只有结果的工具块，比丢掉结果好：丢掉会让「工具跑过了」这件事消失。
-            tool = DshBlockForTool("工具", callId, "{}");
-            var message2 = new DshMessageView { IsMine = false, Meta = evt.Time.ToString("HH:mm") };
-            message2.Blocks.Add(tool);
-            _view.Messages.Add(message2);
+            // 结果先到、调用没到 —— 不该发生，但**重放被截断的日志时会出现**。
+            // 建一个只有结果的工具块，比丢掉结果好：丢掉会让「工具跑过了」消失。
+            var target = AssistantFor(data["turn"]?.GetValue<int>() ?? Math.Max(_currentTurn, 0), evt.Time);
+            tool = NewToolBlock(first?["name"]?.GetValue<string>() ?? "工具", callId, "{}");
+            target.Blocks.Add(tool);
             _toolsByCallId[callId] = tool;
-            return Change.Structure;
         }
 
         tool.Text = text;
         tool.IsError = isError;
         tool.HasResult = true;
+
+        var resultBlock = DshBlock.Paragraph(text);
+        resultBlock.Kind = DshBlockKind.Raw;
+        resultBlock.SourceType = "tool.result";
+        tool.Children.Add(resultBlock);
+
         return Change.Text;
     }
 
@@ -399,18 +522,6 @@ public sealed class DshProjection
     }
 
     // ── 工具方法 ─────────────────────────────────────────────────────────
-
-    private static string GroupKey(DshSessionEvent evt, JsonObject chunk)
-    {
-        if (evt.Data is not JsonObject data) return "a:?";
-        var turn = data["turn"]?.GetValue<int>() ?? 0;
-        var step = data["step"]?.GetValue<int>() ?? 0;
-        var index = chunk["index"]?.GetValue<int>() ?? 0;
-
-        // index 参与键：同一步里模型可以产出多块（正文块 + 思考块），
-        // 不分开会让思考的增量混进正文。
-        return $"a:{turn}:{step}:{index}";
-    }
 
     /// <summary>把一个 content 数组里的 text 块拼起来 —— 内核有时把一段正文拆成多块。</summary>
     private static string JoinTextBlocks(JsonNode? content)

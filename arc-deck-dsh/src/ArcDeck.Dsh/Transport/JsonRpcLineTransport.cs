@@ -27,6 +27,7 @@ public sealed class JsonRpcLineTransport : IAsyncDisposable
 
     private Task? _pump;
     private long _nextId;
+    private bool _disposed;
 
     /// <summary>每一条**通知**（服务端 → 客户端）。抛异常不会弄死读取循环。</summary>
     public event Action<string, JsonNode?>? NotificationReceived;
@@ -226,13 +227,27 @@ public sealed class JsonRpcLineTransport : IAsyncDisposable
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
     };
 
+    /// <summary>
+    /// 幂等的释放。
+    ///
+    /// **幂等不是洁癖，是实测撞出来的**：CLI 里显式调了一次
+    /// <c>client.DisposeAsync()</c> 去让内核落盘，而外层还有 <c>await using</c> ——
+    /// 第二次进入时 <c>_cts.Cancel()</c> 抛 <see cref="ObjectDisposedException"/>，
+    /// 进程以未处理异常退出（实测退出码 -532462766）。
+    /// 「已经关掉了」不该是一次崩溃，尤其是发生在收尾阶段。
+    /// </summary>
     public async ValueTask DisposeAsync()
     {
-        _cts.Cancel();
+        if (_disposed) return;
+        _disposed = true;
+
+        try { _cts.Cancel(); } catch (ObjectDisposedException) { }
+
         if (_pump is not null)
         {
             try { await _pump.ConfigureAwait(false); } catch { }
         }
+
         FailAllPending("传输已释放");
         _cts.Dispose();
     }
