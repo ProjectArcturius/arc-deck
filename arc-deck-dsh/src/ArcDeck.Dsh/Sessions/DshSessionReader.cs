@@ -271,10 +271,63 @@ public static class DshSessionReader
             if (aBlocks != bBlocks)
             {
                 diffs.Add($"#{i} 块序列不同：\n      实时 {aBlocks}\n      重放 {bBlocks}");
+
+                // **长度差 1 也要能定位。** 只报「think(7799) ≠ think(7798)」时，
+                // 下一步只能靠猜 —— 而 147 块里差 1 个字符这种差异，
+                // 猜错的代价是整个方向跑偏（参 U13：错误的诊断会冻住别的验证）。
+                // 块数一致时逐块配对，把首个不同的字符位置与上下文写出来。
+                var detail = LocateFirstBlockDifference(a, b);
+                if (detail is not null) diffs.Add($"#{i} 首个文本差异：{detail}");
             }
         }
 
         return new LoadedSessionCompare(diffs);
+    }
+
+    /// <summary>
+    /// 逐块配对，把第一处文本差异定位到「第几个块、第几个字符、两边各是什么」。
+    ///
+    /// 只在块数一致时配对 —— 块数不同时下标对不上，硬配会指错地方。
+    /// 「去掉首尾空白后是否相同」也一并报出来：那能把「多一个换行」与
+    /// 「少一个字符」分开，而这两种原因的修法完全不同。
+    /// </summary>
+    private static string? LocateFirstBlockDifference(DshMessageView a, DshMessageView b)
+    {
+        if (a.Blocks.Count != b.Blocks.Count) return null;
+
+        for (var i = 0; i < a.Blocks.Count; i++)
+        {
+            var x = a.Blocks[i];
+            var y = b.Blocks[i];
+            if (x.Text == y.Text) continue;
+
+            var limit = Math.Min(x.Text.Length, y.Text.Length);
+            var at = 0;
+            while (at < limit && x.Text[at] == y.Text[at]) at++;
+
+            var trimmedEqual = x.Text.Trim() == y.Text.Trim();
+            var note = trimmedEqual
+                ? "（去掉首尾空白后相同）"
+                : "（去掉首尾空白后仍不同）";
+
+            return $"第 {i} 块 {x.Kind}，实时 {x.Text.Length} 字 ≠ 重放 {y.Text.Length} 字；" +
+                   $"从第 {at} 个字符起不同{note}\n" +
+                   $"      实时 …{Snippet(x.Text, at)}…\n" +
+                   $"      重放 …{Snippet(y.Text, at)}…";
+        }
+
+        // 块序列不同但每块文本都相同 —— 那差在种类或工具名上，不在文本上。
+        return "每块文本都相同 —— 差异在种类、工具名或结果有无上";
+    }
+
+    /// <summary>取差异位置附近的一小段（含转义），用来在终端上看清到底是哪个字符。</summary>
+    private static string Snippet(string text, int at)
+    {
+        var start = Math.Max(0, at - 12);
+        var end = Math.Min(text.Length, at + 12);
+        var window = text[start..end]
+            .Replace("\r", "\\r").Replace("\n", "\\n").Replace("\t", "\\t");
+        return (start > 0 ? "…" : "") + window + (end < text.Length ? "…" : "");
     }
 
     /// <summary>
