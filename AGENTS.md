@@ -223,17 +223,26 @@ mux 的 channel 是无界的。
 快照那一页必须先攒着不折，因为往回翻的页比它更早。翻页循环有**无进展就停**的闸
 （页取空、或游标没往回走），上限 500 页只是保险。
 
-**子 agent 要父地址**（**仍未实现**）。对子 agent 用 `{kind:'session', sessionId}`
+**子 agent 要父地址**（**已实现**）。对子 agent 用 `{kind:'session', sessionId}`
 会被内核拒绝：`subagent Sessions require their durable parent address`。
-44 个子 agent 会话都卡在这一条上，长得一模一样 —— 混进「打不开」会把真问题埋掉。
-
-地址形状**已经从 page 的参数 schema 里读出来了**，但还差一个数据来源：
+地址是另一种形状：
 
 ```
 { kind: 'subagent', parentSessionId, childSessionId, mode: 'one-shot' | 'continuable' }
 ```
 
-`mode` 不在 `session/list` 给我们的字段里 —— 要实现得先确认那个值从哪来。
+**`mode` 来自 `projections.values.subagent`** —— 注意这个位置：
+上游 schema 打印出来的缩进让人以为描述符是列表项的**顶层**字段（`items[].subagent`），
+照那个读法 `o["subagent"]` 永远是 null，44 个会话会一直用普通地址去开、
+一直报同一句错。**是原文纠正了这次误读**：`--harness-list-raw` 把真正解析的
+位置打出来，一眼看到连一个**空会话**的 values 里都有 `"subagent": null`。
+
+另一条同源的：**`projections.values.title` 就是真标题**。
+「列表上拿不到标题」那句话说的是**扫磁盘**那条路（`DshSessionReader.Enumerate`
+只读会话头）；内核给的列表**带标题**，harness 那条路的列表可以有真标题。
+
+`HarnessSessionInfo.Raw` 保留了列表项原文 —— 协议无版本协商（P2），
+而「schema 有、实际的位置却不是那样」已经栽过一次。
 
 #### P14 · 两份真实日志坏了 —— 报错形状指向**两个写者**（成因未证实）
 
@@ -275,8 +284,8 @@ if (address.kind === 'session' && source.source === 'prepared') {
 也就是说对一个**冷会话**（在磁盘上、进程里没有活动实例）follow 一下，
 这个内核就**接管**它了，之后它会往同一份日志里写。
 
-**这条对工具的性质有影响**：`--harness-check-all` 打开 25 个会话，
-就等于让第二个内核接管 25 个会话 —— 它不是「扫一遍日志」那种只读检查。
+**这条对工具的性质有影响**：`--harness-check-all` 打开**每一个**会话（现在是 73 个），
+就等于让第二个内核接管 73 个会话 —— 它不是「扫一遍日志」那种只读检查。
 DSH Desktop 正在跑时，两个内核会碰同一份 `DSH_HOME`。
 
 要「只读地」看一眼历史，用 `--load <id>`（那条路直接解 zstd，不经过内核）；
@@ -762,13 +771,14 @@ SDK 里 152 处引用、0 处定义。
 | `arc-deck-dsh`（协议客户端） | ✅ **已实测**：找到内核 → 起 `dsh --profile sdk` → 握手 → `session/prompt` → 流式事件 → 投影出助手正文（`dsh-cli`，见下） |
 | `arc-deck-dsh` 接进界面 | ❌ **未做**，卡在 P1：UWP 是 AppContainer，起不了内核也读不到包外路径 |
 | `arc-deck-dsh` 会话重载（读回已存会话） | ✅ **已实测**：真实日志全部通过重放不变式（**现有 71 份里有 1 份失败** —— 那份日志确实坏了，两份独立读数都指向它，见 P14）；`dsh-cli --verify-reload` **同一条会话**实时 vs 重放逐块一致（参 P7/P9） |
-| `arc-deck-dsh` 会话列表（列磁盘上的会话） | ✅ **已实测**：`--list` 列出会话并标出属于当前工作区的那些。只读会话头、**不解压全文**；所以列表上拿不到标题（真标题要重载才知道，见 `DshSessionReader.Enumerate` 的注释） |
+| `arc-deck-dsh` 会话列表（列磁盘上的会话） | ✅ **已实测**：`--list` 列出会话并标出属于当前工作区的那些。只读会话头、**不解压全文**；**这条路**上拿不到标题（真标题要重载才知道，见 `DshSessionReader.Enumerate` 的注释）—— 内核那条路能拿到，见下面一行 |
 | `arc-deck-dsh` 工具卡 / 思考块 | ✅ 已实现（工具卡带标题与结果、思考块默认折叠）。界面侧未接，所以「折叠」这个交互本身**没实测** |
-| `arc-deck-dsh` **harness web / Remote 层**（会话列表、打开、翻页、对账） | ✅ **已实测**：71 个会话里 **25 个逐块对账一致、0 不一致**（`--harness-check-all`，往回翻了 85 页）；`--harness-verify` 单条会话「两条路一致」。路上修掉两处：`follow` 打开挂死（P11）与 WS 分块撕开汉字（P12） |
+| `arc-deck-dsh` **harness web / Remote 层**（会话列表、打开、翻页、对账） | ✅ **已实测**：**73 个会话里 71 个逐块对账一致、0 不一致**（`--harness-check-all`，往回翻 132 页）；`--harness-verify` 单条会话「两条路一致」。路上修掉三处：`follow` 打开挂死（P11）、WS 分块撕开汉字（P12）、子 agent 地址读错位置（P13） |
+| `arc-deck-dsh` harness **会话列表带真标题** | ✅ **已实测**：标题就在 `projections.values.title`（`--harness-list-raw` 打出原文确认）。**扫磁盘那条路仍然拿不到标题** —— 两条路不要混 |
 | `arc-deck-dsh` harness **发消息**（`--harness-prompt`） | ❌ **未实测**：代码写了，**一次都没跑过** —— 跑它会往**真实会话**里发一条消息，所以没有擅自跑（铁律 2） |
-| `arc-deck-dsh` harness **往回翻页**（`session/page`） | ✅ **已实测**：`loadAllHistory` 翻到底再按时间顺序折叠；25 个会话全部「历史取全=True」，最多的一个 17 页（参 P13） |
+| `arc-deck-dsh` harness **往回翻页**（`session/page`） | ✅ **已实测**：`loadAllHistory` 翻到底再按时间顺序折叠；73 个会话全部「历史取全=True」，最多的一个 17 页（参 P13） |
 | `arc-deck-dsh` harness **mux 分流**（一条连接两条流） | ✅ **已实测**（`--harness-mux-check`：两条流并发等，各自快照的 `header.id` 与请求逐字相同）。修前所有流共用一个队列 |
-| `arc-deck-dsh` harness **子 agent 会话** | ❌ **未实现**：地址形状已从上游 schema 读出，但差 `mode` 的数据来源；客户端现在明确跳过（44 个，见 P13） |
+| `arc-deck-dsh` harness **子 agent 会话** | ✅ **已实测**：44 个子 agent 用**父地址**形状打开并对账通过。`mode` 从 `projections.values.subagent` 读（位置曾经读错，见 P13） |
 | `uwp/` 数据 | ⚠️ 全部是示例数据（`Models/Store.cs`、`Store.Tools`），未接协议；协议层已能供数据但**尚未接线** |
 
 ### 还没实测的部分
