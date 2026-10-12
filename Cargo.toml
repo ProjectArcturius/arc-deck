@@ -1,13 +1,17 @@
-# Arc Deck —— 两个实现并列
+# Arc Deck —— 产品分两部分
 #
-#   kanesumi/   Rust + 自绘 Scene（跨平台，无 WebView）  ← 本 workspace 管这个
-#   uwp/        C# + WinUI 2（Windows 专属，MSBuild 管）
+#   crates/arc-deck-core  Rust 共用产品模型（任务/配置/结果/事件/Agent/授权）
+#   crates/arc-deck-dsh   DSH 适配与假 SDK 对端
+#   crates/arc-deck-cli   headless worker 命令
+#   kanesumi/             早期自绘 GUI（已暂停新增功能，见 docs/PRODUCT_PLAN.md §4.2）
+#   uwp/                  Windows GUI（C# + WinUI 2，MSBuild 管，不在本 workspace）
 #
-# 两者共享设计正典与控件规格，**不共享实现代码**（参 AGENTS.md 的扇区模型）。
+# 跨 crate 依赖方向：core → dsh → cli，反向不允许（参 PRODUCT_PLAN §4.1）。
 
 [workspace]
 resolver = "2"
 members = [
+    "crates/arc-deck-core",
     "kanesumi/crates/arc-deck-shell",
     "kanesumi/probes/ime-probe",
     "kanesumi/probes/layout-bench",
@@ -27,4 +31,25 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_LibraryLoader",
     "Win32_UI_Input_Ime",
     "Win32_UI_WindowsAndMessaging",
+] }
+
+# ── Arc Deck 产品 crate（core / dsh / cli）───────────────────────────────
+#
+# 版本只写主版本号，具体小版本由 Cargo.lock 钉住；离线构建用的
+# registry 缓存里已有这些 crate（见 AGENTS.md 的构建说明）。
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tempfile = "3"
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "io-util",
+    # 假 SDK 对端要直接接 stdin/stdout —— `io-std` 提供 tokio 版的这两条流。
+    "io-std",
+    "process",
+    "sync",
+    "time",
+    "fs",
+    "signal",
 ] }

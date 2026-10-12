@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "task_id": "example-task",
+  "status": "completed",
+  "summary": "离线完成",
+  "session_id": "arc-deck-example-task-1",
+  "runtime_version": "arc-deck-fixture-sdk/fixture",
+  "verification": [
+    {
+      "id": "filter-regression",
+      "kind": "command",
+      "command": "cargo test session_filter",
+      "cwd": ".",
+      "exit_code": 0,
+      "evidence": "C:/arc-deck-state/runs/example-task/events.jsonl",
+      "outcome": "passed"
+    }
+  ],
+  "unverified": [
+    "任务书没有声明验收项：completed 只表示内核正常终止，不代表行为已验证"
+  ],
+  "artifacts": [
+    {
+      "kind": "events",
+      "path": "C:/arc-deck-state/runs/example-task/events.jsonl"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 11,
+    "completion_tokens": 2,
+    "total_tokens": 13
+  },
+  "policy": {
+    "agent": "echo",
+    "mode": "build",
+    "profile": "workspace-development",
+    "read_paths": ["."],
+    "write_paths": ["crates"],
+    "shell": true,
+    "network": false,
+    "commit": false,
+    "push": false
+  }
+}

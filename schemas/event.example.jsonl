@@ -1,0 +1,5 @@
+{"schema_version":1,"task_id":"example-task","seq":1,"type":"state","data":{"state":"accepted","detail":"任务书与启动配置已通过校验"}}
+{"schema_version":1,"task_id":"example-task","seq":2,"type":"state","data":{"state":"running","detail":"握手"}}
+{"schema_version":1,"task_id":"example-task","seq":3,"type":"tool_call","data":{"call_id":"fixture-call-1","tool":"shell","summary":"cargo test session_filter"}}
+{"schema_version":1,"task_id":"example-task","seq":4,"type":"tool_result","data":{"call_id":"fixture-call-1","tool":"shell","status":"ok","summary":"退出码 0"}}
+{"schema_version":1,"task_id":"example-task","seq":5,"type":"state","data":{"state":"terminal","detail":"终态 completed"}}

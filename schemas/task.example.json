@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "task_id": "fix-session-filter",
+  "workspace": "C:/work/project",
+  "agent": "echo",
+  "mode": "build",
+  "instruction": "修复会话筛选，并补回归测试",
+  "constraints": {
+    "read_paths": ["."],
+    "write_paths": ["src/", "tests/"],
+    "shell_policy": "workspace-development",
+    "allow_commit": false,
+    "allow_push": false
+  },
+  "acceptance": [
+    {
+      "id": "filter-regression",
+      "kind": "command",
+      "command": "cargo test session_filter"
+    },
+    {
+      "id": "human-look",
+      "kind": "manual",
+      "description": "主控确认筛选结果符合预期"
+    }
+  ],
+  "timeout_seconds": 900
+}

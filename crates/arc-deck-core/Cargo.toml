@@ -1,0 +1,16 @@
+[package]
+name = "arc-deck-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Arc Deck 产品模型：任务/配置/结果/事件 schema、Agent 定义与授权解析"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
