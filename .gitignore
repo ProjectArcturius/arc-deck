@@ -1,3 +1,6 @@
+# 本地参考仓库 —— 不将上游检出及其产物带入 Arc Deck 的提交。
+/REFS/
+
 # ── Rust（kanesumi 版本）────────────────────────────────
 /target
 **/*.rs.bk
@@ -21,6 +24,10 @@ AppPackages/
 *.pfx
 
 # ── 本地运行产物 ────────────────────────────────────────
+# worker 的离线验收会把结果写到工作目录（参 docs/PRODUCT_PLAN.md §10.2）。
+# 状态目录落在 target/ 下，已经在上面忽略过了。
+/result.json
+
 # 探针与 demo 的临时日志
 /probe-out.log
 /probe-err.log
