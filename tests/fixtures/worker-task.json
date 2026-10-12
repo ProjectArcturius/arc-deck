@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "task_id": "offline-fixture-smoke",
+  "workspace": "../..",
+  "agent": "echo",
+  "mode": "build",
+  "instruction": "离线夹具：只验证 worker 链路，不读取任何真实模型。",
+  "constraints": {
+    "write_paths": ["crates/"],
+    "shell_policy": "workspace-development",
+    "allow_commit": false,
+    "allow_push": false
+  },
+  "acceptance": [
+    {
+      "id": "offline-check",
+      "kind": "command",
+      "command": "cargo test session_filter"
+    }
+  ],
+  "timeout_seconds": 60
+}

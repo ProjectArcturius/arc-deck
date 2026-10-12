@@ -13,6 +13,7 @@ resolver = "2"
 members = [
     "crates/arc-deck-core",
     "crates/arc-deck-dsh",
+    "crates/arc-deck-cli",
     "kanesumi/crates/arc-deck-shell",
     "kanesumi/probes/ime-probe",
     "kanesumi/probes/layout-bench",

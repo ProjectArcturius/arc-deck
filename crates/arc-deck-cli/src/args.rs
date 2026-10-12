@@ -1,0 +1,235 @@
+//! 命令行解析。
+//!
+//! 手写而不是引第三方解析器：公开面只有两条命令、六个开关，而每个开关的
+//! 缺席行为都要**明确**（没有默认 runtime、没有默认 workspace）——
+//! 用通用解析器的默认值反而更容易把「没给」悄悄变成「用了一个默认」。
+
+use std::path::PathBuf;
+
+use arc_deck_core::error::{code, SpecError, SpecResult};
+
+/// 任务书来源。`-` 表示从 stdin 读。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskSource {
+    File(PathBuf),
+    Stdin,
+}
+
+/// 已解析的命令。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    WorkerRun(WorkerArgs),
+    /// 隐藏子命令：把自己作为假 SDK 对端启动。只在 `test-runtime` 下可达。
+    FixtureSdk { scenario: String },
+    Help,
+    Version,
+}
+
+/// `worker run` 的参数。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerArgs {
+    pub config: PathBuf,
+    pub task: TaskSource,
+    pub format: String,
+    pub result: Option<PathBuf>,
+    pub cancel_file: Option<PathBuf>,
+}
+
+pub const USAGE: &str = "\
+arc-deck —— Arc Deck 的 headless worker
+
+用法：
+  arc-deck worker run --config <配置文件> --task <任务书|-> [选项]
+
+选项：
+  --config <路径>       必需的启动配置（授权上限、运行时、状态目录）
+  --task <路径|->       任务书；`-` 表示从 stdin 读一份 JSON
+  --format <jsonl>      事件输出格式，当前只支持 jsonl（默认 jsonl）
+  --result <路径>       把最终结果同时写到这里（完整写入后发布）
+  --cancel-file <路径>  观察该文件请求取消；启动时必须不存在
+
+退出码：
+  0 完成 · 1 失败 · 2 受阻 · 3 已取消 · 4 超时 · 5 结果未知 · 64 任务书或配置无效
+";
+
+/// 解析参数（不含程序名）。
+pub fn parse(argv: &[String]) -> SpecResult<Command> {
+    let Some(first) = argv.first() else {
+        return Ok(Command::Help);
+    };
+    match first.as_str() {
+        "--help" | "-h" | "help" => Ok(Command::Help),
+        "--version" | "-V" => Ok(Command::Version),
+        "__fixture-sdk" => parse_fixture(&argv[1..]),
+        "worker" => parse_worker(&argv[1..]),
+        other => Err(SpecError::new(
+            code::CONFIG_INVALID,
+            format!("未知命令 `{other}`；用 --help 看用法"),
+        )),
+    }
+}
+
+fn parse_fixture(rest: &[String]) -> SpecResult<Command> {
+    let mut scenario = None;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--scenario" => {
+                i += 1;
+                scenario = Some(value_at(rest, i, "--scenario")?.to_string());
+            }
+            other => {
+                return Err(SpecError::new(
+                    code::CONFIG_INVALID,
+                    format!("__fixture-sdk 不接受参数 `{other}`"),
+                ))
+            }
+        }
+        i += 1;
+    }
+    let scenario = scenario.ok_or_else(|| {
+        SpecError::new(code::CONFIG_INVALID, "__fixture-sdk 需要 --scenario")
+    })?;
+    Ok(Command::FixtureSdk { scenario })
+}
+
+fn parse_worker(rest: &[String]) -> SpecResult<Command> {
+    let Some(sub) = rest.first() else {
+        return Err(SpecError::new(code::CONFIG_INVALID, "worker 需要一个子命令（run）"));
+    };
+    if sub != "run" {
+        return Err(SpecError::new(
+            code::CONFIG_INVALID,
+            format!("worker 只支持 run，得到 `{sub}`"),
+        ));
+    }
+
+    let mut config: Option<PathBuf> = None;
+    let mut task: Option<TaskSource> = None;
+    let mut format = "jsonl".to_string();
+    let mut result: Option<PathBuf> = None;
+    let mut cancel_file: Option<PathBuf> = None;
+
+    let mut i = 1;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--config" => {
+                i += 1;
+                config = Some(PathBuf::from(value_at(rest, i, "--config")?));
+            }
+            "--task" => {
+                i += 1;
+                let raw = value_at(rest, i, "--task")?;
+                task = Some(if raw == "-" { TaskSource::Stdin } else { TaskSource::File(PathBuf::from(raw)) });
+            }
+            "--format" => {
+                i += 1;
+                format = value_at(rest, i, "--format")?.to_string();
+            }
+            "--result" => {
+                i += 1;
+                result = Some(PathBuf::from(value_at(rest, i, "--result")?));
+            }
+            "--cancel-file" => {
+                i += 1;
+                cancel_file = Some(PathBuf::from(value_at(rest, i, "--cancel-file")?));
+            }
+            other => {
+                return Err(SpecError::new(
+                    code::CONFIG_INVALID,
+                    format!("worker run 不认识参数 `{other}`"),
+                ))
+            }
+        }
+        i += 1;
+    }
+
+    if format != "jsonl" {
+        return Err(SpecError::new(
+            code::CONFIG_INVALID,
+            format!("--format 只支持 jsonl，得到 `{format}`"),
+        ));
+    }
+
+    Ok(Command::WorkerRun(WorkerArgs {
+        config: config.ok_or_else(|| {
+            SpecError::new(code::CONFIG_MISSING, "缺少 --config；启动配置没有默认值")
+        })?,
+        task: task.ok_or_else(|| {
+            SpecError::new(code::TASK_UNREADABLE, "缺少 --task；任务书没有默认值")
+        })?,
+        format,
+        result,
+        cancel_file,
+    }))
+}
+
+fn value_at<'a>(rest: &'a [String], index: usize, flag: &str) -> SpecResult<&'a str> {
+    rest.get(index).map(String::as_str).ok_or_else(|| {
+        SpecError::new(code::CONFIG_INVALID, format!("`{flag}` 后面缺少取值"))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argv(raw: &[&str]) -> Vec<String> {
+        raw.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn worker_run_minimal() {
+        let cmd = parse(&argv(&["worker", "run", "--config", "c.json", "--task", "t.json"])).unwrap();
+        let Command::WorkerRun(args) = cmd else { panic!("期望 worker run") };
+        assert_eq!(args.config, PathBuf::from("c.json"));
+        assert_eq!(args.task, TaskSource::File(PathBuf::from("t.json")));
+        assert_eq!(args.format, "jsonl");
+        assert!(args.result.is_none());
+        assert!(args.cancel_file.is_none());
+    }
+
+    #[test]
+    fn dash_task_means_stdin() {
+        let cmd = parse(&argv(&["worker", "run", "--config", "c.json", "--task", "-"])).unwrap();
+        let Command::WorkerRun(args) = cmd else { panic!() };
+        assert_eq!(args.task, TaskSource::Stdin);
+    }
+
+    #[test]
+    fn config_is_required() {
+        let err = parse(&argv(&["worker", "run", "--task", "t.json"])).unwrap_err();
+        assert!(err.is(code::CONFIG_MISSING), "{err}");
+    }
+
+    #[test]
+    fn task_is_required() {
+        let err = parse(&argv(&["worker", "run", "--config", "c.json"])).unwrap_err();
+        assert!(err.is(code::TASK_UNREADABLE), "{err}");
+    }
+
+    #[test]
+    fn dangling_flag_is_rejected() {
+        let err = parse(&argv(&["worker", "run", "--config"])).unwrap_err();
+        assert!(err.is(code::CONFIG_INVALID), "{err}");
+    }
+
+    #[test]
+    fn unknown_format_is_rejected() {
+        let err = parse(&argv(&["worker", "run", "--config", "c", "--task", "t", "--format", "xml"]))
+            .unwrap_err();
+        assert!(err.is(code::CONFIG_INVALID), "{err}");
+    }
+
+    #[test]
+    fn unknown_command_is_rejected() {
+        let err = parse(&argv(&["daemon"])).unwrap_err();
+        assert!(err.is(code::CONFIG_INVALID), "{err}");
+    }
+
+    #[test]
+    fn fixture_subcommand_parses_scenario() {
+        let cmd = parse(&argv(&["__fixture-sdk", "--scenario", "success"])).unwrap();
+        assert_eq!(cmd, Command::FixtureSdk { scenario: "success".into() });
+    }
+}
