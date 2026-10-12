@@ -1,0 +1,23 @@
+[package]
+name = "arc-deck-dsh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Arc Deck 的 DSH 适配：JSON-RPC 行传输、事件投影与假 SDK 对端"
+
+[features]
+# 假 SDK 对端（fixture）。默认关：发布构建里不该存在一个能被指向真实内核的
+# 假实现，哪怕它只是读一个场景名。
+test-runtime = []
+
+[dependencies]
+arc-deck-core = { path = "../arc-deck-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
