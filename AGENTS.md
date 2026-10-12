@@ -1,6 +1,22 @@
 # AGENTS.md — Arc Deck
 
-Arc Deck 是 DeepSeek Harness 的原生桌面客户端，有**两个并列实现**，
+## 当前产品方向（2026-10-12）
+
+需求与下一阶段编码入口：[docs/PRODUCT_PLAN.md](docs/PRODUCT_PLAN.md)。该文件是待用户审阅的实施基线；本轮只立文档，新模块尚未实现。
+
+- 产品分成 Rust TUI/headless 与 Windows GUI。前者目标跨平台，headless 为外部主控派发任务的 worker；后者保留 C# + WinUI 2，不擅自换 WinUI 3 或 WebView。
+- 共用产品模型、Agent 配置、任务/结果与 DSH 适配逐步收敛到 Rust；GUI 通过本地 IPC 接入。不是继续维护两个并列 GUI 或两套生产 DSH 客户端。
+- 默认 Agent 是 Echo，具备完整工程角色、工具/权限、验证/交付纪律与用户提供的风格；Build/Plan 参考 OpenCode，工具与角色定义体验参考 Claude Code 公开扩展。提示词不能替代实际权限。
+- TUI 迁移 OpenCode 的视觉与交互，不受 Kanesumi 或 WinUI 的外观规格支配。模型调用、工具执行与 agent loop 继续使用 DSH，不再造 OpenCode/Claude 的执行内核。
+- 首份编码范围是 PRODUCT_PLAN §10.2：离线单任务 worker、schema、Echo 定义加载、假 SDK 对端与失败/取消测试；不同时重构 GUI、做完整 TUI 或迁移旧会话。
+- `/REFS/` 只作本地参考，不入 Git，也不能成为生产构建依赖。复制 OpenCode 的实质部分保留 MIT notice；Claude Code 根许可证为商业条款，不默认复制源码或提示词。
+- 旧代码与数据保留。K1–K9 只约束既有 `kanesumi/`，U1–U17 继续约束既有 `uwp/`；旧协议的事件词汇、版本结论与实测只对旧组合成立，新 DSH 必须重新核对。
+
+下文保留旧实现约束与历史实测；其中「两条 GUI」「C# 协议层作为新宿主引用」及原分线安排不再支配新开发。若历史路线与当前产品方向冲突，以 PRODUCT_PLAN 为准；非冲突的工程/证据纪律继续执行。
+
+## 旧实现与历史记录
+
+此前 Arc Deck 是 DeepSeek Harness 的原生桌面客户端，有两个并列实现，
 外加**一层两者共用的协议客户端**。
 
 ```
@@ -23,7 +39,7 @@ arc-deck-dsh/   与内核说话的协议层（C# / .NET 9，桌面进程）  两
 > 不要把 Kanesumi 的东西搬进 `uwp/`，也不要拿 `uwp/` 的平台行为去改
 > Kanesumi 的规格。两者的**唯一**交集是「同一个客户端」这个目标。
 
-### P · `arc-deck-dsh/` —— 那一层是共用的
+### P · `arc-deck-dsh/` —— 既有 C# 共用协议层的历史约束
 
 界面两条路线不共享，但**协议只有一份**：事件词汇、翻译规则、上游版本钉法，
 两边读到的东西必须逐字一致。所以它单独成目录，而不是塞进任一实现里。
@@ -42,7 +58,7 @@ arc-deck-dsh/   与内核说话的协议层（C# / .NET 9，桌面进程）  两
 UWP 版目前的界面本身是好的（会话列表、Markdown、工具页、主题都已实测），
 但它无法自己拿到数据 —— 这是两件独立的事，不要混为一谈。
 
-**下一步的方向**（尚未实施）：界面外壳换成完整信任的桌面进程，
+**旧路线的下一步**（未实施，现由 PRODUCT_PLAN 取代）：界面外壳换成完整信任的桌面进程，
 `arc-deck-dsh` 作为它的引用；UWP 版作为「无内核也能看的界面」保留。
 
 #### P2 · 上游版本只能**钉**，问不出来
@@ -326,7 +342,7 @@ DSH Desktop 正在跑时，两个内核会碰同一份 `DSH_HOME`。
 `test:` / `build:`。**正文用中文**，关键设计决策**必须记录原因** ——
 让一年后读 `git log` 不需要开 PR。
 
-**一个 section / 逻辑单元一个 commit**，无需等待用户要求。
+**只有用户明确要求时才提交。** 获准提交后，一个 section / 逻辑单元一个 commit。
 **提交 ≠ 推送** —— 推送必须等用户明确指示。
 
 正文惯用标点：`——` 引出根因或理由，`·` 分隔同一提交内的独立改动。
@@ -830,7 +846,19 @@ SDK 里 152 处引用、0 处定义。
 ## 构建
 
 ```bash
-# Rust 版本
+# Arc Deck 产品 crate（core / dsh / cli）—— TUI 与 headless 的那一半
+# `--features arc-deck-cli/test-runtime` 是必需的：假 SDK 对端与隐藏子命令
+# 都在那个 feature 后面，发布构建里不存在它们。
+cargo test -p arc-deck-core -p arc-deck-dsh -p arc-deck-cli \
+    --features arc-deck-cli/test-runtime --offline
+
+# 端到端离线验收（不发任何模型请求）。重复跑要先清状态目录，否则第二次
+# 以 TASK_ALREADY_SEEN 退出 64 —— 见 docs/PRODUCT_PLAN.md §10.2。
+cargo run -p arc-deck-cli --features test-runtime -- worker run \
+    --config tests/fixtures/worker-offline.json \
+    --task tests/fixtures/worker-task.json --format jsonl --result result.json
+
+# 早期自绘 GUI 骨架（kanesumi 那一支，已暂停新增功能）
 cargo test
 cargo run --bin arc-deck-demo
 cargo run -p layout-bench --release

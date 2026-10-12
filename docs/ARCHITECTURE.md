@@ -1,4 +1,6 @@
-# Arc Deck · 架构
+# Arc Deck · 早期 Kanesumi 架构记录
+
+> 本文是早期 Rust 自绘 GUI 骨架的设计快照，不是当前全产品架构。新的 TUI/headless + WinUI GUI 分工、Echo、工具与 worker 需求以 [PRODUCT_PLAN.md](PRODUCT_PLAN.md) 为准。下文「协议层尚未建立」等状态只记录当时，不能拿来判断现有 C# 协议层或新 Rust 规划的完成度。
 
 ## 分层
 
