@@ -13,8 +13,9 @@
 //!   stderr 上打一句 `patch: entry "…" not found`，退出码照样是 0。所以还要断言 stderr
 //!   干净，并在 dump 里按行核对 —— 见 `m3_live_unknown_row_id_is_reported_on_stderr`
 //!   那条对照实验：它证明「stderr 干净」这个断言有牙齿，不是空过。
-//! - **这里不证明「真实工具调用被拒」。** 那要一个脚本化的假模型端点，属于 m3b；
-//!   本文件的边界写在 docs/M3_GUARD.md 末尾。
+//! - **这里不证明「真实工具调用被拒」。** 那要一个脚本化的假模型端点，
+//!   在 `m3_negative_live.rs` 里（同一目录）——它驱动的是真实内核 + 假 provider，
+//!   断言的是工具结果与文件系统。本文件的边界写在 docs/M3_GUARD.md §6。
 //!
 //! 名字一律以 `m3_live_` 开头且 `#[ignore]`：它们要一台装了运行时的机器，不进日常离线套件。
 

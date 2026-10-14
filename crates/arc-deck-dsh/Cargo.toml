@@ -8,8 +8,9 @@ repository.workspace = true
 description = "Arc Deck 的 DSH 适配：JSON-RPC 行传输、事件投影与假 SDK 对端"
 
 [features]
-# 假 SDK 对端（fixture）。默认关：发布构建里不该存在一个能被指向真实内核的
-# 假实现，哪怕它只是读一个场景名。
+# 假 SDK 对端（fixture）与脚本化的假模型端点（`fake_provider`）。默认关：
+# 发布构建里不该存在一个能被指向真实内核的假实现，也不该存在一个能被指向
+# 任意地址的假 provider。
 test-runtime = []
 
 [dependencies]
