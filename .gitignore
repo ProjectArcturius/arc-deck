@@ -7,9 +7,13 @@
 *.pdb
 
 # ── UWP（uwp 版本，走 MSBuild）──────────────────────────
-# 两个实现的产物都叫 bin/obj，统一在根忽略即可。
-bin/
-obj/
+# .NET 的产物目录叫 bin/obj。**只在 .NET 树下忽略** —— 曾经写成全局的 `bin/`，
+# 结果把 Rust 的 `src/bin/` 源码也吞了：kanesumi 的 arc-deck-demo 与 ime-probe 的
+# 三个探针从未入库，干净克隆后整个 workspace 编不过（2026-10-14 推送前发现）。
+/uwp/**/bin/
+/uwp/**/obj/
+/arc-deck-dsh/**/bin/
+/arc-deck-dsh/**/obj/
 AppPackages/
 *.appxupload
 *.appxsym
