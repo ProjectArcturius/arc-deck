@@ -29,10 +29,10 @@ PRODUCT_PLAN §7.3 的八个组件、§7.4 的键位与命令、§7.5 的视觉�
 | 0 | w1-theme | 2.0.27 语义 token、v1→v2 迁移、内置主题、主题对话框 | 派出 |
 | 0 | w1-model-dialog | 模型 / provider / effort 对话框，F2 循环，偏好落盘 | ✅ f82555f |
 | 0 | w2-remote-transport | Remote host / rpc / mux；0.2.1 协议核对文档 | 派出 |
-| 0 | w4-m3-guard | EffectivePolicy → DSH 配置行，映射表 + `--dump-config` 验证 | 派出 |
+| 0 | w4-m3-guard | EffectivePolicy → DSH 配置行，映射表 + `--dump-config` 验证 | ✅ f545990（合入后真实冒烟一次通过） |
 | 1 | w3-commands | 命令系统：action 注册表、键位与上下文、slash 补全、面板、帮助 | 待 w1 全部合入 |
 | 1 | w2-remote-session | 会话操作、事件投影、审批数据、模型目录 | 待 w2-remote-transport |
-| 1 | w4-m3b-negative | 脚本化假模型端点驱动真实 DSH，证明越权被拒（零配额） | 待 w4-m3-guard |
+| 1 | w4-m3b-negative | 脚本化假模型端点驱动真实 DSH，证明越权被拒（零配额） | 派出 |
 | 2 | w3-tui-input | `@` 文件、历史、粘贴摘要、Shift+Enter、外部编辑器、metadata | 待 w3-commands |
 | 2 | w3-session-core | TUI 改走 Remote：多轮、流式、思考、取消；`/runs` 保留看工人 | 待 w3-commands · w2-remote-session |
 | 3 | w3-session-list | 会话列表 / 恢复 / 改名 / 时间线；真实模型目录 | 待 w3-session-core |
