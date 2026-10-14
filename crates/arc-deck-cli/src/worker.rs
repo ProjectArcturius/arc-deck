@@ -790,10 +790,23 @@ fn conclude(
     // 运行时自己起来了的任务**不该**报失败 —— 真正要报的是「从动到不动」。
     let ended_in_error = projection.last_end().map(|e| e.kind.as_str()) == Some("error");
     if !projection.failures.is_empty() {
-        let text = projection.failures.join(" / ");
+        let text = projection
+            .failures
+            .iter()
+            .map(|f| f.message.as_str())
+            .collect::<Vec<_>>()
+            .join(" / ");
+        // 结构化字段优先，**两个位置都看**：`turn/end` 的 `reason.error.code` 最权威，
+        // 其次是 `assistant/attempt` 里那条 `failure.code`（真实会话两处都给）。
+        // 实测教训：一条月度额度用尽的 message 里含 "429"，只按原文会判成「限流、
+        // 等会儿再派」—— 而 `code:"QUOTA"` 说的是「重派无用」。
+        let provider_code = projection
+            .last_end()
+            .and_then(|e| e.code.clone())
+            .or_else(|| projection.failures.iter().rev().find_map(|f| f.code.clone()));
         let class = arc_deck_core::failure::classify_with(
             projection.last_end().and_then(|e| e.status),
-            projection.last_end().and_then(|e| e.code.as_deref()),
+            provider_code.as_deref(),
             &text,
         );
         if ended_in_error {
@@ -1038,6 +1051,9 @@ fn absorb(
         }
         Some(Inbound::Notification { method: name, params }) => {
             if name == protocol::notification::SESSION_EVENT {
+                // **先落原始帧再解析**：解析失败时它才是唯一的证据（§9.2 要求
+                // 「原始事件保留可诊断信息」，而逐 token 的形状至今没核实过）。
+                raw_log(&params);
                 match serde_json::from_value::<SessionEventParams>(params) {
                     Ok(parsed) => {
                         status.observe(&parsed.event);
@@ -1064,6 +1080,42 @@ fn absorb(
 struct AnnounceState {
     calls: BTreeSet<String>,
     results: BTreeSet<String>,
+}
+
+/// 原始 DSH 帧的落盘，**默认关闭**。
+///
+/// 为什么默认关：逐 token 的增量帧会让它比 `events.jsonl` 大一个量级，而日常排查
+/// 用不到。为什么要留：产品事件是**投影之后**的形状，「协议到底长什么样」只能看原始
+/// 帧 —— 而 §9.2 要求原始事件保留可诊断信息，在核实之前那条一直没有落地。
+///
+/// 打开：`ARCDECK_RAW_EVENTS=<路径>`。写失败不改任务结论 —— 它是证据，不是判据。
+///
+/// 走进程级单例而不是层层传参：它是一条**与任务逻辑无关的诊断旁路**，为了它去改
+/// 三个函数签名只会让主路径更难读。
+fn raw_log(value: &Value) {
+    use std::sync::{Mutex, OnceLock};
+    static LOG: OnceLock<Mutex<Option<std::io::BufWriter<std::fs::File>>>> = OnceLock::new();
+    let log = LOG.get_or_init(|| {
+        let writer = std::env::var_os("ARCDECK_RAW_EVENTS")
+            .filter(|p| !p.is_empty())
+            .and_then(|path| match std::fs::File::create(&path) {
+                Ok(file) => Some(std::io::BufWriter::new(file)),
+                Err(e) => {
+                    eprintln!(
+                        "arcdeck: 打不开原始事件日志 {}：{e}",
+                        std::path::Path::new(&path).display()
+                    );
+                    None
+                }
+            });
+        Mutex::new(writer)
+    });
+    if let Ok(mut guard) = log.lock() {
+        if let Some(writer) = guard.as_mut() {
+            let _ = writeln!(writer, "{value}");
+            let _ = writer.flush();
+        }
+    }
 }
 
 /// 把新出现的工具调用/结果镜像成产品事件。已通报过的不重复发。

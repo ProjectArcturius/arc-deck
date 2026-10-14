@@ -101,9 +101,9 @@ pub struct Projection {
     /// 内部簿记。**不是**对话内容 —— 画出来会让真正的正文被埋掉。
     recorded: Vec<Value>,
     pub orphans: usize,
-    /// 模型失败的唯一出口。可能来自 `finish.reason.failure.message`，
-    /// 也可能来自轮次级 `reason.error.message`。
-    pub failures: Vec<String>,
+    /// 模型失败的唯一出口。可能来自 `finish.reason.failure`，
+    /// 也可能来自轮次级 `reason.error`。
+    pub failures: Vec<ModelFailure>,
     pub attempts: usize,
     pub session_id: Option<String>,
     pub usage: Option<Usage>,
@@ -413,22 +413,35 @@ fn collect_message_text(message: &Value) -> Option<String> {
     Some(out)
 }
 
-/// 一帧事件里带的模型失败原文（可能不止一条）。
+/// 一次模型失败：上游原文，以及（若给了）结构化 `code`。
+///
+/// **两处都给**（2026-10-14 真实会话实测）：`assistant/attempt` 的
+/// `chunk.finish.reason.failure.code` 与 `turn/end` 的 `reason.error.code`。
+/// 不能只靠 message —— 同一条实测里 message 是
+/// `429 {"type":"error","error":{"type":"GoUsageLimitError",…}}`，
+/// 按子串会判成「限流、等会儿再派」，而 `code:"QUOTA"` 才说得出「重派无用」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelFailure {
+    pub code: Option<String>,
+    pub message: String,
+}
+
+/// 一帧事件里带的模型失败（可能不止一条）。
 ///
 /// 投影与 `StatusWriter::observe` 共用同一条扫描规则 —— 两处各写一遍的话，
 /// 「什么算模型失败」会在实时与重放两条路上慢慢漂开。
-pub fn failure_texts(event: &Value) -> Vec<String> {
+pub fn failure_details(event: &Value) -> Vec<ModelFailure> {
     let mut out = Vec::new();
     scan_failures(event, &mut out);
     out
 }
 
-/// 扫出模型失败的原文。
+/// 扫出模型失败。
 ///
-/// 模型失败在协议里**不会**抛错，只会出现在 `finish.reason.failure.message` 里；
+/// 模型失败在协议里**不会**抛错，只会出现在 `finish.reason.failure` 里；
 /// 界面上表现为「消息发出去以后什么都没有」。所以这条扫描是必需的，
 /// 不是锦上添花。
-fn scan_failures(value: &Value, out: &mut Vec<String>) {
+fn scan_failures(value: &Value, out: &mut Vec<ModelFailure>) {
     if let Some(stream) = value.get("stream").and_then(|s| s.as_array()) {
         for entry in stream {
             let Some(chunk) = entry.get("chunk") else { continue };
@@ -441,22 +454,23 @@ fn scan_failures(value: &Value, out: &mut Vec<String>) {
                         .then(|| chunk.get("reason"))
                         .flatten()
                 });
-            if let Some(message) = reason
-                .and_then(|r| r.get("failure"))
-                .and_then(|f| f.get("message"))
-                .and_then(|m| m.as_str())
-            {
-                out.push(message.to_string());
+            if let Some(failure) = reason.and_then(|r| r.get("failure")) {
+                if let Some(message) = failure.get("message").and_then(|m| m.as_str()) {
+                    out.push(ModelFailure {
+                        code: failure.get("code").and_then(|c| c.as_str()).map(str::to_string),
+                        message: message.to_string(),
+                    });
+                }
             }
         }
     }
-    if let Some(message) = value
-        .get("reason")
-        .and_then(|r| r.get("error"))
-        .and_then(|e| e.get("message"))
-        .and_then(|m| m.as_str())
-    {
-        out.push(message.to_string());
+    if let Some(error) = value.get("reason").and_then(|r| r.get("error")) {
+        if let Some(message) = error.get("message").and_then(|m| m.as_str()) {
+            out.push(ModelFailure {
+                code: error.get("code").and_then(|c| c.as_str()).map(str::to_string),
+                message: message.to_string(),
+            });
+        }
     }
 }
 
@@ -544,7 +558,7 @@ mod tests {
         let end = p.last_end().unwrap();
         assert_eq!(end.kind, "error");
         assert_eq!(end.message.as_deref(), Some("模型炸了"));
-        assert_eq!(p.failures, vec!["模型炸了".to_string()]);
+        assert_eq!(p.failures, vec![ModelFailure { code: None, message: "模型炸了".into() }]);
     }
 
     #[test]
@@ -555,7 +569,7 @@ mod tests {
             "stream":[{"chunk":{"finish":{"reason":{"failure":{"message":"The supported API model names are deepseek-flash"}}}}}]
         }));
         assert_eq!(p.attempts, 1);
-        assert!(p.failures[0].contains("The supported API model names"));
+        assert!(p.failures[0].message.contains("The supported API model names"));
     }
 
     #[test]
@@ -644,8 +658,43 @@ mod tests {
         // 结构化字段要留住：分类优先用它，而不是猜英文原文。
         assert_eq!(p.last_end().unwrap().code.as_deref(), Some("QUOTA"));
         assert_eq!(p.last_end().unwrap().status, Some(402));
-        assert!(p.failures.iter().any(|f| f.contains("Insufficient Balance")));
+        assert!(p.failures.iter().any(|f| f.message.contains("Insufficient Balance")));
+        // 真实会话两个位置都给结构化 code —— 分类要靠它，不能靠 message 里的 "429"。
+        assert_eq!(p.failures.last().unwrap().code.as_deref(), Some("QUOTA"));
         assert_eq!(p.attempts, 1);
+    }
+
+    /// 2026-10-14 真实会话（opencode-go 月度额度用尽）抓下来的两帧，原样保留。
+    ///
+    /// 它的价值在于：message 里是 `429 …`，而 `code` 说的是 `QUOTA`。**只按原文会判成
+    /// 「限流、等会儿再派」，而真相是「重派无用」** —— 这条测试把「为什么必须有结构化字段」
+    /// 钉死，也把「两个位置都给 code」这个事实钉死（attempt 的 failure 与 turn/end 的 error）。
+    #[test]
+    fn real_quota_frame_carries_a_code_that_beats_the_429_in_its_text() {
+        let attempt: Value = serde_json::from_str(r#"{"type":"assistant/attempt","seq":13,"time":1791962350194,"data":{"turn":1,"step":1,"stream":[{"type":"chunk","time":1791962350189,"chunk":{"type":"usage","usage":{"inputTokens":0,"outputTokens":0,"totalTokens":0}}},{"type":"chunk","time":1791962350193,"chunk":{"type":"finish","reason":{"kind":"error","failure":{"code":"QUOTA","message":"429 {\"type\":\"error\",\"error\":{\"type\":\"GoUsageLimitError\",\"message\":\"Go usage limit exceeded\"},\"metadata\":{\"limitName\":\"monthly\"}}"}}}}]}}"#).unwrap();
+        let turn_end: Value = serde_json::from_str(r#"{"type":"turn/end","seq":15,"time":1791962350197,"data":{"turn":1,"reason":{"kind":"error","error":{"code":"QUOTA","message":"429 {\"type\":\"error\",\"error\":{\"type\":\"GoUsageLimitError\",\"message\":\"Go usage limit exceeded\"}}"}}}}"#).unwrap();
+
+        let mut p = Projection::new();
+        p.apply(&attempt);
+        p.apply(&turn_end);
+        assert_eq!(p.attempts, 1);
+        assert_eq!(p.last_end().unwrap().kind, "error");
+        assert_eq!(p.last_end().unwrap().code.as_deref(), Some("QUOTA"));
+
+        // 中途那条也要带 code —— 实时判断不能等到最后。
+        let from_attempt = p.failures.iter().find(|f| f.message.starts_with("429")).unwrap();
+        assert_eq!(from_attempt.code.as_deref(), Some("QUOTA"));
+
+        // 结构化 code 压过原文里的 429。
+        let correct =
+            arc_deck_core::failure::classify_with(None, from_attempt.code.as_deref(), &from_attempt.message);
+        assert_eq!(correct.code, "MODEL_QUOTA_EXHAUSTED");
+        assert!(!correct.retryable, "月度额度用尽，重派不会好");
+        // 反过来：只按原文就是错的 —— 这一条就是「为什么需要结构化字段」的证明。
+        assert_eq!(
+            arc_deck_core::failure::classify_model_failure(&from_attempt.message).code,
+            "MODEL_RATE_LIMITED"
+        );
     }
 
     #[test]

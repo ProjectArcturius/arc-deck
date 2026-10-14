@@ -211,12 +211,18 @@ impl StatusWriter {
             "assistant/attempt" => {
                 // 中途的模型失败要**立刻**可见。重试次数涨起来的时候任务还在跑 ——
                 // 监控程序据此决定「先别再派活儿」，而不是等一个终态。
-                for text in arc_deck_dsh::projection::failure_texts(event) {
-                    let class = arc_deck_core::failure::classify_model_failure(&text);
+                for failure in arc_deck_dsh::projection::failure_details(event) {
+                    // 结构化 code 优先 —— 与终态那条走同一个分类器，实时与收尾才不会
+                    // 对同一件事给出两个判断（实测：一条月度额度用尽，message 含 "429"）。
+                    let class = arc_deck_core::failure::classify_with(
+                        None,
+                        failure.code.as_deref(),
+                        &failure.message,
+                    );
                     self.status.counters.model_retries += 1;
                     self.status.notice = Some(Notice {
                         code: class.code.to_string(),
-                        message: clip(&text, 200),
+                        message: clip(&failure.message, 200),
                         retryable: class.retryable,
                         at: now_ms(),
                     });
