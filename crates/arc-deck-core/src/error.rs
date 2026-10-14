@@ -26,6 +26,11 @@ pub mod code {
 
     pub const AUTH_WORKSPACE_MISMATCH: &str = "AUTH_WORKSPACE_MISMATCH";
     pub const AUTH_EXCEEDED: &str = "AUTH_EXCEEDED";
+    /// 授权本身解析得出来，但**执行层表达不了** —— 拒绝启动，不静默放宽。
+    ///
+    /// 与 `AUTH_EXCEEDED` 分开是因为方向不同：那个是「你要的比允许的多」，
+    /// 这个是「你允许的，DSH 保证不了」（参 docs/M3_GUARD.md）。
+    pub const AUTH_GUARD_UNSUPPORTED: &str = "AUTH_GUARD_UNSUPPORTED";
     pub const AGENT_UNKNOWN: &str = "AGENT_UNKNOWN";
     pub const AGENT_NOT_AUTHORIZED: &str = "AGENT_NOT_AUTHORIZED";
     pub const MODE_CONFLICT: &str = "MODE_CONFLICT";

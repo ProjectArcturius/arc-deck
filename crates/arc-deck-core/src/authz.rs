@@ -81,6 +81,44 @@ impl Permission {
         matches!(self, Self::Confirm)
     }
 
+    /// 从 DSH 沙箱档名**反解**回授权级别。
+    ///
+    /// 为什么需要反解：启动配置里只存了档名（§5.6 说档名是实现细节，只落启动配置），
+    /// 而执行 guard 要按**级别**与策略取交集。两个方向写在同一个 `impl` 里，
+    /// 「映射只有一份」才是真的 —— 拆到两个文件里迟早会漂移。
+    ///
+    /// `workspace-write` 只能反解成 [`Permission::Workspace`]：`confirm` 是交互面的
+    /// 默认，headless 在 `run` 里就把它拒了，所以档名里不含这条信息。
+    pub fn from_sandbox(raw: &str) -> SpecResult<Self> {
+        match raw {
+            "read-only" => Ok(Self::Readonly),
+            "workspace-write" => Ok(Self::Workspace),
+            "danger-full-access" => Ok(Self::Full),
+            other => Err(SpecError::new(
+                code::CONFIG_INVALID,
+                format!("runtime.sandbox = `{other}` 不是已知的 DSH 沙箱档"),
+            )),
+        }
+    }
+
+    /// 严格程度：数值越小越严。`workspace` 与 `confirm` 权限相同，只是要不要应答者。
+    const fn rank(self) -> u8 {
+        match self {
+            Self::Readonly => 0,
+            Self::Workspace | Self::Confirm => 1,
+            Self::Full => 2,
+        }
+    }
+
+    /// 两个级别的交集 —— 取更严的那一个。授权只能收紧，所以这里没有「覆盖」。
+    pub const fn stricter(self, other: Self) -> Self {
+        if self.rank() <= other.rank() {
+            self
+        } else {
+            other
+        }
+    }
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Readonly => "readonly",
@@ -186,6 +224,161 @@ pub struct EffectivePolicy {
     pub network: bool,
     pub commit: bool,
     pub push: bool,
+}
+
+/// DSH 执行层真正能表达的限制 —— 由 [`EffectivePolicy`] 投影出来的**可执行**结果。
+///
+/// 为什么要有这一层（对照见 `docs/M3_GUARD.md`）：`EffectivePolicy` 是产品语义
+/// （「只许写 `crates/`」、「不许推送」），而 DSH 能表达的是「整个 workspace 可写 /
+/// 完全不可写」加若干工具行开关。差集里表达不了的那些**必须在这里报错**，
+/// 不能等渲染 patch 时静默丢掉 —— §5.4 写得很清楚：文件范围声明不是 OS 沙箱。
+/// 静默丢掉等于把「以为收紧了」当成「已经收紧了」。
+///
+/// 渲染侧（`arc-deck-dsh::runtime::render_patch`）只读这个结构、不自己再判一次：
+/// 判定与渲染分开，两份判断迟早会漂移。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionGuard {
+    /// 这份 guard 是给哪份策略算的。
+    pub policy: EffectivePolicy,
+    /// 最终 DSH 沙箱档 —— 启动级别与策略上限的交集，只能更严。
+    pub sandbox: Permission,
+    /// shell 类工具（bash / pwsh / jobs / workflow / ptc）可不可执行。
+    pub shell_tools: bool,
+    /// `web_search` / `web_fetch` 可不可执行。
+    pub web_tools: bool,
+    /// 授权说得比执行层细、因此**只留档**的项。
+    ///
+    /// 它们会进 `result.unverified` 与事件流：留着是为了让主控看见「这一条没有被
+    /// 执行层保证」，而不是把缺口藏进一份看起来完整的策略留档里。
+    pub recorded: Vec<String>,
+}
+
+impl ExecutionGuard {
+    /// 写进 `DSH_PERMISSION_MODE` 与 patch 的档名。**唯一出处是 [`Permission::sandbox`]。**
+    pub const fn sandbox_mode(&self) -> &'static str {
+        self.sandbox.sandbox()
+    }
+}
+
+/// 路径列表是否覆盖整个 workspace。
+///
+/// 归一化之后，workspace 根本身是 `.`（见 [`paths::workspace_relative`]）。
+/// 只有覆盖根才是 DSH 能表达的范围：「整个 workspace」或「什么都没有」，没有中间态。
+fn covers_workspace(paths: &[PathBuf]) -> bool {
+    paths.iter().any(|p| p.as_os_str() == "." || p.as_os_str().is_empty())
+}
+
+impl EffectivePolicy {
+    /// 把产品语义的策略投影成 DSH 执行层能落地的限制。
+    ///
+    /// `startup` 是启动配置给的那一级（`runtime.sandbox` 反解而来），它本身就是上限：
+    /// 这里只会算得更严。表达不了的项按「宁可拒绝启动」办 —— 除了 commit / push，
+    /// DSH 没有按 git 子命令区分权限的能力，那两条进 `recorded`（见 `docs/M3_GUARD.md` §3）。
+    pub fn execution_guard(&self, startup: Permission) -> SpecResult<ExecutionGuard> {
+        // `confirm` 与 `workspace` 同权限，档名里反解不出来；真到手上一律按 workspace 算。
+        let startup = match startup {
+            Permission::Confirm => Permission::Workspace,
+            other => other,
+        };
+
+        // ── 写范围 ────────────────────────────────────────────────────────
+        //
+        // `workspace-write` 的写边界恒等于会话 cwd（= workspace 根）加平台临时区
+        // （dsh-fs-sandbox → writableRoots），**没有按路径列表收窄的表达**
+        // （参 docs/M3_GUARD.md §2）。所以收窄的 write_paths 只能拒绝启动：
+        // 照原样跑下去等于把「只许写 crates/」放宽成「整个 workspace 都能写」。
+        //
+        // 空列表是**可表达**的（那就是 read-only 档「什么都不许写」），所以只挑非空且不覆盖根的。
+        if !self.write_paths.is_empty() && !covers_workspace(&self.write_paths) {
+            return Err(SpecError::new(
+                code::AUTH_GUARD_UNSUPPORTED,
+                format!(
+                    "授权只允许写 {}，但 DSH 的 workspace-write 写边界是整个 workspace `{}`，\
+                     没有按路径列表收窄的表达；照这样启动等于把写范围放宽。\
+                     要么把 write_paths 放成整个 workspace（`.`），要么改用夹具运行时（参 docs/M3_GUARD.md §2）",
+                    describe(&self.write_paths),
+                    self.workspace.display()
+                ),
+            ));
+        }
+
+        // ── 读范围 ────────────────────────────────────────────────────────
+        //
+        // DSH 对读取**完全不设边界**：fs-sandbox 只拦写入，三个档位都允许读任意绝对路径
+        // （dsh-fs-sandbox 的注释：Reads pass through untouched）。
+        // 所以任何「只许读某些目录」的声明在这里都是空头承诺。
+        if !covers_workspace(&self.read_paths) {
+            return Err(SpecError::new(
+                code::AUTH_GUARD_UNSUPPORTED,
+                format!(
+                    "授权只允许读 {}，但 DSH 的读取不受沙箱限制（三个档位都能读任意路径），\
+                     没有表达读范围的配置；照这样启动等于把读范围放宽到整台机器。\
+                     要么把 read_paths 放成整个 workspace（`.`）（参 docs/M3_GUARD.md §2）",
+                    describe(&self.read_paths)
+                ),
+            ));
+        }
+
+        // ── 网络 ──────────────────────────────────────────────────────────
+        //
+        // 唯一的网络开关是「把 web_search / web_fetch 两行摘掉」；shell 还开着时
+        // 任何命令都能自己联网，而 DSH 没有网络沙箱可表达这件事。
+        if !self.network && self.shell {
+            return Err(SpecError::new(
+                code::AUTH_GUARD_UNSUPPORTED,
+                "授权不允许联网，但 shell 还开着：DSH 只有「摘掉 web_search / web_fetch 两行」\
+                 这一种网络限制，命令自己发请求拦不住（参 docs/M3_GUARD.md §2）。\
+                 要么把 network 打开，要么把 shell 关掉（shell_policy: workspace-readonly）",
+            ));
+        }
+
+        // ── 沙箱档：启动级别 ∩ 策略上限 ────────────────────────────────────
+        //
+        // 上限只由一个事实决定：**这份策略还允许写吗**。不许写 → `read-only`（DSH 里
+        // 唯一能表达「文件不被修改」的档）；允许写 → 不额外设限，上限就是 DSH 的最宽档，
+        // 于是结果等于启动级别。
+        //
+        // 这里刻意**不**因为 `commit == false` 就把 full 降到 workspace-write：full 是
+        // 用户显式给的级别（worktree 里连 `git status` 都要它），降档会把「只读一眼仓库」
+        // 这种正常任务一起弄坏。commit / push 的缺口如实记进 `recorded`。
+        let cap = if self.write_paths.is_empty() { Permission::Readonly } else { Permission::Full };
+        let sandbox = startup.stricter(cap);
+
+        let mut recorded = Vec::new();
+        // 只有 shell 可执行时这两条才有意义：命令都跑不了，也就没法提交 / 推送。
+        if self.shell {
+            if !self.commit {
+                recorded.push(
+                    "本次授权不允许提交，但 DSH 没有按 git 子命令区分权限的能力：\
+                     agent 用 shell 跑 `git commit` 不会被执行层拒绝（参 docs/M3_GUARD.md §3）"
+                        .to_string(),
+                );
+            }
+            if !self.push {
+                recorded.push(
+                    "本次授权不允许推送，但 DSH 没有按 git 子命令区分权限的能力：\
+                     agent 用 shell 跑 `git push` 不会被执行层拒绝（参 docs/M3_GUARD.md §3）"
+                        .to_string(),
+                );
+            }
+        }
+
+        Ok(ExecutionGuard {
+            policy: self.clone(),
+            sandbox,
+            shell_tools: self.shell,
+            web_tools: self.network,
+            recorded,
+        })
+    }
+}
+
+/// 报错信息里的路径列表 —— 空列表要说成「什么都没有」，不能只打一对括号。
+fn describe(paths: &[PathBuf]) -> String {
+    if paths.is_empty() {
+        return "（空）".to_string();
+    }
+    paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
 }
 
 /// 校验通过、可以交给 worker 执行的任务。
@@ -488,6 +681,24 @@ mod tests {
         let cfg = WorkerConfig::parse(config_raw, &paths::test_abs("work")).unwrap();
         let task = TaskSpec::parse(task_raw, &paths::test_abs("work")).unwrap();
         ExecutionPlan::resolve(&cfg, &task)
+    }
+
+    /// `arcdeck run` 生成的默认授权（`commands.rs`：读写路径留空、`network: true`）必须能落到执行层。
+    /// 新加的三条「拒绝启动」规则任何一条误伤它，派工就全部 64 —— 包括正在用它开发本仓的工人。
+    #[test]
+    fn default_dispatch_shape_is_not_refused_by_the_execution_guard() {
+        let cfg = config_json("workspace-development", r#", "network": true"#);
+        let plan = resolve(&cfg, &task_json("")).unwrap();
+        for startup in [Permission::Workspace, Permission::Full] {
+            let guard = plan.policy.execution_guard(startup).expect("默认派工形状必须能启动");
+            assert_eq!(guard.sandbox, startup, "允许写时不降档（worktree 里的 git 靠 full）");
+            assert!(guard.shell_tools && guard.web_tools);
+        }
+        // 同样的默认形状换成 Plan：不拒绝启动，但收紧成只读、摘掉 shell。
+        let plan = resolve(&cfg, &task_json(r#", "agent": "plan""#)).unwrap();
+        let guard = plan.policy.execution_guard(Permission::Full).expect("Plan 也必须能启动");
+        assert_eq!(guard.sandbox, Permission::Readonly);
+        assert!(!guard.shell_tools);
     }
 
     #[test]

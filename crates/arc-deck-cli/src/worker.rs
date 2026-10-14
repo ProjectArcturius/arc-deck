@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arc_deck_core::agent::{AgentRegistry, SystemPrompt};
-use arc_deck_core::authz::ExecutionPlan;
+use arc_deck_core::authz::{ExecutionPlan, Permission};
 use arc_deck_core::config::{RuntimeSpec, WorkerConfig};
 use arc_deck_core::error::{code, SpecError};
 use arc_deck_core::event::WorkerState;
@@ -70,6 +70,8 @@ struct Prepared {
     title: Option<String>,
     /// stdout 的呈现方式：工人模式是 JSONL，一般模式给人看的文本。
     format: crate::report::SinkFormat,
+    /// 执行层表达不了、只留档的授权缺口（来自 [`RuntimeCommand::guard_notes`]）。
+    guard_notes: Vec<String>,
 }
 
 /// 运行时的启动参数。
@@ -81,6 +83,11 @@ struct RuntimeCommand {
     inherit_env: bool,
     /// 状态目录建好之后才写的文件（DSH patch）。
     pending_files: Vec<(PathBuf, String)>,
+    /// 执行层表达不了、只留档的授权缺口（目前是 commit / push）。
+    ///
+    /// 带着它一路走到结论：写进 `result.unverified` 与事件流。缺口**写在纸上**才算
+    /// 如实，藏在内存里就等于没有。
+    guard_notes: Vec<String>,
 }
 
 /// 入口：返回进程退出码。
@@ -125,6 +132,8 @@ fn prepare(args: &WorkerArgs) -> Result<Prepared, SpecError> {
     let run_dir = config.state_root.join("runs").join(&plan.task_id);
     // 运行时能力在建立任何状态之前就查清。
     let command = runtime_command(&config, &plan, &system_prompt, &run_dir)?;
+    // 缺口说明要跟着结论走（`command` 之后会被移进 `Prepared`）。
+    let guard_notes = command.guard_notes.clone();
 
     let watcher = CancelWatcher::new(args.cancel_file.clone(), &plan.task_id);
     watcher.preflight()?;
@@ -164,6 +173,7 @@ fn prepare(args: &WorkerArgs) -> Result<Prepared, SpecError> {
         assigned_by,
         title,
         format,
+        guard_notes,
     })
 }
 
@@ -192,6 +202,7 @@ fn runtime_command(
         RuntimeSpec::DshSdk { node, entry, profile, route, sandbox, session_log_upload, preamble, .. } => {
             dsh_runtime_command(DshCommandInput {
                 config,
+                plan,
                 node,
                 entry,
                 profile,
@@ -211,6 +222,8 @@ fn runtime_command(
 
 struct DshCommandInput<'a> {
     config: &'a WorkerConfig,
+    /// 已经算好的执行计划：patch 里的限制行由它的 `policy` 投影而来。
+    plan: &'a ExecutionPlan,
     node: &'a Path,
     entry: &'a Path,
     profile: &'a str,
@@ -240,6 +253,15 @@ fn dsh_runtime_command(input: DshCommandInput<'_>) -> Result<RuntimeCommand, Spe
     // 密钥在这里取，取不到就以 64 退出 —— 不要等到模型请求时才发现。
     let key = arc_deck_core::provider::read_key_from_spec(route, &arc_deck_core::userconfig::auth_path())?;
 
+    // 执行层限制：启动档位（配置里那一行）与最终策略取交集，只能更严。
+    // 放在这里而不是渲染 patch 的那一侧，是因为**表达不了的项要在这里就拒**：
+    // 主控看到的是退出码 64 加一条说清缺什么的错误，而不是一个跑到一半才发现越权的任务。
+    let startup = Permission::from_sandbox(input.sandbox)?;
+    let guard = input.plan.policy.execution_guard(startup)?;
+    for note in &guard.recorded {
+        eprintln!("arcdeck: 授权缺口（已留档，执行层不拦）—— {note}");
+    }
+
     let mut persona = input.system_prompt.text();
     if let Some(path) = input.preamble {
         let text = std::fs::read_to_string(path).map_err(|e| {
@@ -257,10 +279,12 @@ fn dsh_runtime_command(input: DshCommandInput<'_>) -> Result<RuntimeCommand, Spe
         route,
         persona_suffix: &persona,
         session_log_upload: input.session_log_upload,
+        guard: &guard,
     });
 
     let mut env = input.config.env.clone();
-    for (k, v) in arc_deck_dsh::runtime::runtime_env(&input.run_dir.join("dsh-home"), input.sandbox) {
+    // 环境变量里给的也是**交集之后**的档：base bundle 的默认值只看启动配置，我们不吃它。
+    for (k, v) in arc_deck_dsh::runtime::runtime_env(&input.run_dir.join("dsh-home"), guard.sandbox) {
         env.insert(k, v);
     }
     env.insert(route.key_env.clone(), key);
@@ -277,6 +301,7 @@ fn dsh_runtime_command(input: DshCommandInput<'_>) -> Result<RuntimeCommand, Spe
         env,
         inherit_env: true,
         pending_files: vec![(patch_path, patch)],
+        guard_notes: guard.recorded,
     })
 }
 
@@ -323,6 +348,8 @@ fn fixture_runtime_command(
         env,
         inherit_env: false,
         pending_files: Vec::new(),
+        // 夹具不是真实执行层，没有 guard 可算；缺口清单也只对真实 DSH 有意义。
+        guard_notes: Vec::new(),
     })
 }
 
@@ -405,6 +432,12 @@ async fn execute(prepared: Prepared) -> i32 {
             describe_paths(&prepared.plan.policy.write_paths)
         ),
     );
+    // 执行层表达不了的授权项：**在开始跑之前就说出来**。
+    // 留一条诊断事件而不是只写进 result：主控盯的是事件流的开头，缺口混在结论里
+    // 就等于没人看见。
+    for note in &prepared.guard_notes {
+        let _ = sink.diagnostic("warn", Some("AUTH_GUARD_GAP"), note);
+    }
     // 这一行是「Echo 真的进了 system prompt」的可核对证据：片段的来源路径写出来。
     for section in &prepared.system_prompt.sections {
         let _ = sink.diagnostic(
@@ -830,6 +863,10 @@ fn conclude(
         result.unverified.push(
             "任务书没有声明验收项：completed 只表示内核正常终止，不代表行为已验证".to_string(),
         );
+    }
+    // 执行层拦不住的授权项逐条落进 `unverified`：这份结果不该让人以为「策略留档 = 已隔离」。
+    for note in &prepared.guard_notes {
+        result.unverified.push(note.clone());
     }
     if status.status.attempt > 1 {
         result.unverified.push(format!(
