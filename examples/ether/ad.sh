@@ -3,7 +3,7 @@
 #
 # 用法: ad.sh <win|arch> <ether|kanesumi> <id> <task.md> [验收命令 …]
 #   立即返回；之后只用一行命令跟踪：
-#     arcdeck status <id>            （Debian：ssh ether arcdeck status <id>）
+#     arcdeck status <id>            （Arch 本机直接跑；跨机器时 ssh 过去跑同一行）
 #     arcdeck wait <id> --timeout 2h
 #     arcdeck report <id>
 #

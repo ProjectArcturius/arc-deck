@@ -1,6 +1,6 @@
 # Arc Deck：产品需求与编码方向
 
-版本：0.2 · 日期：2026-10-14 · 状态：方向已定型（§0）；M1 已实测；**M2a/M2b 的主体与 M2c 的 Windows 部分已落地，并在 Windows 上用真实模型跑通**（§10.2b）；Debian 未验证。§10.2b 之外的内容都不是功能完成声明。
+版本：0.2 · 日期：2026-10-14 · 状态：方向已定型（§0）；M1 已实测；**M2a/M2b 的主体与 M2c 的 Windows 部分已落地，并在 Windows 上用真实模型跑通**（§10.2b）；**Linux 一侧的目标改为 Arch（本机），Debian 不再作为目标** —— 本机已实测构建、离线套件与夹具端到端全过，真实 DSH 运行未做。§10.2b 之外的内容都不是功能完成声明。
 
 本文件是后续开发的产品方向入口。旧文档中「两条并列 GUI」与「新桌面宿主直接引用 C# 协议库」的路线由本文件取代；旧代码、历史实测和适用该代码的约束保留。未创建的目录、命令、schema 和测试在本文件中均为待实现规格。
 
@@ -16,7 +16,7 @@
 | D4 | **底层只用 DSH 一个内核**，非 DS 模型走 DSH 的 pi-ai 路由。调查结论：DSH 的优势一半 DS 专属（协议与缓存）、一半 provider 中立（loop 工程），后者对非 DS 适用；按用户规则「若有则全部 DSH」。OpenCode / Claude Code 只作 TUI、Agent、工具定义的设计参考 | [DSH_FINDINGS.md](DSH_FINDINGS.md) |
 | D5 | **DSH 的 DS 优势只在官方路由上成立**：worker 默认 `deepseek-official`；第三方网关上 DSH 同样出过 DSML 泄漏 | DSH_FINDINGS §1.4 |
 | D6 | **桌面版分两块且都冻结**：Windows = C# + WinUI 2，Linux = Rust + Kanesumi。都等后端的本地服务接口（M5）稳定后再接，不并行开发 | 用户 2026-10-14 |
-| D7 | **headless 的控制面是任务状态目录里的文件**（状态、事件、结果、取消），不是常驻服务。ssh 过去 `arcdeck status` 就能读，Windows 与 Debian 一样 | 本文 §6.5 |
+| D7 | **headless 的控制面是任务状态目录里的文件**（状态、事件、结果、取消），不是常驻服务。ssh 过去 `arcdeck status` 就能读，Windows 与 Arch 一样 | 本文 §6.5 |
 | D8 | 「非 DS 用 DSH 不劣于 OpenCode」与「完整工具集 vs RL 两工具组合」都**未测**，列为 M2d 对照门；没有数据前不建第二个内核 | DSH_FINDINGS §5 |
 
 ## 1. 文档状态与需求基线
@@ -26,7 +26,7 @@
 | 编号 | 要求 | 判定方式 |
 |---|---|---|
 | R1 | 产品分为 Rust 后端（TUI + headless）与桌面 GUI 两部分 | 后端可独立使用，不依赖窗口或任何 GUI |
-| R2 | 后端用 Rust，目标跨平台 | Windows、Linux（Debian）、macOS 分别运行验收；只在 Windows 编译不算跨平台完成。首批必须是 Windows + Debian（Ether 的两台机器） |
+| R2 | 后端用 Rust，目标跨平台 | Windows、Linux（Arch）、macOS 分别运行验收；只在 Windows 编译不算跨平台完成。首批是 **Windows + Arch（本机）** —— 2026-10-14 修订：原定 Debian，但那台机器上的自研项目暂时跑不起来，改以本机 Arch 为准（参 §10.2b） |
 | R3 | 桌面 GUI：Windows 用 C# + WinUI 2，Linux 用 Rust + Kanesumi；当前都不在焦点 | 保留 WinUI 2 平台控件路线，不擅自改成 WinUI 3 或 WebView；Kanesumi 守 K1–K9 |
 | R4 | headless 给 workers 用，外部主控可通过脚本派发任务书并收回结果 | 无 TUI 的完整任务提交、执行、终止和机器可读回报 |
 | R4a | 在工作目录输入 `arcdeck` 回车进入 TUI；加参数进入 headless | 同一个可执行文件；无参数与有参数两条路径各有测试 |
@@ -65,7 +65,7 @@ Arc Deck 是基于 DSH 的编码 Agent 产品：人可以在 TUI 或 Windows GUI
 
 ### 2.2 范围与优先级
 
-- P0（当前焦点）：**headless 在 Ether 上可用** —— 真实 DSH 单任务、分离运行、便宜的状态探活、卡死判定与有界续跑、紧凑回报、Ether 任务书与 worktree、Windows + Debian 两台机器。**（离线骨架已落地，真实执行在 M2a）**
+- P0（当前焦点）：**headless 在 Ether 上可用** —— 真实 DSH 单任务、分离运行、便宜的状态探活、卡死判定与有界续跑、紧凑回报、Ether 任务书与 worktree、Windows + Arch 两台机器。**（离线骨架已落地，真实执行在 M2a）**
 - P1：Echo/Build/Plan 的权限实装（Plan 只读在执行层生效）、M2d 对照实验、OpenCode 风格 TUI 主流程。
 - P2：本地服务与 IPC、两个桌面 GUI 接线、有限并发、专用研究/审查 Agent、Skills 扩展、Hooks、macOS、分发完善。
 - 首版不做：云端调度、集群、自动工作树**合并**（创建 worktree 可以，合并归调度者）、Claude Code API/插件的兼容承诺、完整 OpenCode 插件生态、自动推送、旧会话批量迁移、第二个执行内核。
@@ -116,7 +116,7 @@ Claude Code 这份检出包含公开插件、示例以及部分内置 mod 源码
 WinUI 2（Windows）、Kanesumi（Linux）── 版本化本地 IPC ──▶ serve（M5 之后，当前冻结）
 ```
 
-**为什么控制面是文件而不是服务**：Ether 的调度者在 Windows 上通过 `ssh ether` 管 Debian 的工人，
+**为什么控制面是文件而不是服务**：派工的一方与干活的一方常常不在同一台机器上（Windows 上派、Linux 上跑，或反过来），
 派工脚本还会在命令结束时被一起杀掉（DISPATCHER §三，「只加 `&` 不加 `nohup`」实测任务消失）。
 文件在两台机器上语义一致、跨 ssh 只需一条命令、监工进程死了文件还在 —— 而「进程已死但没写终态」
 正是最需要被看见的那种状态（§6.5）。常驻服务留到交互端（TUI 多会话、GUI）真需要时再做。
@@ -496,7 +496,7 @@ fix-filter  failed   done     验收 filter-regression 退出 101 · commits 2 �
 | worktree + 分支 `dsh/<id>`，已存在就复用（续跑） | `--worktree <分支>`：在 workspace 仓上 `git worktree add`（分支已存在则复用），之后 workspace 就是这个 worktree；位置模板（如 `<仓父目录>/.oc/wt/{task_id}`）由启动配置给 |
 | 子模块初始化 | worktree 新建后 `git submodule update --init`；失败写进 `last_error` 并继续（与脚本一致） |
 | `CARGO_TARGET_DIR` 每任务独占 | 启动配置的 `env` 模板，支持 `{task_id}` 替换；Arc Deck 不写死 cargo |
-| 代理（Windows 借 10809，Debian 走反向隧道） | 启动配置的 `env`；反向隧道仍由调度者那端的 ssh 建 —— 那是调度者的网络，不是 worker 的职责 |
+| 代理（Windows 借 10809，Linux 走反向隧道） | 启动配置的 `env`；反向隧道仍由调度者那端的网络建 —— 那是调度者的网络，不是 worker 的职责 |
 | `PREAMBLE.md` 与任务书拼成一条消息 | `--preamble` 进 system prompt 的 persona 后缀（每件任务都一样，稳定可缓存，DSH_FINDINGS §4.2）；任务书正文进用户消息 |
 | `dsh --profile headless`，`danger-full-access` | per-task `DSH_HOME` + Arc Deck 生成的 profile；权限 `workspace-development`，写范围是 worktree。Ether 工人要提交，所以由启动配置给 `allow_commit: true`；推送始终拒绝 |
 | 30 分钟看门狗、grep 网络错误、grep DSML | §6.5.4 |
@@ -654,7 +654,7 @@ Rust 必须复写 Solid/OpenTUI 组件行为。若 Rust renderer 无法达到所
 
 ### 9.2 升级与投影
 
-根 C# `DshVersion.cs` 记录 `0.1.2-rc.1`，当前参考 DSH 为 `0.2.1-alpha.2`，**本机 npm 安装的 `dsh` 是 `0.1.7-rc.2`**（2026-10-14 `dsh --version`）。三者不一致：DSH_FINDINGS 的机制分析基于 0.2.1-alpha.2 源码，M2a 的第一步是选定一个版本、在 Windows 与 Debian 装同一版本并钉住，再核对那些机制在该版本里是否存在。新版本在 initialize 校验路由，durable assistant 事件与实时通道也已变化；不能只改版本常量、照搬旧 `assistant/chunk` 或打包行规则。
+根 C# `DshVersion.cs` 记录 `0.1.2-rc.1`，当前参考 DSH 为 `0.2.1-alpha.2`，**本机 npm 安装的 `dsh` 是 `0.1.7-rc.2`**（2026-10-14 `dsh --version`）。三者不一致：DSH_FINDINGS 的机制分析基于 0.2.1-alpha.2 源码，M2a 的第一步是选定一个版本、在 Windows 与 Arch 装同一版本并钉住，再核对那些机制在该版本里是否存在。新版本在 initialize 校验路由，durable assistant 事件与实时通道也已变化；不能只改版本常量、照搬旧 `assistant/chunk` 或打包行规则。
 
 Arc Deck 为每件任务生成独立的 `DSH_HOME` 与 profile patch，**显式**写出以下各项而不吃 DSH 的默认值：模型路由与推理强度、persona（Echo + `--preamble`）、工具呈现方式（`native` / `ptc`，M2d 决定缺省）、权限与沙箱模式，以及 `session-log-deepseek`（会话日志随请求上传 DeepSeek，DSH 默认开，DSH_FINDINGS §2）。最后一项由用户裁定（§11）；裁定之前 Arc Deck 生成的 profile 关闭它。
 
@@ -723,9 +723,9 @@ OpenCode Go 走的也是 Anthropic Messages 协议，缓存命中实测有效，
 |---|---|---|
 | M0：需求基线 | 本文、README/AGENTS/旧工作流入口、参考与许可边界 | ✅ 已完成：产品要求/选定方案/未决项分开，旧双 GUI 路线不再支配新开发 |
 | M1：离线 worker 骨架 | core/adapter/CLI 最小 crate；任务/结果/JSONL schema；Echo 定义解析；假 SDK 子进程 | ✅ **已实测**：127 个离线测试通过（成功/失败/受阻/EOF/坏帧/分帧中文/错 ID/结果写失败/超时/取消），全程无模型请求 |
-| **M2a：真实 DSH 单任务**（焦点） | 钉 DSH 版本（Windows 与 Debian 同版）；`runtime.kind = dsh-sdk`；per-task `DSH_HOME` 与 profile 生成（§9.2）；新版本事件投影；Echo + `--preamble` 进 system prompt；usage 采集；二进制改名 `arcdeck`，无参数给出 TUI 未实现提示 | 一件真实的 Ether 风格任务在 Windows 上经 `deepseek-official` 跑到 `completed`，验收命令的退出码由 Arc Deck 采集；内核失败（错模型名，参 P3）被识别为 `failed`；`session-log-deepseek` 的实际开关在请求里核对过。**会消耗模型配额，跑前经用户同意** |
+| **M2a：真实 DSH 单任务**（焦点） | 钉 DSH 版本（Windows 与 Arch 同版）；`runtime.kind = dsh-sdk`；per-task `DSH_HOME` 与 profile 生成（§9.2）；新版本事件投影；Echo + `--preamble` 进 system prompt；usage 采集；二进制改名 `arcdeck`，无参数给出 TUI 未实现提示 | 一件真实的 Ether 风格任务在 Windows 上经 `deepseek-official` 跑到 `completed`，验收命令的退出码由 Arc Deck 采集；内核失败（错模型名，参 P3）被识别为 `failed`；`session-log-deepseek` 的实际开关在请求里核对过。**会消耗模型配额，跑前经用户同意** |
 | **M2b：分离运行与探活**（焦点） | 拆出 `arc-deck-run`；状态目录与 `status.json`；`--detach`；`status/wait/report/logs/cancel/ls`；读者侧健康判定；stalled 自救与有界续跑；进程树收尾（Windows Job Object、Unix 进程组） | 离线故障注入全部过：假内核挂住（→ stalled → 续跑）、杀监工（→ dead/unknown）、杀 runtime、取消、pid 复用、状态文件写到一半。阈值判定有时钟可注入的单测；**一行输出的字节数有测试上限** |
-| **M2c：接进 Ether**（焦点） | Markdown 任务书、`--accept`、`--worktree`、env 模板、`allow_commit`；Debian 构建与运行；`examples/ether/` 派工示例 | 一批真实 Ether 任务在 Windows 与 Debian 各派至少一件，调度者**只用 `status` 与 `report`** 完成跟踪与是否细看的判断；与旧 runner 的结果并排对照一次。**Ether 侧脚本改动在 Ether 仓做** |
+| **M2c：接进 Ether**（焦点） | Markdown 任务书、`--accept`、`--worktree`、env 模板、`allow_commit`；**Arch 构建与运行**（2026-10-14 修订，原为 Debian）；`examples/ether/` 派工示例 | 一批真实 Ether 任务在 Windows 与 Arch 各派至少一件，调度者**只用 `status` 与 `report`** 完成跟踪与是否细看的判断；与旧 runner 的结果并排对照一次。**Ether 侧脚本改动在 Ether 仓做** |
 | M2d：对照门 | DSH_FINDINGS §5 的 E1–E3 | 有样本量、有数据地回答：官方路由 DSML 是否为 0；`sdk` vs `sdk-minimal` 谁做缺省；非 DS 是否需要第二内核（预期否） |
 | M3：Agent 与权限实装 | Echo/Build/Plan 组合矩阵在执行层生效；工具映射与 schema；Plan 写负例被拒 | §5 的契约有真实内核下的负例；提示词不代替权限 |
 | M4：TUI 主流程 | `arc-deck-tui`：Ratatui 渲染、OpenCode token/布局、输入/action、Remote 与共用投影；`arcdeck` 无参数进入 | §7 夹具、真实终端与功能验收；历史/stream/取消/失败一致；TUI 里发起的任务与 headless 同一套状态目录 |
@@ -767,7 +767,7 @@ M1 交付的离线覆盖（每一项都有对应测试）：成功 / 内核失�
 
 ### 10.2a 下一份编码任务书：M2a 的开工顺序
 
-1. **钉版本**：选定 DSH 版本，Windows 与 Debian 装同一版；记下安装来源与 `dsh --version`。核对 DSH_FINDINGS §2 的机制在该版本里存在（Messages 协议、`systemPromptUpdate`、`session-log-deepseek` 的配置位置）。不存在的写进 FINDINGS，不假设。
+1. **钉版本**：选定 DSH 版本，Windows 与 Arch 装同一版；记下安装来源与 `dsh --version`。核对 DSH_FINDINGS §2 的机制在该版本里存在（Messages 协议、`systemPromptUpdate`、`session-log-deepseek` 的配置位置）。不存在的写进 FINDINGS，不假设。
 2. **离线先行**：per-task `DSH_HOME` 与 profile patch 的生成是纯函数，先用快照测试钉住产物（不起内核）。
 3. **最小真实链路**：`dsh-sdk` runtime → `initialize`（路由由 initialize 校验，参 §9.1）→ `session/prompt` → 消费 `session.event` → `session/wait` → 投影 → 结果。先跑一个只读的小任务（如「列出仓库顶层目录并总结」），再跑一个带 `--accept` 的写任务。
 4. **改名与无参数行为**：`[[bin]] name = "arcdeck"`；无参数打印 TUI 未实现提示与 headless 用法、退出 64；`worker run` 保留为别名。
@@ -791,7 +791,7 @@ M1 交付的离线覆盖（每一项都有对应测试）：成功 / 内核失�
 | `workspace-write` 下 worktree 提交被拒 | ✅ 实测（预期内） | `index.lock` 在主仓 `.git/worktrees/` 下 → Ether 配置用 `danger-full-access`，见 `examples/ether/` |
 | 卡死 → 杀进程树 → 续跑 → 用尽判 `STALLED` | ✅ 离线故障注入测试 | `stalled_run_is_restarted_then_fails_with_stalled_when_attempts_run_out` |
 | 读者侧健康（dead / stalled / busy） | ✅ 单测 | 真实场景下「杀掉监工 → dead」**未实测** |
-| Debian | ❌ 未验证 | 本机拿不到 Linux std（rustup 镜像 403），`ssh ether` 不通；`cfg(unix)` 路径只做了人工核对 |
+| Debian → **Arch（本机）** | ⚠️ 部分验证 | 2026-10-14 修订：目标改为本机 Arch。已实测：发布构建通过、离线套件 166/166、夹具端到端 `completed` + 验收 `passed`、契约测试在 Arch 上全绿（改前因写死盘符路径挂 3 个）。**未做**：真实 DSH 运行（本机未装运行时、无密钥）。`cfg(unix)` 的进程组收尾由离线套件在 Linux 上真跑到，不再是「只做人工核对」 |
 | Ether 侧派工脚本 | ⚠️ 只有示例 `examples/ether/ad.sh` | 改 Ether 的 `tools/dispatch/` 与 DISPATCHER 在 Ether 仓做 |
 
 已知限制（有意留到后面，不是遗漏）：
@@ -811,7 +811,7 @@ M1 交付的离线覆盖（每一项都有对应测试）：成功 / 内核失�
 |---|---|---|
 | 用户对本文范围的审阅 | 0.2 方向已定（§0）；细节待审阅 | 技术细节按本基线推进 |
 | **`session-log-deepseek` 开还是关** | 待用户裁定；裁定前 Arc Deck 生成的 profile **关闭** | 它把会话日志增量随请求发给 DeepSeek 官方 API（DSH 默认开）。worker 跑的是 Ether 源码，这是数据外发决定，归用户 |
-| DSH 钉哪个版本 | 参考源码 0.2.1-alpha.2，本机安装 0.1.7-rc.2 | M2a 第一步；Windows 与 Debian 同版 |
+| DSH 钉哪个版本 | 参考源码 0.2.1-alpha.2，本机安装 0.1.7-rc.2 | M2a 第一步；Windows 与 Arch 同版 |
 | worker 缺省工具组合（`sdk` 完整工具集 vs `sdk-minimal` RL 两工具） | 未测 | M2d E2 |
 | 非 DS 模型是否需要第二内核 | 按 D4 不建；未测 | M2d E3；DSH 明显更差才重新讨论 |
 | headless 的缺省阈值（心跳 15 s、模型空闲 300 s、续跑 3 次） | 初值，来自 DSH 默认值与 Ether runner 经验 | M2c 用真实批次校准，改了写明依据 |
