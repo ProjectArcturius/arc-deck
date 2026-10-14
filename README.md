@@ -1,34 +1,36 @@
 # Arc Deck
 
-基于 DeepSeek Harness 的编码 Agent 产品，目标分为两部分：
+基于 DeepSeek Harness（DSH）的编码 Agent 产品，目标分为两部分：
 
-| 部分 | 编码方向 | 使用者 |
-|---|---|---|
-| TUI / headless | Rust，共用任务、Agent、结果与 DSH 适配；TUI 迁移 OpenCode 的视觉与交互 | 终端用户，以及 Claude 等外部主控派发的 workers |
-| Windows GUI | C# + WinUI 2，保留平台控件路线，通过本地 IPC 接入 Rust 部分 | Windows 桌面用户 |
+| 部分 | 编码方向 | 使用者 | 状态 |
+|---|---|---|---|
+| Rust 后端：`arcdeck` | 无参数进 TUI（迁移 OpenCode 的视觉与交互），带子命令进 headless | 终端用户，以及 Claude 等外部主控派发的 workers（首先是 Ether） | **当前焦点：headless** |
+| 桌面 GUI | Windows：C# + WinUI 2；Linux：Rust + Kanesumi；都经本地 IPC 接入后端 | 桌面用户 | 冻结 |
+
+执行内核只用 DSH：DeepSeek 走官方路由，非 DS 模型走 DSH 的 pi-ai 路由（调查见 [docs/DSH_FINDINGS.md](docs/DSH_FINDINGS.md)）。
 
 默认 Agent 为 Echo：不仅定义语言风格，也定义角色、工作纪律、工具与权限、验证及交付要求。Build / Plan 参考 OpenCode；角色与工具体验参考 Claude Code 公开扩展，执行内核继续使用 DSH。
 
-正式需求与下一阶段编码入口：[产品需求与编码方向](docs/PRODUCT_PLAN.md)。该文档是实施基线：**M1（离线 worker 骨架）已实现并实测**，M2 起尚未开工。
+需求、架构与 roadmap：[产品需求与编码方向](docs/PRODUCT_PLAN.md)（先读 §0）。**M1（离线 worker 骨架）已实现并实测**，M2 起尚未开工。
 
 - `crates/arc-deck-core/` 产品模型（任务/配置/结果/事件/Agent/授权）
 - `crates/arc-deck-dsh/` DSH 适配（行式 JSON-RPC、事件投影、假 SDK 对端）
-- `crates/arc-deck-cli/` headless worker 命令（`arc-deck worker run`）
+- `crates/arc-deck-cli/` `arcdeck` 二进制：headless 命令面（run / status / wait / report / cancel / auth / runtime / config）
 - `agents/`、`prompts/` 默认 Agent 与提示词；`schemas/` 契约示例
 
 ```bash
-# 全部离线测试（127 个）；test-runtime 是必需的，发布构建里没有夹具
+# 全部离线测试（156 个）；test-runtime 是必需的，发布构建里没有夹具
 cargo test -p arc-deck-core -p arc-deck-dsh -p arc-deck-cli \
     --features arc-deck-cli/test-runtime --offline
 
 # 端到端离线验收：不发任何模型请求，退出码 0 表示 completed
-cargo run -p arc-deck-cli --features test-runtime -- worker run \
+cargo run -p arc-deck-cli --bin arcdeck --features test-runtime -- worker run \
     --config tests/fixtures/worker-offline.json \
     --task tests/fixtures/worker-task.json --format jsonl --result result.json
 ```
 
-- 下一步（M2）：接真实 DSH 运行时、Echo/Build/Plan 真正生效、工具与权限在执行层落实。
-- 尚未实现：真实内核接入、TUI、GUI 接线、跨平台运行。
+- **headless 已可用（Windows 实测）**：`arcdeck runtime install` → `arcdeck run task.md --detach` → `arcdeck status`。用法见 `arcdeck --help` 与 [PRODUCT_PLAN §10.2b](docs/PRODUCT_PLAN.md)；Ether 接入示例在 `examples/ether/`。
+- 尚未实现 / 未验证：Debian 运行、TUI、GUI 接线、Plan 的执行层限制。
 - `REFS/` 是被 Git 忽略的本地参考；构建和发布不能依赖它。OpenCode 为 MIT；Claude Code 参考仓的根许可证不是 MIT，不默认复制其实现或提示词。
 - 现有 `kanesumi/`、`uwp/` 与 C# `arc-deck-dsh/` 保留，不进行删除或真实数据迁移。
 
