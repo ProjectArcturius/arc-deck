@@ -2,6 +2,7 @@
 //! M4a uses independent headless runs; Remote conversations are a separate capability.
 
 mod app;
+pub mod catalog;
 mod editor;
 mod theme;
 mod view;
