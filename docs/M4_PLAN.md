@@ -25,9 +25,9 @@ PRODUCT_PLAN §7.3 的八个组件、§7.4 的键位与命令、§7.5 的视觉�
 | 顺序 | 任务 | 内容 | 状态 |
 |---|---|---|---|
 | 试点 | tui-model-catalog | 模型目录纯逻辑（§7.2） | ✅ 202b551 |
-| 0 | w1-markdown | 助手正文 Markdown（pulldown-cmark） | 派出 |
+| 0 | w1-markdown | 助手正文 Markdown（pulldown-cmark） | ✅ 6cf64bd |
 | 0 | w1-theme | 2.0.27 语义 token、v1→v2 迁移、内置主题、主题对话框 | 派出 |
-| 0 | w1-model-dialog | 模型 / provider / effort 对话框，F2 循环，偏好落盘 | 派出 |
+| 0 | w1-model-dialog | 模型 / provider / effort 对话框，F2 循环，偏好落盘 | ✅ f82555f |
 | 0 | w2-remote-transport | Remote host / rpc / mux；0.2.1 协议核对文档 | 派出 |
 | 0 | w4-m3-guard | EffectivePolicy → DSH 配置行，映射表 + `--dump-config` 验证 | 派出 |
 | 1 | w3-commands | 命令系统：action 注册表、键位与上下文、slash 补全、面板、帮助 | 待 w1 全部合入 |
