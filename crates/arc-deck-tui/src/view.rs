@@ -13,6 +13,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{App, Dialog, token},
+    markdown::{self, MarkdownPalette},
     theme::Theme,
 };
 
@@ -143,8 +144,8 @@ fn session(frame: &mut Frame, app: &mut App, area: Rect, t: &Theme) {
         width,
         main.height.saturating_sub(composer_height + 3),
     );
-    let lines = body_lines(app, t);
-    let lines = wrap(lines, body.width as usize);
+    let lines = body_lines(app, t, body.width);
+    let lines = fit_width(lines, body.width as usize);
     app.scroll_max = lines.len().saturating_sub(body.height as usize);
     let top = app.scroll.unwrap_or(app.scroll_max).min(app.scroll_max);
     // Explicit wrapped rows avoid estimating Ratatui's line count: an estimate caused
@@ -293,7 +294,7 @@ fn sidebar(frame: &mut Frame, app: &App, area: Rect, t: &Theme) {
     );
 }
 
-fn body_lines(app: &App, t: &Theme) -> Vec<Line<'static>> {
+fn body_lines(app: &App, t: &Theme, width: u16) -> Vec<Line<'static>> {
     let Some(d) = &app.detail else {
         return vec![Line::styled(
             "等待监工写入状态…",
@@ -422,7 +423,10 @@ fn body_lines(app: &App, t: &Theme) -> Vec<Line<'static>> {
         }
         lines.push(Line::raw(""));
         lines.push(Line::styled("模型的陈述", Style::default().fg(t.action)));
-        lines.extend(markdown(d.final_text.as_deref().unwrap_or(&r.summary), t));
+        // Rendered to the body width here, under its heading; `fit_width` leaves rows that
+        // already fit alone, so the hanging indents survive. (The first cut appended this at
+        // the end of `body_lines`, which slid the truncation warning between heading and body.)
+        lines.extend(statement_lines(app, t, width));
     } else if d.record.terminal {
         lines.push(Line::raw(""));
         lines.push(Line::styled(
@@ -445,29 +449,41 @@ fn body_lines(app: &App, t: &Theme) -> Vec<Line<'static>> {
     lines
 }
 
-fn markdown(text: &str, t: &Theme) -> Vec<Line<'static>> {
-    let mut code = false;
-    clean(text)
-        .lines()
-        .map(|s| {
-            if s.starts_with("```") {
-                code = !code;
-                Line::styled(s.to_string(), Style::default().fg(t.text_muted))
-            } else if code {
-                Line::styled(
-                    s.to_string(),
-                    Style::default().bg(t.background_element).fg(t.text),
-                )
-            } else if s.starts_with('#') {
-                Line::styled(
-                    s.to_string(),
-                    Style::default().fg(t.action).add_modifier(Modifier::BOLD),
-                )
-            } else {
-                Line::raw(s.to_string())
-            }
-        })
-        .collect()
+/// Assistant Markdown, or nothing when this run has no result file.
+///
+/// `final_text` is the model's own statement; `result.summary` is Arc Deck's fallback
+/// for a worker that never wrote one. That is the same choice the old line-by-line
+/// renderer made, kept so the fallback does not silently disappear with the rewrite.
+fn statement_lines(app: &App, t: &Theme, width: u16) -> Vec<Line<'static>> {
+    let Some(detail) = &app.detail else {
+        return Vec::new();
+    };
+    let Some(result) = &detail.result else {
+        return Vec::new();
+    };
+    let text = detail.final_text.as_deref().unwrap_or(&result.summary);
+    markdown::render(text, width, &markdown_palette(t))
+}
+
+/// Maps the theme's semantic roles onto the Markdown palette. Nothing here reads the
+/// other theme tokens on purpose: a Markdown role that borrowed an unrelated colour
+/// would break the "状态不借用无关颜色" rule in PRODUCT_PLAN §7.3.
+fn markdown_palette(t: &Theme) -> MarkdownPalette {
+    MarkdownPalette {
+        text: t.text,
+        muted: t.text_muted,
+        heading: t.action,
+        link: t.action,
+        link_text: t.action_selected,
+        code: t.feedback_success,
+        code_block_fg: t.text,
+        code_block_bg: t.background_element,
+        block_quote: t.action,
+        emph: t.action_selected,
+        strong: t.text,
+        list_marker: t.action_disabled,
+        hr: t.border,
+    }
 }
 
 fn popup(frame: &mut Frame, app: &App, dialog: Dialog, area: Rect, t: &Theme) {
@@ -570,10 +586,28 @@ fn popup(frame: &mut Frame, app: &App, dialog: Dialog, area: Rect, t: &Theme) {
     );
 }
 
+/// `markdown::clean` under the old local name: every non-Markdown field in the
+/// transcript is cleaned the same way the Markdown body is.
 fn clean(text: &str) -> String {
-    text.chars()
-        .filter(|c| !c.is_control() || *c == '\n')
-        .collect()
+    markdown::clean(text)
+}
+
+/// Last-resort width guard for `body_lines` output: only a row wider than the body
+/// gets touched. Markdown renders itself to the width it is handed, so in practice
+/// nothing here is re-wrapped — and that is the point. Re-wrapping Markdown output
+/// unconditionally would destroy the hanging indents the renderer just built
+/// (`fit_width` drops a line's prefix when it breaks it).
+fn fit_width(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(2);
+    let mut result = Vec::new();
+    for line in lines {
+        if line.width() <= width {
+            result.push(line);
+            continue;
+        }
+        result.extend(wrap(vec![line], width));
+    }
+    result
 }
 
 fn wrap(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
@@ -690,7 +724,7 @@ mod tests {
     fn failure_details_are_visible_even_when_tools_are_folded() {
         let mut a = app();
         long_run(&mut a);
-        let text = body_lines(&a, &Theme::new(false))
+        let text = body_lines(&a, &Theme::new(false), 80)
             .iter()
             .map(Line::to_string)
             .collect::<Vec<_>>()

@@ -4,6 +4,7 @@
 mod app;
 pub mod catalog;
 mod editor;
+mod markdown;
 mod theme;
 mod view;
 
