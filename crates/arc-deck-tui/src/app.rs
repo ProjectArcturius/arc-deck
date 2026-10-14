@@ -4,6 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 
+use crate::catalog::{self, ModelPrefs, ModelRef};
+use crate::model_dialog::{self, EffortDialogState, ModelDialogState, ProviderDialogState};
 use crate::{
     Boot, Preferences, Request, RunDetail, RunRecord, StartRequest, Update, editor::Editor,
 };
@@ -50,7 +52,7 @@ pub(crate) const COMMANDS: &[Command] = &[
     Command {
         action: Action::Models,
         slash: "/models",
-        label: "查看模型路由",
+        label: "选择模型（下一次请求生效）",
     },
     Command {
         action: Action::Sidebar,
@@ -94,12 +96,16 @@ pub(crate) const COMMANDS: &[Command] = &[
     },
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 弹层。带状态的那几个（模型 / provider / effort）的渲染与选择规则都在
+/// `model_dialog` 里，这里只保留「当前开着哪个」。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Dialog {
     Commands,
     Runs,
     Agents,
-    Models,
+    Models(ModelDialogState),
+    Providers(ProviderDialogState),
+    Efforts(EffortDialogState),
 }
 
 pub(crate) struct App {
@@ -113,6 +119,11 @@ pub(crate) struct App {
     pub agent: String,
     pub permission: String,
     pub effort: Option<String>,
+    /// 下一次请求要用的模型。启动时来自配置，模型对话框改动它。
+    pub model: Option<ModelRef>,
+    pub model_prefs: ModelPrefs,
+    /// 收藏 / 最近 / effort 改过就置位；退出时按它决定要不要落盘。
+    pub model_prefs_dirty: bool,
     pub dialog: Option<Dialog>,
     pub filter: String,
     pub choice: usize,
@@ -127,13 +138,20 @@ pub(crate) struct App {
 }
 
 impl App {
-    pub fn new(boot: Boot, preferences: Preferences) -> Self {
+    pub fn new(boot: Boot, preferences: Preferences, model_prefs: ModelPrefs) -> Self {
+        // 配置里的路由就是启动时的当前模型。解析不出来（配置缺失或被改坏）时留空 ——
+        // 界面此时显示「未配置」，而不是编一条路由出来。
+        let model = boot.model.as_deref().and_then(catalog::parse_route);
+        let effort = model
+            .as_ref()
+            .and_then(|model| model_prefs.effort(model).map(str::to_string))
+            .or_else(|| boot.effort.clone());
         Self {
             notice: boot
                 .config_error
                 .clone()
                 .unwrap_or_else(|| "每次提交是独立请求；多轮会话正在接入".into()),
-            effort: boot.effort.clone(),
+            effort,
             boot,
             preferences,
             editor: Editor::default(),
@@ -143,6 +161,9 @@ impl App {
             active: None,
             agent: "echo".into(),
             permission: "workspace".into(),
+            model,
+            model_prefs,
+            model_prefs_dirty: false,
             dialog: None,
             filter: String::new(),
             choice: 0,
@@ -210,12 +231,20 @@ impl App {
         self.filter.clear();
         self.choice = 0;
     }
+    /// 换一个对话框但**保留搜索框**：模型 → provider → 限定的模型列表这条路
+    /// 来回走的时候，用户刚打进去的过滤串不该每次都被清掉。
+    fn swap_dialog(&mut self, dialog: Dialog) {
+        self.dialog = Some(dialog);
+        self.choice = 0;
+    }
     fn selection_count(&self) -> usize {
-        match self.dialog {
+        match &self.dialog {
             Some(Dialog::Commands) => self.filtered_commands().len(),
             Some(Dialog::Runs) => self.filtered_runs().len(),
             Some(Dialog::Agents) => 3,
-            Some(Dialog::Models) => 1,
+            Some(Dialog::Models(state)) => self.model_rows(*state).len(),
+            Some(Dialog::Providers(_)) => self.provider_rows().len(),
+            Some(Dialog::Efforts(_)) => self.effort_count(),
             None => 0,
         }
     }
@@ -224,6 +253,89 @@ impl App {
             .as_ref()
             .is_some_and(|d| !d.record.terminal && d.record.health != "dead")
             || self.active.is_some() && self.active == self.selected
+    }
+    /// 当前模型在界面上的展示名（`model.name` → id → provider 名 → 原样路由）。
+    pub fn model_name(&self) -> String {
+        let Some(model) = &self.model else {
+            return "未配置".into();
+        };
+        catalog::display_name(&self.boot.catalog, model)
+    }
+    fn model_rows(&self, state: ModelDialogState) -> Vec<model_dialog::ModelRow> {
+        model_dialog::rows(
+            &self.boot.catalog,
+            &self.model_prefs,
+            state,
+            &self.filter,
+            self.model.as_ref(),
+        )
+    }
+    fn provider_rows(&self) -> Vec<catalog::ProviderOption> {
+        // 与渲染用同一个过滤函数，否则搜索时的选中下标会对到另一份列表上。
+        model_dialog::provider_candidates(
+            &self.boot.catalog,
+            self.model.as_ref(),
+            &self.filter.trim().to_lowercase(),
+        )
+    }
+    fn effort_count(&self) -> usize {
+        match &self.dialog {
+            // 第一行是「默认」，其余是模型报出来的档。
+            Some(Dialog::Efforts(state)) => state.efforts + 1,
+            _ => 0,
+        }
+    }
+    /// 模型对话框里的 Ctrl+F：收藏 / 取消收藏当前行。
+    fn toggle_favorite(&mut self) {
+        let Some(Dialog::Models(state)) = self.dialog else {
+            return;
+        };
+        let Some(row) = model_dialog::selected(
+            &self.boot.catalog,
+            &self.model_prefs,
+            state,
+            &self.filter,
+            self.model.as_ref(),
+            self.choice,
+        ) else {
+            return;
+        };
+        let was = self.model_prefs.favorite.contains(&row.model);
+        self.model_prefs.toggle_favorite(&row.model);
+        self.model_prefs_dirty = true;
+        self.notice = format!("{}{}", if was { "取消收藏 " } else { "已收藏 " }, row.title);
+    }
+    /// F2 / Shift+F2：在 Recent 里前后切换。**不改 Recent 的顺序** ——
+    /// 每次切换都把目标挪到最前的话，连按两次 F2 就只会在两条之间来回跳，等于卡住。
+    /// 上游的 `cycle` 同样只改当前模型；顺序由对话框选定与发请求时更新。
+    fn cycle_model(&mut self, direction: isize) {
+        let recent = self.model_prefs.recent.clone();
+        let Some(current) = self.model.as_ref() else {
+            self.notice = "还没有当前模型；用 leader,m 选一个".into();
+            return;
+        };
+        let Some(index) = recent.iter().position(|item| *item == *current) else {
+            self.notice = "当前模型不在 Recent 里；先用 leader,m 选一次".into();
+            return;
+        };
+        let next = (index as isize + direction).rem_euclid(recent.len() as isize) as usize;
+        let Some(target) = recent.get(next) else {
+            return;
+        };
+        if *target == *current {
+            return;
+        }
+        self.model = Some(target.clone());
+        self.effort = self
+            .model_prefs
+            .effort(target)
+            .map(str::to_string)
+            .or_else(|| self.boot.effort.clone());
+        self.notice = format!(
+            "下一次请求使用 {}（{}）；运行中的请求不受影响",
+            catalog::display_name(&self.boot.catalog, target),
+            target.route()
+        );
     }
     fn action(&mut self, action: Action, requests: &Sender<Request>) -> bool {
         match action {
@@ -235,7 +347,7 @@ impl App {
             }
             Action::Runs => self.open_dialog(Dialog::Runs),
             Action::Agents => self.open_dialog(Dialog::Agents),
-            Action::Models => self.open_dialog(Dialog::Models),
+            Action::Models => self.open_dialog(Dialog::Models(ModelDialogState::default())),
             Action::Sidebar => {
                 self.preferences.sidebar = !self.preferences.sidebar;
                 self.sidebar_overlay = self.preferences.sidebar;
@@ -367,12 +479,24 @@ impl App {
             .unwrap_or_default()
             .as_millis();
         let id = format!("tui-{stamp}-{}-{}", std::process::id(), self.serial);
+        // 模型对话框选定的路由随这次请求走（桥接成 `--model`）。没选过就是配置里的那条。
+        let model = self
+            .model
+            .as_ref()
+            .map(ModelRef::route)
+            .or_else(|| self.boot.model.clone());
+        if let Some(model) = &self.model {
+            // 用过的模型进 Recent —— 顺序在这里更新，而不是在 F2 切换时（见 cycle_model）。
+            self.model_prefs.touch_recent(model);
+            self.model_prefs_dirty = true;
+        }
         let request = StartRequest {
             id: id.clone(),
             prompt: self.editor.take(),
             agent: self.agent.clone(),
             permission: self.permission.clone(),
             effort: self.effort.clone(),
+            model,
         };
         if requests.send(Request::Start(request)).is_err() {
             self.notice = "执行端已断开".into();
@@ -386,7 +510,8 @@ impl App {
         false
     }
     fn select(&mut self, requests: &Sender<Request>) -> bool {
-        match self.dialog {
+        // 克隆而不是借用：下面几个分支都要 &mut self（打开新对话框、改偏好）。
+        match self.dialog.clone() {
             Some(Dialog::Commands) => {
                 let action = self.filtered_commands().get(self.choice).map(|c| c.action);
                 self.dialog = None;
@@ -413,12 +538,89 @@ impl App {
                     self.dialog = None;
                 }
             }
-            Some(Dialog::Models) => {
-                self.notice = "当前仅显示配置路由；DSH 模型目录与切换正在接入".into()
+            Some(Dialog::Models(state)) => self.select_model(state),
+            Some(Dialog::Providers(_)) => {
+                if let Some(provider) = self.provider_rows().get(self.choice).cloned() {
+                    // 从 provider 列表跳进只含该 provider 的模型对话框（上游同样是 replace）。
+                    let index = self
+                        .boot
+                        .catalog
+                        .iter()
+                        .position(|item| item.id == provider.id);
+                    // 保留搜索串：用户可能刚在 provider 列表里打过字。
+                    self.swap_dialog(Dialog::Models(ModelDialogState {
+                        only_provider: index,
+                    }));
+                }
             }
+            Some(Dialog::Efforts(state)) => self.select_effort(&state),
             None => {}
         }
         false
+    }
+    /// 模型对话框的结果：设为**下一次请求**用的模型、更新 Recent、必要时进 effort。
+    fn select_model(&mut self, state: ModelDialogState) {
+        let Some(row) = model_dialog::selected(
+            &self.boot.catalog,
+            &self.model_prefs,
+            state,
+            &self.filter,
+            self.model.as_ref(),
+            self.choice,
+        ) else {
+            return;
+        };
+        if let Some(reason) = &row.disabled {
+            // §7.2：不可用的模型显式禁用并说明原因，所以它留在列表里 ——
+            // 但确认那一步必须拒绝，否则「显示了原因却还能选」比不显示更糟。
+            self.notice = format!("{} 不可用：{reason}", row.title);
+            return;
+        }
+        self.model = Some(row.model.clone());
+        self.effort = self
+            .model_prefs
+            .effort(&row.model)
+            .map(str::to_string)
+            .or_else(|| self.boot.effort.clone());
+        self.model_prefs.touch_recent(&row.model);
+        self.model_prefs_dirty = true;
+        // 有强度档的模型按需再问一次（上游 DialogModel → DialogVariant）；
+        // 没有就直接关掉，不拿一个空对话框拦住用户。
+        match model_dialog::efforts(&self.boot.catalog, &row.model) {
+            Some(efforts) => {
+                self.notice = format!(
+                    "下一次请求使用 {}；该模型有强度档，请选择 effort",
+                    catalog::display_name(&self.boot.catalog, &row.model)
+                );
+                // 同样保留搜索框里的串。
+                self.swap_dialog(Dialog::Efforts(EffortDialogState {
+                    model: row.model,
+                    efforts: efforts.len(),
+                }));
+                self.filter.clear();
+            }
+            None => {
+                self.notice = format!(
+                    "下一次请求使用 {}（{}）；运行中的请求不受影响",
+                    catalog::display_name(&self.boot.catalog, &row.model),
+                    row.model.route()
+                );
+                self.dialog = None;
+            }
+        }
+    }
+
+    fn select_effort(&mut self, state: &EffortDialogState) {
+        // 越界（列表正在变短）时按「默认」处理，与 effort 对话框第 0 行一致。
+        let value = model_dialog::effort_at(&self.boot.catalog, state, self.choice);
+        self.model_prefs.set_effort(&state.model, value.as_deref());
+        self.model_prefs_dirty = true;
+        self.effort = value.clone();
+        self.notice = match value {
+            Some(effort) => format!("下一次请求的 effort：{effort}"),
+            None => "下一次请求恢复模型缺省强度".into(),
+        };
+        self.dialog = None;
     }
     pub fn input(&mut self, event: Event, requests: &Sender<Request>) -> bool {
         self.dirty = true;
@@ -446,6 +648,14 @@ impl App {
         }
         if key.code == KeyCode::Esc {
             self.leader = false;
+            // 从 provider 列表进来的那种：Esc 先退回模型对话框（上游是 replace 进去的），
+            // 再按一次才关掉整个流程。对话框里也写了「Esc 返回模型对话框」。
+            if let Some(Dialog::Providers(state)) = &self.dialog
+                && let Some(back) = state.back
+            {
+                self.swap_dialog(Dialog::Models(back));
+                return false;
+            }
             if self.dialog.take().is_some() {
                 return false;
             }
@@ -457,6 +667,19 @@ impl App {
             return false;
         }
         if self.dialog.is_some() {
+            // 对话框上下文的键位先判：Ctrl+F / Ctrl+A 只在模型对话框里有意义，
+            // 与同名会话级绑定不冲突（§7.4：冲突按上下文解析，不能全局覆盖）。
+            if ctrl && key.code == KeyCode::Char('f') {
+                self.toggle_favorite();
+                return false;
+            }
+            if ctrl && key.code == KeyCode::Char('a') {
+                // 只在模型对话框里有这个上下文入口（上游的 model.dialog.provider）。
+                if let Some(Dialog::Models(back)) = self.dialog {
+                    self.swap_dialog(Dialog::Providers(ProviderDialogState { back: Some(back) }));
+                }
+                return false;
+            }
             match key.code {
                 KeyCode::Up => self.choice = self.choice.saturating_sub(1),
                 KeyCode::Down => {
@@ -464,6 +687,8 @@ impl App {
                 }
                 KeyCode::Enter => return self.select(requests),
                 KeyCode::Backspace => {
+                    // effort 与 provider 列表也能搜：provider 是按名字找的，
+                    // 而 effort 列表短到不需要搜，这里一并接受，键位才一致。
                     self.filter.pop();
                     self.choice = 0;
                 }
@@ -473,6 +698,9 @@ impl App {
                 }
                 _ => {}
             }
+            // 搜索让列表变短时选中行可能越界；每按键一次都夹回范围。
+            // 上游 `dialog-select` 的做法是选中项被过滤掉就重置到第一个命中项。
+            self.choice = self.choice.min(self.selection_count().saturating_sub(1));
             return false;
         }
         if self.leader {
@@ -494,6 +722,10 @@ impl App {
             KeyCode::Char('p') if ctrl => self.open_dialog(Dialog::Commands),
             KeyCode::Char('x') if ctrl => self.leader = true,
             KeyCode::Char('j') if ctrl => self.editor.insert("\n"),
+            // F2 / Shift+F2 在 Recent 里前后循环（§7.4，采自上游 local.tsx 的 cycle）。
+            // 运行中也允许 —— 它只改「下一次请求」用的路由，不碰正在跑的那个。
+            KeyCode::F(2) if key.modifiers.contains(KeyModifiers::SHIFT) => self.cycle_model(-1),
+            KeyCode::F(2) => self.cycle_model(1),
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.editor.insert("\n")
             }
@@ -554,22 +786,477 @@ pub(crate) fn token(n: Option<u64>) -> String {
 mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
+    use std::path::PathBuf;
     use std::sync::mpsc;
+
+    use crate::catalog::{Model, Provider};
+
+    fn model(id: &str, name: &str, efforts: &[&str]) -> Model {
+        Model {
+            id: id.into(),
+            name: Some(name.into()),
+            efforts: efforts.iter().map(|effort| effort.to_string()).collect(),
+            ..Model::default()
+        }
+    }
+
+    /// 目录夹具：一个普通 provider、一个带 effort 的、一个含不可用模型的。
+    /// 路由 `p/m`（配置里的当前模型）必须留在里面 —— 目录的来源保证这一点（见 tui.rs）。
+    fn catalog() -> Vec<Provider> {
+        let mut offline = model("m-offline", "Offline Model", &[]);
+        offline.unavailable = Some("no credentials".into());
+        let mut free = model("m-free", "Free Model", &[]);
+        free.free = Some(true);
+        vec![
+            Provider {
+                id: "p".into(),
+                name: "Provider P".into(),
+                models: vec![
+                    model("m", "Model M", &[]),
+                    free,
+                    offline,
+                    model("m-effort", "Effort Model", &["off", "low", "high", "max"]),
+                ],
+            },
+            Provider {
+                id: "q".into(),
+                name: "Provider Q".into(),
+                models: vec![model("n", "Model N", &[])],
+            },
+        ]
+    }
+
+    fn boot(model: Option<&str>, prefs: PathBuf) -> Boot {
+        Boot {
+            workspace: ".".into(),
+            model: model.map(str::to_string),
+            effort: None,
+            config_error: None,
+            preferences: "unused".into(),
+            catalog: catalog(),
+            model_prefs: prefs,
+        }
+    }
+
     fn app() -> App {
         App::new(
-            Boot {
-                workspace: ".".into(),
-                model: Some("p/m".into()),
-                effort: None,
-                config_error: None,
-                preferences: "unused".into(),
-            },
+            boot(Some("p/m"), PathBuf::from("unused.json")),
             Preferences::default(),
+            ModelPrefs::default(),
         )
     }
+
     fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
+
+    fn key_with(code: KeyCode, modifiers: KeyModifiers) -> Event {
+        Event::Key(KeyEvent::new(code, modifiers))
+    }
+
+    fn type_text(app: &mut App, text: &str, tx: &Sender<Request>) {
+        for c in text.chars() {
+            app.input(key(KeyCode::Char(c)), tx);
+        }
+    }
+
+    fn model_dialog_app() -> App {
+        let mut app = app();
+        app.open_dialog(Dialog::Models(ModelDialogState::default()));
+        app
+    }
+
+    fn open_models(app: &mut App, tx: &Sender<Request>) {
+        app.input(key_with(KeyCode::Char('x'), KeyModifiers::CONTROL), tx);
+        app.input(key(KeyCode::Char('m')), tx);
+    }
+
+    fn model_dialog(app: &App) -> ModelDialogState {
+        match app.dialog {
+            Some(Dialog::Models(state)) => state,
+            ref other => panic!("期望模型对话框，实际是 {other:?}"),
+        }
+    }
+
+    fn sections(app: &App) -> Vec<crate::model_dialog::ModelBlock> {
+        model_dialog::blocks(
+            &app.boot.catalog,
+            &app.model_prefs,
+            &app.filter,
+            model_dialog(app).provider_id(&app.boot.catalog),
+            app.model.as_ref(),
+        )
+    }
+
+    fn buffer_text(app: &mut App, width: u16, height: u16) -> String {
+        use ratatui::{Terminal, backend::TestBackend};
+        use unicode_width::UnicodeWidthStr;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| crate::view::draw(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..height {
+            let mut x = 0;
+            while x < width {
+                let symbol = buffer[(x, y)].symbol();
+                text.push_str(symbol);
+                x += (symbol.width() as u16).max(1);
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    #[test]
+    fn model_dialog_lists_favorites_recent_then_each_provider_in_order() {
+        let mut app = model_dialog_app();
+        app.model_prefs
+            .toggle_favorite(&catalog::parse_route("q/n").unwrap());
+        app.model_prefs
+            .touch_recent(&catalog::parse_route("p/m-free").unwrap());
+
+        // 收藏的 q/n 只在 Favorites 里出现，所以它那一节不再单独画出 Provider Q ——
+        // 分节与「同一模型不重复列」是同一条规则的两个面。
+        let titles: Vec<String> = sections(&app)
+            .iter()
+            .map(|block| block.title.clone())
+            .collect();
+        assert_eq!(titles, vec!["Favorites", "Recent", "Provider P"]);
+        let flat: Vec<String> = sections(&app)
+            .iter()
+            .flat_map(|block| block.rows.iter())
+            .map(|row| row.model.route())
+            .collect();
+        assert_eq!(flat.iter().filter(|route| *route == "q/n").count(), 1);
+        assert_eq!(flat.iter().filter(|route| *route == "p/m-free").count(), 1);
+        // 当前模型在平铺后的某一节里带 current 标记，且只出现一次。
+        let marked: Vec<String> = sections(&app)
+            .iter()
+            .flat_map(|block| block.rows.iter())
+            .filter(|row| row.current)
+            .map(|row| row.model.route())
+            .collect();
+        assert_eq!(marked, vec!["p/m".to_string()]);
+
+        // 用 120x40 而不是 120x30：对话框最多 22 行，30 行的终端里
+        // 靠后的分节会被窗口裁掉，那是「没画出来」而不是「没排序」。
+        let text = buffer_text(&mut app, 120, 40);
+        for header in ["Favorites", "Recent", "Provider P"] {
+            assert!(text.contains(header), "分节标题 {header} 没画出来:\n{text}");
+        }
+        assert!(
+            text.find("Favorites").unwrap() < text.find("Recent").unwrap(),
+            "Favorites 必须排在 Recent 之前"
+        );
+        assert!(text.find("Recent").unwrap() < text.find("Provider P").unwrap());
+        // Free 页脚要落在这条对话框里最靠右的位置（右对齐），不是紧跟在标题后面。
+        // 行形如 `│␣␣␣␣␣␣Free Model␣…␣Free␣␣␣│`：页脚右边只剩 3 格内边距 + 边框。
+        let line = text
+            .lines()
+            .find(|line| line.contains("Free Model"))
+            .expect("免费模型那一行");
+        assert!(
+            line.trim_end().ends_with("Free   │"),
+            "footer 必须右对齐，还留在对话框最右侧：{line:?}"
+        );
+        let head_end = line.find("Free Model").unwrap() + "Free Model".len();
+        assert_eq!(
+            line[head_end..].trim().trim_end_matches('│').trim(),
+            "Free",
+            "标题与页脚之间只该是空白：{line:?}"
+        );
+    }
+
+    #[test]
+    fn model_dialog_search_filters_and_drops_the_section_headers() {
+        let mut app = model_dialog_app();
+        let (tx, _) = mpsc::channel();
+        type_text(&mut app, "offline", &tx);
+        let blocks = sections(&app);
+        assert_eq!(blocks.len(), 1, "搜索命中不画分节标题");
+        assert!(blocks[0].title.is_empty());
+        assert_eq!(
+            blocks[0]
+                .rows
+                .iter()
+                .map(|row| row.model.route())
+                .collect::<Vec<_>>(),
+            vec!["p/m-offline".to_string()]
+        );
+        let text = buffer_text(&mut app, 120, 30);
+        assert!(text.contains("Offline Model"));
+        assert!(!text.contains("Favorites"), "搜索时不该再画分节标题");
+        assert!(text.contains("不可用：no credentials"), "禁用原因要写出来");
+    }
+
+    #[test]
+    fn disabled_rows_stay_listed_but_cannot_be_confirmed() {
+        let mut app = model_dialog_app();
+        let (tx, rx) = mpsc::channel();
+        type_text(&mut app, "offline", &tx);
+        assert!(sections(&app)[0].rows[0].disabled.is_some());
+        app.input(key(KeyCode::Enter), &tx);
+        assert_eq!(
+            app.model,
+            Some(catalog::parse_route("p/m").unwrap()),
+            "不可用的模型不能变成当前模型"
+        );
+        assert!(matches!(app.dialog, Some(Dialog::Models(_))), "对话框不该关闭");
+        assert!(rx.try_recv().is_err(), "没有请求该被发出去");
+        assert!(app.notice.contains("不可用"), "要说明为什么没生效：{}", app.notice);
+    }
+
+    #[test]
+    fn selecting_a_model_without_efforts_closes_and_applies_to_the_next_request() {
+        let mut app = model_dialog_app();
+        let (tx, rx) = mpsc::channel();
+        // 搜索把候选缩到 "Model N"，省得依赖排序位置。
+        type_text(&mut app, "Model N", &tx);
+        app.input(key(KeyCode::Enter), &tx);
+        assert_eq!(app.model, Some(catalog::parse_route("q/n").unwrap()));
+        assert_eq!(app.dialog, None, "没有强度档就直接关闭（§7.2）");
+        assert_eq!(app.model_prefs.recent[0].route(), "q/n");
+
+        app.editor.insert("跑一条");
+        app.input(key(KeyCode::F(6)), &tx);
+        let Request::Start(request) = rx.recv().unwrap() else {
+            panic!("应该是一次 Start")
+        };
+        assert_eq!(request.model.as_deref(), Some("q/n"));
+        assert_eq!(request.effort, None);
+    }
+
+    #[test]
+    fn request_carries_the_configured_route_even_before_the_dialog_is_used() {
+        let mut app = app();
+        let (tx, rx) = mpsc::channel();
+        app.editor.insert("跑一条");
+        app.input(key(KeyCode::F(6)), &tx);
+        let Request::Start(request) = rx.recv().unwrap() else {
+            panic!("应该是一次 Start")
+        };
+        assert_eq!(request.model.as_deref(), Some("p/m"));
+    }
+
+    #[test]
+    fn selecting_a_model_with_efforts_opens_the_effort_dialog() {
+        let mut app = model_dialog_app();
+        let (tx, rx) = mpsc::channel();
+        type_text(&mut app, "Effort Model", &tx);
+        app.input(key(KeyCode::Enter), &tx);
+        let Some(Dialog::Efforts(state)) = app.dialog.clone() else {
+            panic!("有强度档就要进 effort 对话框");
+        };
+        assert_eq!(state.model.route(), "p/m-effort");
+        assert_eq!(state.efforts, 4);
+        assert_eq!(
+            app.model,
+            Some(catalog::parse_route("p/m-effort").unwrap()),
+            "模型先定下来，effort 只是它的补充"
+        );
+        assert!(rx.try_recv().is_err(), "选模型本身不发请求");
+
+        // 第 0 行是「默认」，第 2 行是 "low"。
+        app.input(key(KeyCode::Down), &tx);
+        app.input(key(KeyCode::Down), &tx);
+        app.input(key(KeyCode::Enter), &tx);
+        assert_eq!(app.dialog, None);
+        assert_eq!(app.effort.as_deref(), Some("low"));
+        assert_eq!(
+            app.model_prefs.effort(&catalog::parse_route("p/m-effort").unwrap()),
+            Some("low")
+        );
+
+        app.editor.insert("跑一条");
+        app.input(key(KeyCode::F(6)), &tx);
+        let Request::Start(request) = rx.recv().unwrap() else {
+            panic!("应该是一次 Start")
+        };
+        assert_eq!(request.model.as_deref(), Some("p/m-effort"));
+        assert_eq!(request.effort.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn choosing_the_default_effort_row_clears_the_stored_level() {
+        let mut app = model_dialog_app();
+        let (tx, _) = mpsc::channel();
+        let route = catalog::parse_route("p/m-effort").unwrap();
+        app.model_prefs.set_effort(&route, Some("high"));
+        app.open_dialog(Dialog::Efforts(EffortDialogState {
+            model: route.clone(),
+            efforts: 4,
+        }));
+        app.input(key(KeyCode::Enter), &tx);
+        assert_eq!(app.effort, None);
+        assert_eq!(app.model_prefs.effort(&route), None);
+        assert_eq!(app.dialog, None);
+    }
+
+    #[test]
+    fn ctrl_f_toggles_the_favorite_of_the_selected_row_only_inside_the_dialog() {
+        let mut app = model_dialog_app();
+        let (tx, _) = mpsc::channel();
+        type_text(&mut app, "Model N", &tx);
+        app.input(key_with(KeyCode::Char('f'), KeyModifiers::CONTROL), &tx);
+        assert_eq!(app.model_prefs.favorite.len(), 1);
+        assert_eq!(app.model_prefs.favorite[0].route(), "q/n");
+        assert!(app.notice.contains("已收藏"));
+        app.input(key_with(KeyCode::Char('f'), KeyModifiers::CONTROL), &tx);
+        assert!(app.model_prefs.favorite.is_empty());
+        assert!(app.notice.contains("取消收藏"));
+
+        // 会话级没有 Ctrl+F：对话框关着的时候它不该改任何东西。
+        app.dialog = None;
+        app.input(key_with(KeyCode::Char('f'), KeyModifiers::CONTROL), &tx);
+        assert!(app.model_prefs.favorite.is_empty());
+        assert_eq!(app.editor.text, "", "Ctrl+F 不是输入");
+    }
+
+    #[test]
+    fn ctrl_a_opens_the_provider_list_and_enter_limits_the_model_dialog() {
+        let mut app = app();
+        let (tx, _) = mpsc::channel();
+        open_models(&mut app, &tx);
+        assert!(matches!(app.dialog, Some(Dialog::Models(_))));
+
+        app.input(key_with(KeyCode::Char('a'), KeyModifiers::CONTROL), &tx);
+        assert!(matches!(app.dialog, Some(Dialog::Providers(_))));
+        let text = buffer_text(&mut app, 120, 30);
+        assert!(text.contains("选择 provider"), "provider 列表标题:\n{text}");
+        assert!(text.contains("Provider P") && text.contains("Provider Q"));
+
+        app.input(key(KeyCode::Down), &tx);
+        app.input(key(KeyCode::Enter), &tx);
+        let Some(Dialog::Models(state)) = app.dialog else {
+            panic!("选定 provider 之后回到模型对话框");
+        };
+        assert_eq!(state.provider_id(&app.boot.catalog), Some("q"));
+        let rows = sections(&app);
+        assert_eq!(rows.len(), 1, "限定 provider 时不画 Favorites/Recent 分节");
+        assert_eq!(
+            rows[0]
+                .rows
+                .iter()
+                .map(|row| row.model.route())
+                .collect::<Vec<_>>(),
+            vec!["q/n".to_string()],
+            "只列该 provider 的模型"
+        );
+        let text = buffer_text(&mut app, 120, 30);
+        assert!(text.contains("Provider Q"), "标题里要说明限定到了哪个 provider");
+        assert!(!text.contains("Provider P  "), "别的 provider 的模型不该出现");
+    }
+
+    /// provider 搜索框里的串要跟着走进模型对话框（它是同一个搜索框），
+    /// 否则用户刚打的 "Provider Q" 会在按 Enter 之后消失。
+    #[test]
+    fn the_provider_search_text_survives_the_jump_into_the_model_dialog() {
+        let mut app = app();
+        let (tx, _) = mpsc::channel();
+        open_models(&mut app, &tx);
+        app.input(key_with(KeyCode::Char('a'), KeyModifiers::CONTROL), &tx);
+        type_text(&mut app, "Provider Q", &tx);
+        assert_eq!(app.filter, "Provider Q");
+        app.input(key(KeyCode::Enter), &tx);
+        let Some(Dialog::Models(state)) = app.dialog else {
+            panic!("应该回到模型对话框");
+        };
+        assert_eq!(state.provider_id(&app.boot.catalog), Some("q"));
+        assert_eq!(app.filter, "Provider Q", "搜索串不该被清掉");
+    }
+
+    /// provider 列表里的 Esc 先退回模型对话框（对话框底部也是这么写的），
+    /// 再按一次才关掉整个流程。
+    #[test]
+    fn escape_returns_from_the_provider_list_to_the_model_dialog() {
+        let mut app = app();
+        let (tx, _) = mpsc::channel();
+        open_models(&mut app, &tx);
+        app.input(key_with(KeyCode::Char('a'), KeyModifiers::CONTROL), &tx);
+        assert!(matches!(app.dialog, Some(Dialog::Providers(_))));
+        app.input(key(KeyCode::Esc), &tx);
+        assert!(matches!(app.dialog, Some(Dialog::Models(_))));
+        app.input(key(KeyCode::Esc), &tx);
+        assert_eq!(app.dialog, None);
+    }
+
+    #[test]
+    fn f2_cycles_recent_without_reordering_it_and_shift_f2_goes_back() {
+        let mut app = app();
+        let (tx, _) = mpsc::channel();
+        let first = catalog::parse_route("p/m").unwrap();
+        let second = catalog::parse_route("q/n").unwrap();
+        app.model_prefs.touch_recent(&second);
+        app.model_prefs.touch_recent(&first);
+
+        app.input(key(KeyCode::F(2)), &tx);
+        assert_eq!(app.model, Some(second.clone()));
+        assert_eq!(
+            app.model_prefs.recent,
+            vec![first.clone(), second.clone()],
+            "切换不能顺手改 Recent 的顺序，否则连按两次会原地跳"
+        );
+        app.input(key_with(KeyCode::F(2), KeyModifiers::SHIFT), &tx);
+        assert_eq!(app.model, Some(first));
+        assert!(app.notice.contains("下一次请求"), "要说明何时生效：{}", app.notice);
+
+        // 环回到头的另一侧。
+        app.input(key_with(KeyCode::F(2), KeyModifiers::SHIFT), &tx);
+        assert_eq!(app.model, Some(second));
+    }
+
+    #[test]
+    fn dialog_render_says_the_model_switch_applies_to_the_next_request() {
+        let mut app = model_dialog_app();
+        let text = buffer_text(&mut app, 120, 30);
+        assert!(
+            text.contains("下一次请求生效"),
+            "§7.2 要求界面上说清不是热切换：\n{text}"
+        );
+        assert!(text.contains("不会热切换"));
+        // 对话框底部要说清这两个上下文键位（§7.4）以及 Esc 之后仍然用哪个模型。
+        assert!(text.contains("^F 收藏"));
+        assert!(text.contains("^A provider"));
+        assert!(text.contains("仍用 Model M"), "要说清 Esc 关闭后当前模型是谁");
+    }
+
+    #[test]
+    fn current_model_reaches_the_disk_after_selecting_and_touching_recent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.json");
+        let mut app = App::new(
+            boot(Some("p/m"), path.clone()),
+            Preferences::default(),
+            ModelPrefs::default(),
+        );
+        let (tx, _) = mpsc::channel();
+        app.open_dialog(Dialog::Models(ModelDialogState::default()));
+        type_text(&mut app, "Model N", &tx);
+        // 收藏要在对话框还开着的时候按（Enter 之后对话框就关了）。
+        app.input(key_with(KeyCode::Char('f'), KeyModifiers::CONTROL), &tx);
+        app.input(key(KeyCode::Enter), &tx);
+
+        assert!(app.model_prefs_dirty);
+        app.model_prefs.save(&path).expect("保存偏好");
+        let saved = ModelPrefs::load(&path);
+        assert_eq!(
+            saved.recent.first().map(ModelRef::route).as_deref(),
+            Some("q/n")
+        );
+        assert_eq!(
+            saved.favorite.first().map(ModelRef::route).as_deref(),
+            Some("q/n")
+        );
+    }
+
+    #[test]
+    fn info_line_and_metadata_show_the_current_model_name() {
+        let mut app = app();
+        assert_eq!(app.model_name(), "Model M");
+        let text = buffer_text(&mut app, 120, 30);
+        assert!(text.contains("Model M"), "输入区 metadata 要用展示名:\n{text}");
+    }
+
     #[test]
     fn request_is_independent_and_current_execution_cannot_be_reconfigured() {
         let mut app = app();

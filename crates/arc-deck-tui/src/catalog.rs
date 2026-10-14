@@ -72,6 +72,13 @@ pub struct Model {
     pub free: Option<bool>,
     /// 不可用原因。有值时禁用并显示原因，不从列表里悄悄拿掉（§7.2）。
     pub unavailable: Option<String>,
+    /// 这个模型支持的强度档（产品名 effort，§7.4）。**空表示没有强度档**，
+    /// 此时选完模型直接关对话框（§7.2 的「没有强度档的模型直接跳过」）。
+    ///
+    /// 由目录给，不由本模块推断：DSH 的强度档按模型不同（DeepSeek 官方是
+    /// off/low/high/max，pi-ai 路由来自它自己的目录）。临时目录一律留空 ——
+    /// 在界面上编出几档再让运行时拒绝，比不给选择差得多。
+    pub efforts: Vec<String>,
 }
 
 /// 本地偏好。收藏与最近是 Arc Deck 自己的状态，不写回 DSH（§7.2）。
@@ -207,6 +214,133 @@ pub fn options(
     }
     options.extend(groups);
     options
+}
+
+/// 一个分节：标题 + 这一节里的行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelSection {
+    pub title: String,
+    pub options: Vec<ModelOption>,
+}
+
+/// 把 [`options`] 的平铺结果重新切成**带标题的分节**，顺序即展示顺序。
+///
+/// 为什么在这里切、而不是让对话框自己认：分节边界只有本模块知道（Favorites / Recent
+/// 是偏好里的顺序，其余按 provider 名分组），从平铺结果里反推会得到第二份分组规则 ——
+/// 两份规则一旦不一致，界面上就是「收藏的模型出现在 provider 节里」这种安静的错误。
+///
+/// 搜索命中与限定 provider 时上游都不画分节（`showSections`），这里照做：此时分节
+/// 只剩下 provider 名，而它已经在每一行的 `category` 里了，再画一遍只是重复。
+pub fn sections(
+    providers: &[Provider],
+    prefs: &ModelPrefs,
+    query: &str,
+    only_provider: Option<&str>,
+) -> Vec<ModelSection> {
+    let options = options(providers, prefs, query, only_provider);
+    if !query.trim().is_empty() || only_provider.is_some() {
+        return if options.is_empty() {
+            Vec::new()
+        } else {
+            vec![ModelSection {
+                title: String::new(),
+                options,
+            }]
+        };
+    }
+
+    // 偏好里已经失效的引用在 `options` 里就被丢掉了，所以这里按「命中的行」计数。
+    let mut favorites = 0;
+    let mut recent = 0;
+    for option in &options {
+        if contains(
+            &prefs.favorite,
+            &option.model.provider_id,
+            &option.model.model_id,
+        ) {
+            favorites += 1;
+        } else if contains(&prefs.recent, &option.model.provider_id, &option.model.model_id) {
+            recent += 1;
+        } else {
+            break;
+        }
+    }
+
+    let mut sections: Vec<ModelSection> = Vec::new();
+    let mut push = |title: String, option: ModelOption| match sections.last_mut() {
+        // 同一个 provider 的行是连续的（provider 之间才排序），所以按标题合并就够。
+        Some(last) if last.title == title => last.options.push(option),
+        _ => sections.push(ModelSection {
+            title,
+            options: vec![option],
+        }),
+    };
+    for (index, option) in options.into_iter().enumerate() {
+        let title = if index < favorites {
+            "Favorites".to_string()
+        } else if index < favorites + recent {
+            "Recent".to_string()
+        } else {
+            option.category.clone().unwrap_or_default()
+        };
+        push(title, option);
+    }
+    sections
+}
+
+/// provider 列表对话框的一行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderOption {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    /// 当前生效的模型属于这个 provider：列表上要能一眼看出现在在哪。
+    pub current: bool,
+}
+
+/// provider 列表的候选行，provider 之间按 name 排序（与模型列表同一条规则）。
+///
+/// 这里**只做列表与跳转**：连接、登录、探测可用性是另一件事（别人的 provider 能不能用，
+/// 只有真发一次请求才知道，不在这个对话框里假装）。
+pub fn provider_options(providers: &[Provider], current: Option<&ModelRef>) -> Vec<ProviderOption> {
+    let mut ordered: Vec<&Provider> = providers.iter().collect();
+    ordered.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+    ordered
+        .into_iter()
+        .map(|provider| ProviderOption {
+            id: provider.id.clone(),
+            name: provider.name.clone(),
+            // 只有 id 与名字不同才值得占一行副标题；相同就是噪声。
+            description: (provider.name != provider.id).then(|| provider.id.clone()),
+            current: current.is_some_and(|model| model.provider_id == provider.id),
+        })
+        .collect()
+}
+
+/// 目录里找一条路由。界面用它把用户写下的引用翻成展示名。
+///
+/// 名字不叫 `find`：测试模块里已经有一个 `find(options, route)`，同名会把调用点
+/// 悄悄接到另一个签名上（这里真发生过一次）。
+pub fn lookup_route<'a>(
+    providers: &'a [Provider],
+    reference: &ModelRef,
+) -> Option<(&'a Provider, &'a Model)> {
+    lookup(providers, reference)
+}
+
+/// 展示名：`model.name` → `model.id` → provider 名 → provider id → 原样返回路由。
+///
+/// 最后两档是给「配置里的路由不在目录里」用的（临时目录的来源只覆盖 provider 块，
+/// 而配置的默认模型可能指向内置 provider）。宁可显示 `opencode-go`，也不显示空白。
+pub fn display_name(providers: &[Provider], reference: &ModelRef) -> String {
+    if let Some((_, model)) = lookup(providers, reference) {
+        return title(model).to_string();
+    }
+    providers
+        .iter()
+        .find(|provider| provider.id == reference.provider_id)
+        .map(|provider| provider.name.clone())
+        .unwrap_or_else(|| reference.route())
 }
 
 /// 按 provider 分组（provider 之间按 name 排序），组内按 `sort_models` 排。
@@ -720,6 +854,117 @@ mod tests {
         assert!(fuzzy_score("ap", "alpha").is_some());
         assert_eq!(fuzzy_score("", "alpha"), None);
         assert_eq!(fuzzy_score("alphabet", "alpha"), None, "查询比目标还长");
+    }
+
+    #[test]
+    fn sections_name_favorites_recent_and_each_provider_in_order() {
+        let mut prefs = ModelPrefs::default();
+        prefs.toggle_favorite(&reference("alpha/alpha-pro"));
+        prefs.touch_recent(&reference("alpha/alpha-flash"));
+        prefs.touch_recent(&reference("alpha/alpha-pro"));
+        // 目录里没有的引用不占节，也不该把 Recent 节撑大。
+        prefs.touch_recent(&reference("ghost/gone"));
+
+        let sections = sections(&catalog(), &prefs, "", None);
+        let titles: Vec<&str> = sections.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, vec!["Favorites", "Recent", "Alpha", "DeepSeek", "Zeta"]);
+        assert_eq!(
+            routes(&sections[0].options),
+            vec!["alpha/alpha-pro"],
+            "收藏节只有收藏的那一条"
+        );
+        assert_eq!(
+            routes(&sections[1].options),
+            vec!["alpha/alpha-flash"],
+            "Recent 不重复列出已在 Favorites 的模型"
+        );
+        // 分节是 `options` 的重新分组，不是另一套顺序：平铺回去必须逐字相同。
+        let flat: Vec<String> = sections
+            .iter()
+            .flat_map(|section| routes(&section.options))
+            .collect();
+        assert_eq!(flat, routes(&options(&catalog(), &prefs, "", None)));
+    }
+
+    #[test]
+    fn sections_collapse_to_one_untitled_block_when_searching_or_limiting() {
+        let prefs = ModelPrefs::default();
+        let searched = sections(&catalog(), &prefs, "flash", None);
+        assert_eq!(searched.len(), 1);
+        assert!(searched[0].title.is_empty(), "搜索命中不画分节标题");
+        assert!(routes(&searched[0].options).contains(&"alpha/alpha-flash".to_string()));
+
+        let limited = sections(&catalog(), &prefs, "", Some("alpha"));
+        assert_eq!(limited.len(), 1, "限定 provider 时只有一个分组，不再画 Favorites/Recent");
+        assert!(limited[0].title.is_empty());
+
+        assert!(sections(&catalog(), &prefs, "qqqq", None).is_empty());
+    }
+
+    #[test]
+    fn provider_options_are_sorted_and_mark_the_current_one() {
+        let listed = provider_options(&catalog(), Some(&reference("zeta/zeta-one")));
+        assert_eq!(
+            listed.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["alpha", "deepseek", "zeta"]
+        );
+        assert_eq!(listed[0].name, "Alpha");
+        assert!(!listed[0].current);
+        assert!(listed[2].current, "当前模型所在的 provider 要有标记");
+        // provider 名与 id 不同才给副标题：`deepseek` 的展示名是 "DeepSeek"，所以要给。
+        assert_eq!(listed[0].description.as_deref(), Some("alpha"));
+        assert_eq!(listed[1].description.as_deref(), Some("deepseek"));
+        assert_eq!(listed[1].name, "DeepSeek");
+        assert!(provider_options(&catalog(), None).iter().all(|p| !p.current));
+    }
+
+    #[test]
+    fn display_name_falls_back_through_model_provider_then_route() {
+        let providers = catalog();
+        assert_eq!(
+            display_name(&providers, &reference("alpha/alpha-named")),
+            "Alpha Named"
+        );
+        assert_eq!(
+            display_name(&providers, &reference("alpha/alpha-pro")),
+            "alpha-pro",
+            "没有 name 就用 model id"
+        );
+        // provider 在目录里、模型不在：给人看 provider 名，比空白有用。
+        assert_eq!(display_name(&providers, &reference("zeta/ghost")), "Zeta");
+        // 两者都不在：原样回路由，界面至少能说清现在用的是什么。
+        assert_eq!(
+            display_name(&providers, &reference("other/ghost")),
+            "other/ghost"
+        );
+        assert!(lookup_route(&providers, &reference("other/ghost")).is_none());
+        assert_eq!(
+            lookup_route(&providers, &reference("alpha/alpha-pro"))
+                .map(|(provider, _)| provider.id.as_str()),
+            Some("alpha")
+        );
+    }
+
+    #[test]
+    fn models_default_to_no_efforts_and_keep_what_the_catalog_reports() {
+        assert!(Model::default().efforts.is_empty());
+        let mut with_effort = model("with-effort");
+        with_effort.efforts = vec!["off".into(), "low".into(), "high".into(), "max".into()];
+        let providers = vec![provider("p", "P", vec![with_effort])];
+        let (_, found) =
+            lookup_route(&providers, &reference("p/with-effort")).expect("目录里有这个模型");
+        assert_eq!(found.efforts, vec!["off", "low", "high", "max"]);
+    }
+
+    #[test]
+    fn two_providers_keep_both_groups() {
+        let providers = vec![
+            provider("p", "Provider P", vec![model("m"), model("m2")]),
+            provider("q", "Provider Q", vec![model("n")]),
+        ];
+        let listed = options(&providers, &ModelPrefs::default(), "", None);
+        // 同 provider 内按 title 收尾排序：m 在 m2 之前。
+        assert_eq!(routes(&listed), vec!["p/m", "p/m2", "q/n"]);
     }
 
     #[test]

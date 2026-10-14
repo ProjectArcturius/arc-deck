@@ -5,6 +5,7 @@ mod app;
 pub mod catalog;
 mod editor;
 mod markdown;
+mod model_dialog;
 mod theme;
 mod view;
 
@@ -28,10 +29,16 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone)]
 pub struct Boot {
     pub workspace: PathBuf,
+    /// 配置里写的那条路由，作为启动时的当前模型。运行中由 `App::model` 覆盖。
     pub model: Option<String>,
     pub effort: Option<String>,
     pub config_error: Option<String>,
     pub preferences: PathBuf,
+    /// 模型目录（provider 列表）。权威来源是 DSH（§7.2）；当前由启动方从用户配置的
+    /// `provider` 块临时构造 —— 见 `arc-deck-cli/src/tui.rs` 的 `catalog_from_config`。
+    pub catalog: Vec<catalog::Provider>,
+    /// 收藏 / 最近 / 按模型记的 effort，与 `preferences` 同目录，文件名 `model.json`。
+    pub model_prefs: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +73,11 @@ pub struct StartRequest {
     pub agent: String,
     pub permission: String,
     pub effort: Option<String>,
+    /// 这一次请求用的路由，来自配置或模型对话框里选定的那条。
+    ///
+    /// 切换模型只影响**下一次**请求：worker 的路由在 `initialize` 时就被解析并钉住
+    /// （§7.2），所以没有「热切换当前运行」这回事。
+    pub model: Option<String>,
 }
 
 #[derive(Debug)]
@@ -119,11 +131,13 @@ pub fn run(boot: Boot, requests: Sender<Request>, updates: Receiver<Update>) -> 
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
+    // 模型偏好与 UI 偏好分开存：坏掉的 `model.json` 只该丢掉收藏与最近，不该动别的。
+    let model_prefs = catalog::ModelPrefs::load(&boot.model_prefs);
     // try_init may enter raw mode before failing to switch screens.
     let _guard = TerminalGuard;
     let mut terminal = ratatui::try_init()?;
     execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
-    let mut app = app::App::new(boot, preferences);
+    let mut app = app::App::new(boot, preferences, model_prefs);
     let _ = requests.send(Request::Refresh);
     let result = (|| {
         loop {
@@ -143,6 +157,15 @@ pub fn run(boot: Boot, requests: Sender<Request>, updates: Receiver<Update>) -> 
     // Preferences are UI data only; never rewrite the user's launch configuration.
     if let Some(parent) = app.boot.preferences.parent() {
         let _ = std::fs::create_dir_all(parent);
+    }
+    // 模型偏好只在真的改过时写盘（`model_prefs_dirty`）：收藏与最近属于用户资产，
+    // 每次退出都重写一遍不值当，而「写一半被打断」正是 `ModelPrefs::save` 用 rename 防的那件事。
+    if app.model_prefs_dirty
+        && let Err(error) = app.model_prefs.save(&app.boot.model_prefs)
+    {
+        drop(_guard);
+        eprintln!("模型偏好保存失败：{error}");
+        return result;
     }
     if let Ok(text) = serde_json::to_string_pretty(&app.preferences)
         && let Err(error) = std::fs::write(&app.boot.preferences, text)

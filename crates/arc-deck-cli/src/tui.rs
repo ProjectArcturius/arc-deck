@@ -13,7 +13,7 @@ use arc_deck_core::{
     result::TaskResult,
     userconfig::{self, UserConfig},
 };
-use arc_deck_tui::{Boot, Request, RunDetail, RunRecord, StartRequest, Update};
+use arc_deck_tui::{Boot, Request, RunDetail, RunRecord, StartRequest, Update, catalog};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::task::JoinHandle;
@@ -23,6 +23,88 @@ use crate::status::{self, StatusFile};
 const TEXT_LIMIT: u64 = 128 * 1024;
 const EVENT_LIMIT: u64 = 2 * 1024 * 1024;
 
+/// 启动时从用户配置里取到的几样东西，避免 `run` 里再拆一次元组。
+struct Loaded {
+    model: Option<String>,
+    effort: Option<String>,
+    config_error: Option<String>,
+    root: PathBuf,
+    config_path: Option<PathBuf>,
+    catalog: Vec<catalog::Provider>,
+}
+
+/// 模型目录的**临时**来源：用户配置的 `provider` 块（OpenCode 形状）。
+///
+/// ⚠️ 这不是权威目录。§7.2 说的是「provider/model 目录的权威来源是 DSH」，
+/// 下一波接内核报告的可用路由。这里只是让对话框在真实目录接通前有东西可列：
+/// provider 名与模型名的形状与 DSH 报告的一致，所以界面那一层不用改。
+///
+/// 两条刻意的取舍：
+/// - `efforts` 一律留空。强度档按模型不同（DeepSeek 官方是 off/low/high/max，
+///   pi-ai 路由来自它的目录），在界面上编几档再让运行时拒绝，比不给选择差得多。
+/// - **配置的默认模型一定在目录里**。它可能指向内置 provider（用户的 `provider` 块里
+///   没有这一条）或干脆不在块里，此时以 provider id 作名字补一条 —— 否则用户会在
+///   模型列表里找不到自己正在用的那条路由。
+fn catalog_from_config(config: &UserConfig) -> Vec<catalog::Provider> {
+    let route = catalog::parse_route(&config.model);
+
+    let mut providers: Vec<catalog::Provider> = config
+        .provider
+        .iter()
+        .map(|(id, provider)| catalog::Provider {
+            id: id.clone(),
+            // 缺名字时用 id：OpenCode 形状里 `name` 是可选的。
+            name: provider.name.clone().unwrap_or_else(|| id.clone()),
+            models: provider
+                .models
+                .iter()
+                .map(|(model_id, model)| catalog::Model {
+                    id: model_id.clone(),
+                    name: model.name.clone(),
+                    // 这一波不编造代价数据：`None` 是「没有数据」，界面就不显示 Free。
+                    free: None,
+                    // 强度档来自 DSH 的目录，不在配置里（见函数头的说明）。
+                    efforts: Vec::new(),
+                    ..catalog::Model::default()
+                })
+                .collect(),
+        })
+        .collect();
+
+    if let Some(catalog::ModelRef {
+        provider_id,
+        model_id,
+    }) = route
+        && !providers.iter().any(|provider| {
+            provider.id == provider_id && provider.models.iter().any(|model| model.id == model_id)
+        })
+    {
+        let model = catalog::Model {
+            id: model_id.clone(),
+            ..catalog::Model::default()
+        };
+        match providers
+            .iter_mut()
+            .find(|provider| provider.id == provider_id)
+        {
+            Some(provider) => provider.models.push(model),
+            None => providers.push(catalog::Provider {
+                id: provider_id.clone(),
+                // provider 不在配置里（内置 provider）时就以 provider id 作名字。
+                name: provider_id.clone(),
+                models: vec![model],
+            }),
+        }
+    }
+    providers
+}
+
+fn model_prefs_path() -> PathBuf {
+    userconfig::data_dir()
+        .join("arcdeck")
+        .join("model.json")
+}
+
 pub async fn run() -> i32 {
     let workspace = match std::env::current_dir() {
         Ok(path) => path,
@@ -31,34 +113,44 @@ pub async fn run() -> i32 {
             return 64;
         }
     };
-    let (model, effort, config_error, root, config_path) = match UserConfig::locate_and_load(None) {
-        Ok((cfg, path)) => (
-            Some(cfg.model.clone()),
-            cfg.effort.clone(),
-            None,
-            paths::absolutize(&cfg.state_root()),
-            Some(paths::absolutize(&path)),
-        ),
-        Err(error) => (
-            None,
-            None,
-            Some(error.to_string()),
-            userconfig::default_state_root(),
-            None,
-        ),
+    let loaded = match UserConfig::locate_and_load(None) {
+        Ok((cfg, path)) => Loaded {
+            model: Some(cfg.model.clone()),
+            effort: cfg.effort.clone(),
+            config_error: None,
+            root: paths::absolutize(&cfg.state_root()),
+            config_path: Some(paths::absolutize(&path)),
+            catalog: catalog_from_config(&cfg),
+        },
+        Err(error) => Loaded {
+            model: None,
+            effort: None,
+            config_error: Some(error.to_string()),
+            root: userconfig::default_state_root(),
+            config_path: None,
+            catalog: Vec::new(),
+        },
     };
     let boot = Boot {
         workspace: workspace.clone(),
-        model,
-        effort,
-        config_error,
+        model: loaded.model,
+        effort: loaded.effort,
+        config_error: loaded.config_error,
         preferences: userconfig::data_dir()
             .join("arcdeck")
             .join("tui-preferences.json"),
+        catalog: loaded.catalog,
+        model_prefs: model_prefs_path(),
     };
     let (request_tx, request_rx) = mpsc::channel();
     let (update_tx, update_rx) = mpsc::channel();
-    let bridge = tokio::spawn(serve(root, workspace, config_path, request_rx, update_tx));
+    let bridge = tokio::spawn(serve(
+        loaded.root,
+        workspace,
+        loaded.config_path,
+        request_rx,
+        update_tx,
+    ));
     let ui =
         tokio::task::spawn_blocking(move || arc_deck_tui::run(boot, request_tx, update_rx)).await;
     // Also wait on failure: raw-mode startup errors and panics must not strand a worker.
@@ -260,6 +352,11 @@ async fn start(
         .stdin(Stdio::piped());
     if let Some(path) = config {
         command.arg("--config").arg(path);
+    }
+    // 模型来自对话框选定的那条路由；没选过时 `App` 会把配置里的路由带上。
+    // 两者都不给就沿用子进程自己从配置读到的值（`--model` 是覆盖，不是必需项）。
+    if let Some(model) = &request.model {
+        command.arg("--model").arg(model);
     }
     if let Some(effort) = &request.effort {
         command.arg("--effort").arg(effort);
@@ -524,5 +621,155 @@ mod tests {
         assert_eq!(text, "甲");
         assert!(truncated);
         assert!(!text.contains('\u{fffd}'));
+    }
+
+    fn config(json: &str) -> UserConfig {
+        UserConfig::parse(json, std::path::Path::new("test.json")).expect("夹具配置必须合法")
+    }
+
+    fn routes(providers: &[catalog::Provider]) -> Vec<String> {
+        providers
+            .iter()
+            .flat_map(|provider| {
+                provider
+                    .models
+                    .iter()
+                    .map(|model| format!("{}/{}", provider.id, model.id))
+            })
+            .collect()
+    }
+
+    /// 目录来自 `provider` 块：OpenCode 形状的 `provider.<id>.name` 与
+    /// `provider.<id>.models.<id>.name` 都要读出来。
+    #[test]
+    fn catalog_reads_provider_and_model_names_from_the_config_block() {
+        let cfg = config(
+            r#"{
+              "model": "p/model-a",
+              "provider": {
+                "p": {
+                  "name": "Provider P",
+                  "models": { "model-a": { "name": "Model A" }, "model-b": {} }
+                }
+              }
+            }"#,
+        );
+        let providers = catalog_from_config(&cfg);
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, "p");
+        assert_eq!(providers[0].name, "Provider P");
+        let names: Vec<(String, Option<String>)> = providers[0]
+            .models
+            .iter()
+            .map(|model| (model.id.clone(), model.name.clone()))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ("model-a".to_string(), Some("Model A".to_string())),
+                ("model-b".to_string(), None),
+            ]
+        );
+        // 强度档与代价这一波一律没有数据 —— 界面据此不显示 Free、也不进 effort 对话框。
+        assert!(providers[0].models.iter().all(|model| model.efforts.is_empty()));
+        assert!(providers[0].models.iter().all(|model| model.free.is_none()));
+    }
+
+    /// provider 块里缺 `name` 时用 id，不然列表上会出现空名字。
+    #[test]
+    fn provider_without_a_name_falls_back_to_its_id() {
+        let cfg = config(
+            r#"{
+              "model": "p/a",
+              "provider": { "p": { "models": { "a": {} } } }
+            }"#,
+        );
+        let providers = catalog_from_config(&cfg);
+        assert_eq!(providers[0].name, "p");
+    }
+
+    /// 默认模型不在 `provider` 块里（内置 provider 的情形）：目录里仍要能找到它，
+    /// 否则用户在模型列表里找不到自己正在用的那条路由。
+    #[test]
+    fn default_model_is_present_even_when_its_provider_is_not_configured() {
+        let cfg = config(
+            r#"{
+              "model": "opencode-go/deepseek-v4.1-flash",
+              "provider": { "p": { "name": "P", "models": { "a": {} } } }
+            }"#,
+        );
+        let providers = catalog_from_config(&cfg);
+        let routes = routes(&providers);
+        assert!(routes.contains(&"opencode-go/deepseek-v4.1-flash".to_string()));
+        let added = providers
+            .iter()
+            .find(|provider| provider.id == "opencode-go")
+            .expect("补进去的 provider");
+        assert_eq!(added.name, "opencode-go", "不在配置里时以 provider id 作名字");
+        assert_eq!(added.models.len(), 1);
+    }
+
+    /// provider 在块里、但默认模型不在它的 models 里：补进**已有的** provider，
+    /// 而不是再开一条同 id 的 provider（那会让列表里出现两个同样的名字）。
+    #[test]
+    fn default_model_is_added_to_an_existing_provider() {
+        let cfg = config(
+            r#"{
+              "model": "p/ghost",
+              "provider": { "p": { "name": "Provider P", "models": { "a": {} } } }
+            }"#,
+        );
+        let providers = catalog_from_config(&cfg);
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].name, "Provider P");
+        assert_eq!(routes(&providers), vec!["p/a", "p/ghost"]);
+    }
+
+    /// 已经在块里的默认模型不能重复补一条。
+    #[test]
+    fn default_model_already_in_the_block_is_not_duplicated() {
+        let cfg = config(
+            r#"{
+              "model": "p/a",
+              "provider": { "p": { "models": { "a": { "name": "A" } } } }
+            }"#,
+        );
+        let providers = catalog_from_config(&cfg);
+        assert_eq!(routes(&providers), vec!["p/a"]);
+        assert_eq!(providers[0].models[0].name.as_deref(), Some("A"));
+    }
+
+    /// 配置没有 provider 块（起步配置就是这样）：目录至少含默认模型那一条。
+    #[test]
+    fn empty_provider_block_still_yields_the_default_route() {
+        let cfg = config(r#"{ "model": "opencode-go/deepseek-v4.1-flash", "provider": {} }"#);
+        let providers = catalog_from_config(&cfg);
+        assert_eq!(
+            routes(&providers),
+            vec!["opencode-go/deepseek-v4.1-flash".to_string()]
+        );
+    }
+
+    /// 模型 id 里带 `/` 时按第一个 `/` 切分（§7.2），补进去的 id 要原样保留斜杠。
+    #[test]
+    fn default_route_splits_on_the_first_slash_only() {
+        let cfg = config(r#"{ "model": "p/vendor/model-1", "provider": {} }"#);
+        let providers = catalog_from_config(&cfg);
+        assert_eq!(providers[0].id, "p");
+        assert_eq!(providers[0].models[0].id, "vendor/model-1");
+    }
+
+    /// `model.json` 与 `tui-preferences.json` 同目录（都在 Arc Deck 的数据目录里）。
+    #[test]
+    fn model_prefs_live_next_to_the_ui_preferences() {
+        let prefs = model_prefs_path();
+        assert_eq!(
+            prefs.file_name().and_then(|name| name.to_str()),
+            Some("model.json")
+        );
+        let ui_prefs = userconfig::data_dir()
+            .join("arcdeck")
+            .join("tui-preferences.json");
+        assert_eq!(prefs.parent(), ui_prefs.parent());
     }
 }

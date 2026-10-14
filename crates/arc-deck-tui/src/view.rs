@@ -14,6 +14,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     app::{App, Dialog, token},
     markdown::{self, MarkdownPalette},
+    model_dialog,
     theme::Theme,
 };
 
@@ -71,7 +72,7 @@ pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
             &theme,
         );
     }
-    if let Some(dialog) = app.dialog {
+    if let Some(dialog) = &app.dialog {
         popup(frame, app, dialog, content, &theme);
     }
 }
@@ -206,10 +207,10 @@ fn composer(frame: &mut Frame, app: &App, area: Rect, t: &Theme) {
         inner,
     );
     let mut metadata = format!("{} · {}", app.agent, app.permission);
-    if inner.width > 42
-        && let Some(model) = &app.boot.model
-    {
-        metadata.push_str(&format!(" · {model}"));
+    // 模型与 effort 都显示**当前值**（由模型对话框改动），不是配置里的那份 ——
+    // 这一行是用户确认「下一次请求到底用什么」的地方。
+    if inner.width > 42 {
+        metadata.push_str(&format!(" · {}", app.model_name()));
     }
     if inner.width > 63
         && let Some(effort) = &app.effort
@@ -486,12 +487,64 @@ fn markdown_palette(t: &Theme) -> MarkdownPalette {
     }
 }
 
-fn popup(frame: &mut Frame, app: &App, dialog: Dialog, area: Rect, t: &Theme) {
-    let w = 72.min(area.width - 2);
+fn popup(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, t: &Theme) {
+    // 模型/provider/effort 三个对话框在 model_dialog 里，其余三个仍是这里的小浮层。
+    match dialog {
+        Dialog::Models(state) => {
+            let search = model_dialog::draw_model(
+                frame,
+                area,
+                t,
+                model_dialog::ModelView {
+                    providers: &app.boot.catalog,
+                    prefs: &app.model_prefs,
+                    state: *state,
+                    query: &app.filter,
+                    choice: app.choice,
+                    current: app.model.as_ref(),
+                },
+            );
+            frame.set_cursor_position((search.x + app.filter.chars().count() as u16, search.y));
+            return;
+        }
+        Dialog::Providers(_) => {
+            let search = model_dialog::draw_providers(
+                frame,
+                area,
+                t,
+                model_dialog::ProviderView {
+                    providers: &app.boot.catalog,
+                    query: &app.filter,
+                    choice: app.choice,
+                    current: app.model.as_ref(),
+                },
+            );
+            frame.set_cursor_position((search.x + app.filter.chars().count() as u16, search.y));
+            return;
+        }
+        Dialog::Efforts(state) => {
+            model_dialog::draw_efforts(
+                frame,
+                area,
+                t,
+                model_dialog::EffortView {
+                    providers: &app.boot.catalog,
+                    state: Some(state),
+                    choice: app.choice,
+                    current: app.effort.as_deref(),
+                },
+            );
+            return;
+        }
+        Dialog::Commands | Dialog::Runs | Dialog::Agents => {}
+    }
+    // 40×12 之类的窄终端会给出一条负宽度的矩形；用 saturating_sub 而不是 `-`，
+    // 否则 debug 构建直接 panic（「窗口太小」正是这条路径最常遇到的情形）。
+    let w = 72.min(area.width.saturating_sub(2));
     let h = 18.min(area.height.saturating_sub(2)).max(4);
     let rect = Rect::new(
-        area.x + (area.width - w) / 2,
-        area.y + (area.height - h) / 2,
+        area.x + area.width.saturating_sub(w) / 2,
+        area.y + area.height.saturating_sub(h) / 2,
         w,
         h,
     );
@@ -499,7 +552,8 @@ fn popup(frame: &mut Frame, app: &App, dialog: Dialog, area: Rect, t: &Theme) {
         Dialog::Commands => "命令",
         Dialog::Runs => "运行历史",
         Dialog::Agents => "Agent",
-        Dialog::Models => "模型路由",
+        // 上面已经把这三个分支返回掉了；这里给编译器一个穷尽的分支。
+        Dialog::Models(_) | Dialog::Providers(_) | Dialog::Efforts(_) => return,
     };
     frame.render_widget(Clear, rect);
     frame.render_widget(
@@ -510,6 +564,7 @@ fn popup(frame: &mut Frame, app: &App, dialog: Dialog, area: Rect, t: &Theme) {
         rect,
     );
     let inner = Rect::new(rect.x + 2, rect.y + 1, rect.width - 4, rect.height - 2);
+    // 走到这里的只有 Commands / Runs / Agents 三个（上面已经 return 掉另外三个）。
     let mut rows: Vec<(String, bool)> = match dialog {
         Dialog::Commands => app
             .filtered_commands()
@@ -526,13 +581,7 @@ fn popup(frame: &mut Frame, app: &App, dialog: Dialog, area: Rect, t: &Theme) {
             ("Build · 实施".into(), true),
             ("Plan · 不可用：执行 guard 尚未接通".into(), false),
         ],
-        Dialog::Models => vec![(
-            format!(
-                "{} · 配置路由（运行时校验）",
-                app.boot.model.as_deref().unwrap_or("未配置")
-            ),
-            false,
-        )],
+        Dialog::Models(_) | Dialog::Providers(_) | Dialog::Efforts(_) => return,
     };
     if rows.is_empty() {
         rows.push(("没有匹配项".into(), false));
@@ -651,11 +700,34 @@ mod tests {
                 effort: None,
                 config_error: None,
                 preferences: "unused".into(),
+                catalog: vec![crate::catalog::Provider {
+                    id: "opencode-go".into(),
+                    name: "OpenCode Go".into(),
+                    models: vec![
+                        {
+                            let mut with_effort = crate::catalog::Model {
+                                id: "deepseek-v4.1-flash".into(),
+                                name: Some("DeepSeek V4.1 Flash".into()),
+                                ..crate::catalog::Model::default()
+                            };
+                            with_effort.efforts =
+                                vec!["off".into(), "low".into(), "high".into(), "max".into()];
+                            with_effort
+                        },
+                        crate::catalog::Model {
+                            id: "glm-4.6".into(),
+                            name: Some("GLM 4.6".into()),
+                            ..crate::catalog::Model::default()
+                        },
+                    ],
+                }],
+                model_prefs: "unused.json".into(),
             },
             Preferences {
                 sidebar: true,
                 ..Preferences::default()
             },
+            crate::catalog::ModelPrefs::default(),
         )
     }
     fn long_run(app: &mut App) {
@@ -708,7 +780,14 @@ mod tests {
                     Some(Dialog::Commands),
                     Some(Dialog::Runs),
                     Some(Dialog::Agents),
-                    Some(Dialog::Models),
+                    Some(Dialog::Models(crate::model_dialog::ModelDialogState::default())),
+                    Some(Dialog::Providers(
+                        crate::model_dialog::ProviderDialogState::default(),
+                    )),
+                    Some(Dialog::Efforts(crate::model_dialog::EffortDialogState {
+                        model: crate::catalog::parse_route("opencode-go/deepseek-v4.1-flash").unwrap(),
+                        efforts: 4,
+                    })),
                 ] {
                     a.dialog = dialog;
                     terminal.draw(|f| draw(f, &mut a)).unwrap();
@@ -720,6 +799,30 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn model_dialogs_still_render_at_the_smallest_supported_terminal() {
+        for (width, height) in [(40, 8), (40, 12), (60, 16)] {
+            let mut a = app();
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            for dialog in [
+                Dialog::Models(crate::model_dialog::ModelDialogState::default()),
+                Dialog::Providers(crate::model_dialog::ProviderDialogState::default()),
+                Dialog::Efforts(crate::model_dialog::EffortDialogState {
+                    model: crate::catalog::parse_route("opencode-go/deepseek-v4.1-flash").unwrap(),
+                    efforts: 4,
+                }),
+            ] {
+                a.dialog = Some(dialog);
+                // 不允许 panic，也不允许画到 buffer 之外。
+                terminal.draw(|f| draw(f, &mut a)).unwrap();
+                assert_eq!(
+                    terminal.backend().buffer().area,
+                    Rect::new(0, 0, width, height)
+                );
+            }
+        }
+    }
+
     #[test]
     fn failure_details_are_visible_even_when_tools_are_folded() {
         let mut a = app();
