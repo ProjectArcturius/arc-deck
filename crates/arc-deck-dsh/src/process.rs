@@ -11,6 +11,24 @@ use std::time::Duration;
 
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 
+/// Windows 上 `CREATE_NO_WINDOW`：子进程拿一个**不可见**的控制台。
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// 给短命的辅助命令（git、taskkill）用：不弹窗。
+///
+/// 父进程没有控制台时，Windows 会给每个控制台子程序**新开一个可见的**控制台 ——
+/// 监工每次刷新 `commits` 都跑一次 git，于是窗口一闪一闪（用户 2026-10-14 报告）。
+/// 根因在 `spawn_detached`（监工本身没控制台）；这里是第二道：哪怕将来有别的
+/// 无控制台调用方，辅助命令也不弹窗。它们的输出都被捕获或丢弃，不需要窗口。
+pub fn no_window(command: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 /// 一个已被拉起的运行时子进程，标准流全部接管。
 pub struct RuntimeProcess {
     child: Child,
@@ -64,7 +82,7 @@ pub fn kill_tree_by_pid(pid: u32) -> Termination {
     }
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("taskkill")
+        let _ = no_window(&mut std::process::Command::new("taskkill"))
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -158,7 +176,7 @@ impl RuntimeProcess {
     pub async fn terminate_tree(&mut self, grace: Duration) -> Termination {
         #[cfg(windows)]
         if let Some(pid) = self.child.id() {
-            let _ = std::process::Command::new("taskkill")
+            let _ = no_window(&mut std::process::Command::new("taskkill"))
                 .args(["/PID", &pid.to_string(), "/T", "/F"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())

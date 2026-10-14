@@ -676,6 +676,28 @@ fn detached_run_against_a_working_fixture_reaches_completed() {
     assert!(status["state"].is_string());
 }
 
+/// 调度者常把派工的输出接进管道（`id=$(arcdeck run … --detach)`、`| tee`）。
+/// 监工不能继承派工进程的标准流句柄，否则读端等不到 EOF，派工要挂到整件任务跑完 ——
+/// Windows 上实测过：`hang` 夹具（约 15 s）的派工等满了才返回。
+#[test]
+fn piped_detached_dispatch_returns_without_waiting_for_the_task() {
+    let case = RunCase::new();
+    let started = std::time::Instant::now();
+    let output = Command::new(binary())
+        .env("ARCDECK_FIXTURE_SCENARIO", "hang")
+        .args(["run", "挂住的活", "--id", "piped", "--detach", "--config"])
+        .arg(&case.config)
+        .arg("--workspace")
+        .arg(&case.workspace)
+        .output()
+        .unwrap();
+    let elapsed = started.elapsed();
+    let _ = Command::new(binary()).args(["cancel", "piped", "--config"]).arg(&case.config).output();
+    assert_eq!(output.status.code(), Some(0), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("started"));
+    assert!(elapsed < std::time::Duration::from_secs(8), "派工被任务本身拖住了：{elapsed:?}");
+}
+
 /// `--worktree` 配非全权沙箱时必须在**派工那一秒**就警告。
 ///
 /// 实测（Arch，2026-10-14，真实模型）：worktree 里的每条 git 命令都返回 128

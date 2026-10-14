@@ -946,7 +946,7 @@ fn tool_call_as_text(projection: &Projection) -> bool {
 
 /// `git rev-list --count <base>..HEAD`。不是 git 仓或基线不存在时返回 None。
 fn git_commit_count(workspace: &Path, base: &str) -> Option<u64> {
-    let out = std::process::Command::new("git")
+    let out = arc_deck_dsh::process::no_window(&mut std::process::Command::new("git"))
         .arg("-C")
         .arg(workspace)
         .args(["rev-list", "--count", &format!("{base}..HEAD")])
@@ -959,7 +959,12 @@ fn git_commit_count(workspace: &Path, base: &str) -> Option<u64> {
 }
 
 fn git_lines(workspace: &Path, args: &[&str]) -> Option<Vec<String>> {
-    let out = std::process::Command::new("git").arg("-C").arg(workspace).args(args).output().ok()?;
+    let out = arc_deck_dsh::process::no_window(&mut std::process::Command::new("git"))
+        .arg("-C")
+        .arg(workspace)
+        .args(args)
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }

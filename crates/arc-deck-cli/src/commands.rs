@@ -632,16 +632,22 @@ fn spawn_detached(dir: &Path, config: &Path, task: &Path, cancel: &Path, facts: 
     #[cfg(windows)]
     let mut child = {
         use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        use arc_deck_dsh::process::CREATE_NO_WINDOW;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+        // **不用 DETACHED_PROCESS。** 与它同用时 CREATE_NO_WINDOW 被忽略（MSDN），监工就
+        // 完全没有控制台；于是它拉起的每个控制台子程序 —— 整个任务期间都活着的 node
+        // 运行时、刷新 commits 的 git —— 各自新开一个**可见**窗口。实测（2026-10-14）：
+        // 监工 `AttachConsole` 失败，运行时 `console, window VISIBLE`。
+        // 单用 CREATE_NO_WINDOW：监工拿一个隐藏的**新**控制台（不挂在派工终端上，关终端
+        // 不连带杀它），子孙继承这个隐藏控制台，一个窗口都不开。
+        no_inherit_std_handles();
         // 先试脱离作业对象（ssh / 终端关掉时连带杀作业里的进程）；作业不允许脱离时退回普通分离。
-        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB);
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB);
         match cmd.spawn() {
             Ok(child) => child,
             Err(_) => {
-                cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+                cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
                 cmd.spawn()
                     .map_err(|e| SpecError::new(code::CONFIG_INVALID, format!("分离启动失败：{e}")))?
             }
@@ -653,6 +659,36 @@ fn spawn_detached(dir: &Path, config: &Path, task: &Path, cancel: &Path, facts: 
         .map_err(|e| SpecError::new(code::CONFIG_INVALID, format!("分离启动失败：{e}")))?;
 
     handshake(dir, &mut child, facts)
+}
+
+/// 派工进程自己的 stdin/stdout/stderr 不许被监工继承。
+///
+/// Rust 在 Windows 上以 `bInheritHandles = TRUE` 建子进程，于是父进程里**所有**可继承句柄
+/// 都会跟过去 —— 包括调度者 shell 递进来的 stdout 管道。监工握着它的写端，读的那边就等不到
+/// EOF：实测 `arcdeck run … --detach | Out-Null` 要等整件任务跑完（22.5 s 的夹具任务等满
+/// 22.5 s）才返回；`id=$(arcdeck run … --detach)` 会挂上几个小时。
+/// 监工的标准流已经显式指向 `console.*` 文件与 null，所以去掉的只是泄漏，不影响它自己的输出；
+/// 本进程之后照常写 stdout（继承标志不影响自身使用）。
+#[cfg(windows)]
+fn no_inherit_std_handles() {
+    // 只为这两个 kernel32 函数不值得引入一个绑定 crate。
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetStdHandle(which: u32) -> *mut std::ffi::c_void;
+        fn SetHandleInformation(handle: *mut std::ffi::c_void, mask: u32, flags: u32) -> i32;
+    }
+    const HANDLE_FLAG_INHERIT: u32 = 0x1;
+    // STD_INPUT_HANDLE / STD_OUTPUT_HANDLE / STD_ERROR_HANDLE 是 (DWORD)-10 / -11 / -12。
+    for which in [-10i32, -11, -12] {
+        // SAFETY: 两个函数都只读写句柄标志位；无效或空句柄时 SetHandleInformation 返回失败，
+        // 而失败只意味着那个句柄本来就不存在 —— 没有可泄漏的东西，忽略即可。
+        unsafe {
+            let handle = GetStdHandle(which as u32);
+            if !handle.is_null() && handle as isize != -1 {
+                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
 }
 
 /// 派工握手：**分离不等于成功**。
