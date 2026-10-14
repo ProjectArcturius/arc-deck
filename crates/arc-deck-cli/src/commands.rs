@@ -13,12 +13,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use arc_deck_core::agent::PromptScope;
+use arc_deck_core::authz::Permission;
 use arc_deck_core::config::{
     AgentSources, Authorization, Liveness, ModelRoute, RuntimeSpec, Timeouts, WorkerConfig,
 };
 use arc_deck_core::error::{code, SpecError};
 use arc_deck_core::provider::{self, AuthStore};
-use arc_deck_core::result::{TaskResult, TaskStatus};
+use arc_deck_core::result::{TaskResult, TaskStatus, Usage};
 use arc_deck_core::task::{Acceptance, TaskSpec};
 use arc_deck_core::userconfig::{self, UserConfig};
 use arc_deck_core::{EXIT_SPEC_ERROR, SCHEMA_VERSION};
@@ -52,6 +53,7 @@ pub async fn dispatch(argv: &[String]) -> i32 {
         "report" => cmd_report(&argv[1..]),
         "logs" => cmd_logs(&argv[1..]),
         "cancel" => cmd_cancel(&argv[1..]).await,
+        "usage" => cmd_usage(&argv[1..]),
         "auth" => cmd_auth(&argv[1..]),
         "runtime" => cmd_runtime(&argv[1..]),
         "config" => cmd_config(&argv[1..]),
@@ -172,7 +174,8 @@ async fn cmd_run(argv: &[String]) -> CmdResult {
     let flags = Flags::parse(
         argv,
         &["--config", "--workspace", "--id", "--accept", "--preamble", "--worktree", "--git-base",
-          "--model", "--timeout", "--agent", "--state-root", "--by", "--format"],
+          "--model", "--timeout", "--agent", "--state-root", "--by", "--format", "--permission",
+          "--effort"],
         &["--detach", "--rerun"],
     )?;
     let [task_arg] = flags.positional.as_slice() else {
@@ -217,6 +220,27 @@ async fn cmd_run(argv: &[String]) -> CmdResult {
     };
     let worker_mode = is_task_book || worker_flags;
 
+    // ── 授权级别与模型强度 ────────────────────────────────────────────────
+    //
+    // **产品层只有一个说法**：授权级别是 `readonly / workspace / full / confirm`，
+    // 模型强度叫 `effort`（opencode 叫 variant，那个名字不用 —— 用户 2026-10-14）。
+    // 命令行显式给的优先，其次配置，最后缺省。
+    //
+    // **一次划定，运行中不再二次修改**：headless 没有交互入口，所以这条天然成立；
+    // 工人那边由任务书**收紧**（不能放宽，见 §6.2）。
+    let permission = match flags.one("--permission") {
+        Some(raw) => Permission::parse(raw)?,
+        None => cfg.worker.permission,
+    };
+    if permission.needs_responder() {
+        return Err(SpecError::new(
+            code::CONFIG_INVALID,
+            "授权级别 `confirm` 需要一个应答者，headless 没有 —— \
+             它是交互面（TUI / GUI）的默认；headless 请用 readonly / workspace / full",
+        ));
+    }
+    let effort = flags.one("--effort").map(str::to_string).or_else(|| cfg.effort.clone());
+
     let mut task_id = match flags.one("--id") {
         Some(id) => sanitize_id(id),
         None => json_task.as_ref().map(|t| t.task_id.clone()).unwrap_or(default_id),
@@ -249,11 +273,11 @@ async fn cmd_run(argv: &[String]) -> CmdResult {
         // 实测（Arch，2026-10-14）：`git status --short` 与 `git log --oneline -1`
         // 都返回 128，整轮以「验收未通过 accept-1（退出 128）」收场，白烧 8342 输入 token。
         // 这件事在派工的那一秒就能说清，不该让工人跑完才知道。
-        if cfg.worker.sandbox != "danger-full-access" {
+        if permission != Permission::Full {
             eprintln!(
-                "arcdeck: 警告 —— worker.sandbox = `{}` 时 worktree 里的 git 命令会全部失败\
-                 （worktree 的 `.git` 指向主仓，主仓在沙箱外）。要提交请设成 danger-full-access",
-                cfg.worker.sandbox
+                "arcdeck: 警告 —— permission = `{}` 时 worktree 里的 git 命令会全部失败\
+                 （worktree 的 `.git` 指向主仓，主仓在沙箱外）。要提交请用 `--permission full`",
+                permission.as_str()
             );
         }
     }
@@ -325,20 +349,20 @@ async fn cmd_run(argv: &[String]) -> CmdResult {
                 version: cfg.dsh_version(),
                 profile: "sdk".into(),
                 route: Some(route_spec),
-                sandbox: cfg.worker.sandbox.clone(),
+                sandbox: permission.sandbox().to_string(),
                 session_log_upload: cfg.runtime.session_log_upload,
                 preamble,
             };
             let route = Some(ModelRoute {
                 provider: route.dsh_provider.clone(),
                 model: route.model.clone(),
-                reasoning_effort: cfg.reasoning_effort.clone(),
+                reasoning_effort: effort.clone(),
             });
             (spec, route, model)
         }
     };
 
-    let profile = if cfg.worker.sandbox == "read-only" { "workspace-readonly" } else { "workspace-development" };
+    let profile = permission.profile();
     // 装什么进 system prompt：工人模式是功能契约；一般模式看个性化开关，
     // **关着就一段都不加**，按供应商本体行事（用户 2026-10-14）。
     let prompt_scope = if worker_mode {
@@ -704,6 +728,116 @@ fn read_preflight_error(dir: &Path) -> Option<(String, String)> {
         return Some((code, message));
     }
     None
+}
+
+/// `arcdeck usage`：把状态目录里各任务的 token 用量加起来。
+///
+/// 只有 provider **实际报告**的用量，**没有费用** —— 没有数据就不填虚构成本（§6.3）。
+/// 终态以 `result.json` 为准（那才是交出去的那一份）；未终态用 `status.json` 上此刻的数字，
+/// 它只会涨，所以单独标出来。
+fn cmd_usage(argv: &[String]) -> CmdResult {
+    let flags = Flags::parse(argv, &["--config", "--state-root"], &["--json"])?;
+    let root = state_root(&flags);
+    let now = status::now_ms();
+
+    struct Row {
+        id: String,
+        state: String,
+        health: &'static str,
+        terminal: bool,
+        assigned_by: Option<String>,
+        usage: Usage,
+    }
+    let mut rows = Vec::new();
+    // 输入 / 缓存命中 / 输出。
+    let mut sum = (0u64, 0u64, 0u64);
+
+    for (id, st) in list_runs(&root) {
+        let health = status::health(&st, now);
+        let terminal = health == "done";
+        let usage = if terminal {
+            std::fs::read_to_string(run_dir(&root, &id).join("result.json"))
+                .ok()
+                .and_then(|raw| serde_json::from_str::<TaskResult>(&raw).ok())
+                .and_then(|r| r.usage)
+                .or_else(|| st.usage.clone())
+        } else {
+            st.usage.clone()
+        };
+        let usage = usage.unwrap_or_default();
+        sum.0 += usage.prompt_tokens.unwrap_or(0);
+        sum.1 += usage.cache_read_tokens.unwrap_or(0);
+        sum.2 += usage.completion_tokens.unwrap_or(0);
+        rows.push(Row {
+            id,
+            state: st.state.clone(),
+            health,
+            terminal,
+            assigned_by: st.assigned_by.clone(),
+            usage,
+        });
+    }
+
+    if flags.has("--json") {
+        let tasks: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "task_id": r.id,
+                    "state": r.state,
+                    "health": r.health,
+                    "terminal": r.terminal,
+                    "assigned_by": r.assigned_by,
+                    "usage": r.usage,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema_version": SCHEMA_VERSION,
+                "state_root": root.display().to_string(),
+                "tasks": tasks,
+                "total": {
+                    "prompt_tokens": sum.0,
+                    "cache_read_tokens": sum.1,
+                    "completion_tokens": sum.2,
+                },
+            })
+        );
+        return Ok(0);
+    }
+
+    if rows.is_empty() {
+        println!("（{} 下没有任务）", root.join("runs").display());
+        return Ok(0);
+    }
+    let count = |v: Option<u64>| v.map(|n| n.to_string()).unwrap_or_else(|| "-".into());
+    for r in &rows {
+        println!(
+            "{}  {}  {}{}  输入 {} · 命中 {} · 输出 {}{}",
+            r.id,
+            r.state,
+            r.health,
+            if r.terminal { "" } else { "（未终态，数字还会涨）" },
+            count(r.usage.prompt_tokens),
+            count(r.usage.cache_read_tokens),
+            count(r.usage.completion_tokens),
+            r.assigned_by
+                .as_ref()
+                .map(|b| format!("  派工 {b}"))
+                .unwrap_or_default(),
+        );
+    }
+    println!(
+        "合计 {} 件：输入 {} · 缓存命中 {} · 输出 {}",
+        rows.len(),
+        sum.0,
+        sum.1,
+        sum.2
+    );
+    println!("（只有 provider 报告的用量，没有费用估算 —— 没有数据就不编）");
+    Ok(0)
 }
 
 // ── status / wait / report / logs / cancel ─────────────────────────────

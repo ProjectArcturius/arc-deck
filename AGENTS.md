@@ -45,6 +45,7 @@ arcdeck report <id>          # 终态后：Arc Deck 采集的事实与模型的�
 - **人格默认关**：装不装 Arc Deck 的人格由 `personalization.enabled` 决定，缺省关闭 —— 关的时候一般模式**一段提示词都不注入**，按模型本体行事。工人模式永远只拿功能契约，**不带风格**（PRODUCT_PLAN §5.3.1）。
 - **总是带 `--accept`。** 没有验收命令时 `completed` 只表示内核正常结束 —— §10.2b 里实测出现过「提交被拒但 completed」。
 - Ether 侧的派工脚本抄 `examples/ether/ad.sh`。
+- **命名**：授权说的是**级别**（`readonly` / `workspace` / `full`，§5.6），不是 DSH 的沙箱档名；模型强度叫 **`effort`**，不是 opencode 的 `variant`。派工给别人看的东西一律用产品名。
 
 ## 旧实现与历史记录
 

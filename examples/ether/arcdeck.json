@@ -3,7 +3,7 @@
   "provider": {},
   "runtime": { "session_log_upload": false },
   "worker": {
-    "sandbox": "danger-full-access",
+    "permission": "full",
     "allow_commit": true,
     "preamble": "C:/Users/mc158/Documents/Projects/.oc/PREAMBLE.md",
     "timeout_seconds": 14400,

@@ -21,6 +21,84 @@ use crate::mode::{AgentId, AgentMode, Mode};
 use crate::paths;
 use crate::task::{Acceptance, TaskSpec};
 
+/// 授权级别 —— **产品层的唯一说法**。
+///
+/// DSH 的沙箱档是实现细节，不该漏到命令行与界面上（用户 2026-10-14）。
+/// 四个面各有自己的入口，但说的是同一件事：CLI 非工人用 `--permission` 显式划定、
+/// 工人由任务书收紧、TUI 用 `/permission`、GUI 同 TUI 但默认不同。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Permission {
+    /// 只读工作区：不能写、不能跑命令。
+    Readonly,
+    /// 工作区内可读写、可执行。**TUI 的默认。**
+    Workspace,
+    /// 沙箱之外的全权。worktree 里提交必需（worktree 的 `.git` 指向主仓，在 workspace 之外）。
+    Full,
+    /// 与 `workspace` 同权限，但每次改动/执行前要确认。**GUI 的默认。**
+    ///
+    /// **headless 拒绝这一档**：它需要一个应答者，而无人值守时没有（§6.4）。
+    /// 解析成功但在 `run` 里拒 —— 报错比静默降级成 `workspace` 好。
+    Confirm,
+}
+
+impl Permission {
+    pub fn parse(raw: &str) -> SpecResult<Self> {
+        match raw {
+            "readonly" => Ok(Self::Readonly),
+            "workspace" => Ok(Self::Workspace),
+            "full" => Ok(Self::Full),
+            "confirm" => Ok(Self::Confirm),
+            other => Err(SpecError::new(
+                code::PROFILE_UNKNOWN,
+                format!(
+                    "未知授权级别 `{other}`；已知：readonly, workspace, full, confirm\
+                     （confirm 只在交互面有意义，headless 会拒绝）"
+                ),
+            )),
+        }
+    }
+
+    /// 映射到 DSH 的沙箱档。**这是实现细节，只在生成运行时环境时用。**
+    pub const fn sandbox(self) -> &'static str {
+        match self {
+            Self::Readonly => "read-only",
+            Self::Workspace | Self::Confirm => "workspace-write",
+            Self::Full => "danger-full-access",
+        }
+    }
+
+    /// 映射到 Arc Deck 的策略档（写法要能被 [`Profile::parse`] 认出来）。
+    pub const fn profile(self) -> &'static str {
+        match self {
+            Self::Readonly => "workspace-readonly",
+            _ => "workspace-development",
+        }
+    }
+
+    /// 需要有人在旁边应答审批。headless 没有这样的人。
+    pub const fn needs_responder(self) -> bool {
+        matches!(self, Self::Confirm)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Readonly => "readonly",
+            Self::Workspace => "workspace",
+            Self::Full => "full",
+            Self::Confirm => "confirm",
+        }
+    }
+}
+
+impl Default for Permission {
+    /// 缺省是 [`Permission::Workspace`]：工作区内直接改、直接跑。
+    /// 与 TUI 的默认一致；GUI 把它抬到 `confirm`（那一侧由界面自己决定）。
+    fn default() -> Self {
+        Self::Workspace
+    }
+}
+
 /// 策略档。档位只规定**能力模板**；具体路径与网络上限仍必须由启动配置给出。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

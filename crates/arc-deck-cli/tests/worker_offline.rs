@@ -656,6 +656,78 @@ fn worktree_without_full_sandbox_warns_at_dispatch_time() {
     );
 }
 
+/// 授权级别是**产品层的唯一说法**：命令行显式划定，映射到策略档与 DSH 沙箱档。
+/// 一次划定，运行中不再二次修改（headless 没有交互入口）。
+///
+/// 这里只断言**策略档**：夹具模式下物化的 `runtime` 是 `fixture-sdk`，没有 `sandbox` 字段
+/// （假内核不碰沙箱）。级别到沙箱档的映射由 `authz` 的单测钉住。
+#[test]
+fn permission_flag_decides_the_profile() {
+    let case = RunCase::new();
+    let profile = |id: &str, level: &str| -> String {
+        let run = case.run(&["看一眼", "--id", id, "--permission", level]);
+        assert_eq!(run.code, 0, "stderr={}", run.stderr);
+        let config: Value = serde_json::from_str(
+            &std::fs::read_to_string(case.state().join(format!("runs/{id}/config.json"))).unwrap(),
+        )
+        .unwrap();
+        config["authorization"]["profile"].as_str().unwrap_or_default().to_string()
+    };
+    assert_eq!(profile("p-ro", "readonly"), "workspace-readonly");
+    assert_eq!(profile("p-ws", "workspace"), "workspace-development");
+    assert_eq!(profile("p-full", "full"), "workspace-development");
+}
+
+/// `confirm` 需要一个应答者，headless 没有 —— **明确拒绝**，不静默降级成 `workspace`。
+#[test]
+fn confirm_permission_is_refused_in_headless() {
+    let case = RunCase::new();
+    let run = case.run(&["看一眼", "--id", "p-confirm", "--permission", "confirm"]);
+    assert_eq!(run.code, 64, "stdout={} stderr={}", run.stdout, run.stderr);
+    assert!(run.stderr.contains("应答者"), "stderr={}", run.stderr);
+    assert!(
+        !case.state().join("runs/p-confirm").exists(),
+        "拒绝要发生在建立任何状态之前"
+    );
+}
+
+/// 模型强度的**产品名是 `effort`**（opencode 叫 variant，不用那个名）。
+///
+/// 这里只证明它是**被认识的参数**且不影响运行；「它真的到了 provider」由真实运行验证过
+/// （把一个不存在的级别传下去，运行时在 `initialize` 直接拒绝 —— 见 §10.2b）。
+/// 夹具模式下物化配置没有 `model`（假内核不碰模型），所以断言不了路由。
+#[test]
+fn effort_is_a_known_flag_and_does_not_break_the_run() {
+    let case = RunCase::new();
+    let run = case.run(&["看一眼", "--id", "e1", "--effort", "high"]);
+    assert_eq!(run.code, 0, "stderr={}", run.stderr);
+    assert!(
+        !run.stderr.contains("不认识的参数"),
+        "--effort 没被声明：{}",
+        run.stderr
+    );
+}
+
+/// `arcdeck usage` 把 provider 报告的用量加起来；**没有费用**。
+#[test]
+fn usage_sums_what_the_provider_reported() {
+    let case = RunCase::new();
+    assert_eq!(case.run(&["看一眼", "--id", "u1"]).code, 0);
+
+    let mut command = Command::new(binary());
+    let out = command
+        .arg("usage")
+        .arg("--state-root")
+        .arg(case.state())
+        .output()
+        .expect("usage");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    // 夹具报的是 11 输入 / 2 输出。
+    assert!(text.contains("输入 11"), "{text}");
+    assert!(text.contains("输出 2"), "{text}");
+    assert!(text.contains("没有费用估算"), "要说清不编费用：{text}");
+}
+
 #[test]
 fn blocked_turn_reports_blocked() {
     let case = Case::new("blocked", no_acceptance(), json!({}));

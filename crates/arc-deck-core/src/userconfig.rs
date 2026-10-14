@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::authz::Permission;
 use crate::error::{code, SpecError, SpecResult};
 use crate::provider::ProviderConfig;
 
@@ -45,8 +46,10 @@ pub struct UserConfig {
     /// 个性化：管风格与个人习惯。**默认关**。
     #[serde(default)]
     pub personalization: Personalization,
+    /// 模型强度。**产品名是 `effort`** —— opencode 叫 `variant`，那个名字不用（用户 2026-10-14）。
+    /// 协议里它仍是 `reasoningEffort`（照上游），那层映射在适配器里做。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
+    pub effort: Option<String>,
     /// OpenCode 形状的供应商块。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub provider: BTreeMap<String, ProviderConfig>,
@@ -84,13 +87,13 @@ pub struct RuntimeConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerDefaults {
-    /// `read-only` / `workspace-write` / `danger-full-access`（DSH 的沙箱档）。
+    /// 授权级别 —— 见 [`Permission`]。**产品层只有这一个说法。**
     ///
-    /// `workspace-write` 只允许写 cwd 与临时目录；git worktree 的提交要写主仓的
-    /// `.git/worktrees/<id>`，在这一档下会被拒 —— 所以 Ether 那种「工人在 worktree
-    /// 里提交」必须显式写 `danger-full-access`，隔离由 worktree 本身承担。
-    #[serde(default = "defaults::sandbox")]
-    pub sandbox: String,
+    /// `workspace` 只允许在工作区内写；`full` 是沙箱之外的全权，**worktree 里提交必须用它**
+    /// （worktree 的 `.git` 指向主仓，而主仓在 workspace 之外 —— 实测每条 git 命令都返回 128）。
+    /// 隔离由 worktree 本身承担。
+    #[serde(default)]
+    pub permission: Permission,
     #[serde(default)]
     pub allow_commit: bool,
     /// 每件任务都一样的工人守则（如 Ether 的 PREAMBLE.md）。进 system prompt，稳定可缓存。
@@ -111,7 +114,7 @@ pub struct WorkerDefaults {
 impl Default for WorkerDefaults {
     fn default() -> Self {
         Self {
-            sandbox: defaults::sandbox(),
+            permission: Permission::default(),
             allow_commit: false,
             preamble: None,
             timeout_seconds: defaults::timeout_seconds(),
@@ -123,9 +126,6 @@ impl Default for WorkerDefaults {
 }
 
 mod defaults {
-    pub fn sandbox() -> String {
-        "workspace-write".into()
-    }
     // Ether 的工人任务常跑一两个小时（DISPATCHER §三）。
     pub fn timeout_seconds() -> u64 {
         4 * 3600
@@ -159,23 +159,11 @@ fn default_base() -> String {
     "main".into()
 }
 
-pub const SANDBOX_MODES: [&str; 3] = ["read-only", "workspace-write", "danger-full-access"];
-
 impl UserConfig {
     pub fn parse(raw: &str, origin: &Path) -> SpecResult<Self> {
         let config: UserConfig = serde_json::from_str(raw).map_err(|e| {
             SpecError::new(code::CONFIG_INVALID, format!("{} 不是合法的 arcdeck.json —— {e}", origin.display()))
         })?;
-        if !SANDBOX_MODES.contains(&config.worker.sandbox.as_str()) {
-            return Err(SpecError::new(
-                code::CONFIG_INVALID,
-                format!(
-                    "worker.sandbox = `{}`，只能是 {}",
-                    config.worker.sandbox,
-                    SANDBOX_MODES.join(" / ")
-                ),
-            ));
-        }
         crate::provider::split_model(&config.model)?;
         if config.worker.max_attempts == 0 {
             return Err(SpecError::new(code::CONFIG_INVALID, "worker.max_attempts 至少为 1"));
@@ -231,7 +219,7 @@ pub fn starter_config() -> String {
   "runtime": { "session_log_upload": false },
   "personalization": { "enabled": false },
   "worker": {
-    "sandbox": "workspace-write",
+    "permission": "workspace",
     "allow_commit": false,
     "timeout_seconds": 14400,
     "max_attempts": 3
@@ -323,10 +311,28 @@ mod tests {
         assert!(!c.personalization.enabled);
     }
 
+    /// 授权级别是**闭集**：拼错要当场报错，不能静默退回默认值。
+    /// （`deny_unknown_fields` 管不到枚举的取值，所以这条测试是必需的。）
     #[test]
-    fn unknown_sandbox_is_rejected() {
-        let raw = starter_config().replace("workspace-write", "full");
-        assert!(UserConfig::parse(&raw, Path::new("x")).is_err());
+    fn unknown_permission_is_rejected() {
+        let raw = starter_config().replace("\"permission\": \"workspace\"", "\"permission\": \"yolo\"");
+        let err = UserConfig::parse(&raw, Path::new("x")).unwrap_err();
+        assert!(err.message.contains("yolo"), "报错要指出错在哪：{err}");
+    }
+
+    #[test]
+    fn permission_maps_to_the_dsh_sandbox_and_profile() {
+        use crate::authz::Permission;
+        assert_eq!(Permission::Readonly.sandbox(), "read-only");
+        assert_eq!(Permission::Readonly.profile(), "workspace-readonly");
+        assert_eq!(Permission::Workspace.sandbox(), "workspace-write");
+        assert_eq!(Permission::Full.sandbox(), "danger-full-access");
+        // confirm 与 workspace 同权限，差别只在「要不要有人应答」。
+        assert_eq!(Permission::Confirm.sandbox(), "workspace-write");
+        assert!(Permission::Confirm.needs_responder());
+        assert!(!Permission::Workspace.needs_responder());
+        // 缺省是「工作区内直接改、直接跑」——与 TUI 的默认一致。
+        assert_eq!(Permission::default(), Permission::Workspace);
     }
 
     #[test]

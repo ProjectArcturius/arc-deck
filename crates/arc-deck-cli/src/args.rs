@@ -19,7 +19,7 @@ pub enum TaskSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     WorkerRun(WorkerArgs),
-    /// 高层命令（run / status / wait / report / logs / cancel / ls / auth / runtime / config），
+    /// 高层命令（run / status / wait / report / logs / cancel / usage / ls / auth / runtime / config），
     /// 原样转给 `commands.rs` 自己解析。
     Ops(Vec<String>),
     /// 无参数：交互界面。TUI 落地前只打印提示（PRODUCT_PLAN §6.0）。
@@ -49,17 +49,21 @@ arcdeck —— Arc Deck（DSH 之上的编码 Agent）
       --id <ID>                         任务 ID（缺省取任务书文件名）
       --by <谁>                         谁派的这件任务（claude / sol…），只记进状态，不进授权
       --workspace <目录>                缺省为当前目录
+      --permission <级别>               readonly | workspace | full（一次划定，运行中不再改）
       --worktree <分支>                 在 workspace 仓上建/复用 git worktree 再跑
       --accept <命令>                   验收命令，可重复；按实际执行记录判定
       --preamble <文件>                 工人守则，进 system prompt
       --model <provider/model>          覆盖配置里的模型
+      --effort <级别>                   模型强度（协议里叫 reasoningEffort；opencode 叫 variant，不用那个名）
+      --format <jsonl|text>             stdout 形态：工人模式 jsonl，一般模式 text
       --timeout <90|30m|2h>             墙钟预算
       --rerun                           同 ID 已有结论时重跑（旧记录改名保留）
   arcdeck status [<id>…|--all] [--json] 每件任务一行；单件时退出码编码状态
   arcdeck wait <id> [--timeout 30m]     等到终态，打印一行
   arcdeck report <id> [--json]          紧凑回报（事实与模型陈述分开）
+  arcdeck usage [--json]                各任务的 token 用量与合计（只有 provider 报告的，无费用）
   arcdeck logs <id> [--tail N] [--runtime|--console]
-  arcdeck cancel <id>                   请求取消并等待收尾
+  arcdeck cancel <id>                   请求取消并等待收尾；监工已死时按 runtime_pid 收进程树
   arcdeck ls                            同 status --all
   arcdeck auth set|ls|rm|import-opencode         凭据（与 OpenCode auth.json 同形）
   arcdeck runtime install|status [--version V]   私有、钉版本的 DSH 运行时
@@ -88,7 +92,7 @@ pub fn parse(argv: &[String]) -> SpecResult<Command> {
         return Ok(Command::Tui);
     };
     match first.as_str() {
-        "run" | "status" | "wait" | "report" | "logs" | "cancel" | "ls" | "auth" | "runtime" | "config" => {
+        "run" | "status" | "wait" | "report" | "logs" | "cancel" | "usage" | "ls" | "auth" | "runtime" | "config" => {
             Ok(Command::Ops(argv.to_vec()))
         }
         "--help" | "-h" | "help" => Ok(Command::Help),

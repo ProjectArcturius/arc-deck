@@ -177,6 +177,37 @@ Build/Plan 借鉴的是角色与行为，不将 OpenCode 的 provider、工具�
 
 这些是行为契约，不要求所有任务执行固定七阶段；改一条注释不必启动完整探索/设计流程。语言风格与模型能力不能用确定性单测等同证明，需要固定样例与人工评价。
 
+### 5.6 授权级别：一个说法，四个入口（2026-10-14 定型）
+
+**产品层只有一个说法：授权级别。** DSH 的沙箱档（`read-only` / `workspace-write` /
+`danger-full-access`）是实现细节，不出现在命令行与界面上 —— 与 `effort` 不用 opencode 的
+`variant` 是同一个道理。
+
+| 级别 | 含义 | → DSH 沙箱 | → 策略档 |
+|---|---|---|---|
+| `readonly` | 只读工作区：不能写、不能跑命令 | `read-only` | `workspace-readonly` |
+| `workspace` | 工作区内可读写、可执行 | `workspace-write` | `workspace-development` |
+| `full` | 沙箱之外的全权（worktree 里提交必需） | `danger-full-access` | `workspace-development` |
+| `confirm` | 与 `workspace` 同权限，但每次改动/执行前确认 | `workspace-write` + 应答者 | — |
+
+四个入口各划各的，**不叠加**：
+
+| 面 | 谁划定 | 默认 | 运行中能不能改 |
+|---|---|---|---|
+| **CLI · 一般模式** | 用户显式带 args（`--permission`） | `workspace` | **不能** —— 一次划定，过程不再二次修改 |
+| **CLI · 工人** | 任务书（`constraints`）**收紧**启动配置 | 启动配置 | 不能；任务书只能收紧，不能放宽 |
+| **TUI** | `/permission <级别>` | `workspace`（工作区内直接改、直接跑） | 能，但要显式下命令 |
+| **GUI** | 同 TUI | **`confirm`**（执行前确认） | 能，但要显式操作 |
+
+三条纪律：
+
+- **`confirm` 在 headless 明确拒绝**，不静默降级成 `workspace`。它需要一个应答者，
+  而无人值守时没有（§6.4）。报错好过「以为在确认、其实直接执行了」。
+- **收紧只有一个方向**：「启动配置上限 → Agent 档位 → 任务书 `constraints`」，
+  没有能以更后面的 allow 覆盖前面 deny 的顺序（§6.1）。
+- **授权不是提示词。** 级别落到 `DSH_PERMISSION_MODE` 与生成的 profile 上，由执行层生效；
+  system prompt 里写一句「请不要写工作区之外的文件」不算授权。
+
 ### 5.3 提示词与配置装配
 
 保留 DSH 基础指导、真实工具说明及上下文管理，再组合 Arc Deck 工程规则、Agent 行为、模式、Echo 风格、工作区指令与任务。策略高于提示词；项目文件与任务文字不得扩大启动时授权。
@@ -248,13 +279,16 @@ arcdeck wait <id> [--timeout <时长>]      阻塞到终态或超时，打印一
 arcdeck report <id> [--json]              终态的紧凑回报（§6.5.4）
 arcdeck logs <id> [--tail N] [--events]   需要排查时才看的原始输出
 arcdeck cancel <id>                       写取消请求并等待有界收尾
+arcdeck usage [--json]                    各任务的 token 用量与合计（只有 provider 报告的，无费用）
 arcdeck ls [--state-root <路径>]          列出状态目录里的任务
 arcdeck worker run --config … --task …    M1 的底层入口，保留为 `run` 的别名，参数不变
 ```
 
 `run` 的常用选项：`--config <路径>`、`--workspace <路径>`（缺省 = 当前目录）、`--id <任务ID>`
-（缺省取任务书文件名）、`--by <谁>`（§6.2）、`--accept <命令>`（可重复，追加 `command` 类验收）、`--preamble <文件>`、
-`--worktree <分支>`（§6.6）、`--model <provider/model>`、`--timeout <时长>`、`--format <jsonl|text>`。
+（缺省取任务书文件名）、`--by <谁>`（§6.2）、`--permission <级别>`（§5.6）、`--accept <命令>`
+（可重复，追加 `command` 类验收）、`--preamble <文件>`、`--worktree <分支>`（§6.6）、
+`--model <provider/model>`、`--effort <级别>`（模型强度；协议里叫 `reasoningEffort`）、
+`--format <jsonl|text>`、`--timeout <时长>`。
 
 **一般模式与工人模式（2026-10-14 定型）。** 判据是**工人参数**，不是「参数是不是文件」：
 
@@ -562,12 +596,12 @@ fix-filter  failed   done     验收 filter-regression 退出 101 · commits 2 �
 | `CARGO_TARGET_DIR` 每任务独占 | 启动配置的 `env` 模板，支持 `{task_id}` 替换；Arc Deck 不写死 cargo |
 | 代理（Windows 借 10809，Linux 走反向隧道） | 启动配置的 `env`；反向隧道仍由调度者那端的网络建 —— 那是调度者的网络，不是 worker 的职责 |
 | `PREAMBLE.md` 与任务书拼成一条消息 | `--preamble` 进 system prompt 的 persona 后缀（每件任务都一样，稳定可缓存，DSH_FINDINGS §4.2）；任务书正文进用户消息 |
-| `dsh --profile headless`，`danger-full-access` | per-task `DSH_HOME` + Arc Deck 生成的 profile；权限 `workspace-development`，写范围是 worktree。Ether 工人要提交，所以由启动配置给 `allow_commit: true`；推送始终拒绝 |
+| `dsh --profile headless`，`danger-full-access` | per-task `DSH_HOME` + Arc Deck 生成的 profile；级别是 `full`（§5.6），写范围是 worktree。Ether 工人要提交，所以由启动配置给 `allow_commit: true`；推送始终拒绝 |
 | 30 分钟看门狗、grep 网络错误、grep DSML | §6.5.4 |
 | `nohup … &`，日志在 `.oc/logs/` | `--detach`；`state_root` 可配到 `.oc/state/` |
 | 收尾打印 `git log main..HEAD` / `git status --porcelain` | 回报里「Arc Deck 采集的事实」 |
 
-**`--worktree` 必须配 `sandbox = danger-full-access`，否则派工时会警告。**
+**`--worktree` 必须配 `permission = full`，否则派工时会警告。**
 worktree 里的 `.git` 是个**指向主仓**的指针文件，而主仓在 workspace 之外 —— 沙箱不是
 `danger-full-access` 时，worktree 里的 git 命令一律失败。**实测**（Arch，2026-10-14，真实模型）：
 
@@ -660,7 +694,7 @@ Rust 必须复写 Solid/OpenTUI 组件行为。若 Rust renderer 无法达到所
 |---|---|
 | 模型列表 | 可模糊搜索；搜索为空时**先列 Favorites 与 Recent**，其余按 provider 分组 |
 | 收藏 / 最近 | 持久化在本地偏好里；Recent 里已经在 Favorites 出现的不重复列 |
-| 变体 | 选中模型后按需进入变体选择（v1 的 `DialogVariant`），没有变体的模型直接跳过 |
+| 变体 | 选中模型后按需进入**强度（effort）**选择（v1 的 `DialogVariant`）；没有强度档的模型直接跳过。**产品名是 `effort`，不用 opencode 的 `variant`**（用户 2026-10-14） |
 | provider 维度 | 有独立的 provider 列表入口，可从模型对话框跳进去 |
 | 代价提示 | 有明确的代价信息就显示（v1 在免费条目上打 `Free`）；没有数据就不显示，不编 |
 | 不可用项 | 不可用的模型显式禁用并说明原因，不是从列表里悄悄消失 |
@@ -697,7 +731,11 @@ Rust 必须复写 Solid/OpenTUI 组件行为。若 Rust renderer 无法达到所
 
 模型与 Agent 相关键位（采自 v1.19.0 / 2.0.27 的同名定义）：`leader,m` 模型列表；`F2` / `Shift+F2` 在最近使用的模型间前后切换；`Ctrl+T` 循环变体；`Ctrl+A` 从模型对话框进入 provider 列表；`Ctrl+F` 收藏当前项。这些键在模型对话框内有独立上下文，与同名的会话级绑定不冲突 —— 冲突要按上下文解析，不能全局覆盖。
 
-`/agents`、`/models`、`/new`、`/sessions`、`/plan`、`/build`、`/cancel` 是首版产品命令方向。`/plan` 对 Echo 只切为 `echo + plan`、保留 Echo 风格；对 Build 切为 `plan + plan`；对 Plan 不变。`/build` 对 Echo 只切为 `echo + build`；对 Plan 切为 `build + build`；对 Build 不变。显式 Agent 选择取新 Agent 默认模式，未知 Agent 不静默回退。这些是用户动作，不是模型自行提权；每次仍受启动授权约束。
+`/agents`、`/models`、`/new`、`/sessions`、`/plan`、`/build`、`/cancel` 是首版产品命令方向。**`/permission`**（授权级别，§5.6）、**`/usage`**（用量与合计）、**`/effort`**（模型强度）同样是首版必备。`/plan` 对 Echo 只切为 `echo + plan`、保留 Echo 风格；对 Build 切为 `plan + plan`；对 Plan 不变。`/build` 对 Echo 只切为 `echo + build`；对 Plan 切为 `build + build`；对 Build 不变。显式 Agent 选择取新 Agent 默认模式，未知 Agent 不静默回退。这些是用户动作，不是模型自行提权；每次仍受启动授权约束。
+
+**命名纪律**：模型强度的产品名是 **`effort`**，不是 opencode 的 `variant`（用户 2026-10-14）。
+DSH 协议里的 `reasoningEffort` 是上游字段名，映射在适配器里做，不往界面上漏。
+同理，界面上说的是**授权级别**，不说 DSH 的沙箱档名。
 
 运行中的模式切换须先结束/取消当前活动并确认，再影响下一轮。终端无法区分某个组合键时给可用替代键，不声称完全兼容所有终端。
 

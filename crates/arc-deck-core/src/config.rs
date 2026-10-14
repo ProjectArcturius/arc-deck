@@ -359,7 +359,9 @@ impl WorkerConfig {
         match &self.runtime {
             RuntimeSpec::FixtureSdk { .. } => Ok(()),
             RuntimeSpec::DshSdk { version, profile, sandbox, .. } => {
-                if !crate::userconfig::SANDBOX_MODES.contains(&sandbox.as_str()) {
+                // 这里是**实现层**的 DSH 沙箱档。用户级说的是 `Permission`，
+                // 由 `cmd_run` 映射过来（见 `authz::Permission::sandbox`）。
+                if !matches!(sandbox.as_str(), "read-only" | "workspace-write" | "danger-full-access") {
                     return Err(SpecError::new(
                         code::CONFIG_INVALID,
                         format!("runtime.sandbox = `{sandbox}` 不是已知的 DSH 沙箱档"),
