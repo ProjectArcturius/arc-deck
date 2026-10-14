@@ -4,6 +4,7 @@
   "workspace": "C:/work/project",
   "agent": "echo",
   "mode": "build",
+  "assigned_by": "sol",
   "instruction": "修复会话筛选，并补回归测试",
   "constraints": {
     "read_paths": ["."],

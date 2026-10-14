@@ -460,7 +460,13 @@ fn stalled_run_is_restarted_then_fails_with_stalled_when_attempts_run_out() {
 
 #[test]
 fn status_file_tracks_a_successful_run_to_its_terminal_state() {
-    let case = Case::new("success", no_acceptance(), json!({}));
+    // `assigned_by` 与标题是给外部监控程序画「任务书流向」用的，走的是
+    // 任务书 → status.json 这条完整链路，所以在这里一并钉住。
+    let case = Case::new(
+        "success",
+        no_acceptance(),
+        json!({ "assigned_by": "sol", "instruction": "# 修会话筛选\n\n正文……" }),
+    );
     let run = case.run();
     assert_eq!(run.code, 0, "stderr={}", run.stderr);
     let status: Value = serde_json::from_str(
@@ -470,6 +476,8 @@ fn status_file_tracks_a_successful_run_to_its_terminal_state() {
     assert_eq!(status["terminal"], true);
     assert_eq!(status["state"], "completed");
     assert_eq!(status["attempt"], 1);
+    assert_eq!(status["assigned_by"], "sol");
+    assert_eq!(status["title"], "修会话筛选");
     assert!(status["heartbeat_at"].as_u64().unwrap() >= status["started_at"].as_u64().unwrap());
 }
 

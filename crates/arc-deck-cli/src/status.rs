@@ -68,6 +68,16 @@ pub struct StatusFile {
     pub workspace: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// 谁派的这件任务 —— 派工关系的**边**。缺席 = 没记录。
+    ///
+    /// 外部监控程序（`cute-agents-monitor`）拿它把「任务书流向」画出来：
+    /// 每个工人一条边指回派它的人，任意深度都由这一条边重建。
+    /// 放在 `status.json` 而不是 `task.json`，是为了让那个程序**只解析一个文件**。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_by: Option<String>,
+    /// 任务书标题（取自指令首行）。给监控程序当节点标签；缺席就显示 `task_id`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub started_at: u64,
     pub heartbeat_at: u64,
     pub progress_at: u64,
@@ -319,6 +329,21 @@ pub fn clip(text: &str, max_chars: usize) -> String {
     }
 }
 
+/// 任务书标题：指令的第一行非空内容，去掉 Markdown 的 `#` 前缀。
+///
+/// 只做这一件事 —— **不解析任务书的语义**。PRODUCT_PLAN §6.6 已经立过同款规矩：
+/// 不去猜「验证」段里的命令。取标题是另一回事，它不改任何判定，取错了最多是
+/// 界面上少一个好看的标签。
+pub fn derive_title(instruction: &str) -> Option<String> {
+    let line = instruction.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let line = line.trim_start_matches('#').trim();
+    if line.is_empty() {
+        None
+    } else {
+        Some(clip(line, 80))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,6 +359,8 @@ mod tests {
             runtime_pid: None,
             workspace: "/w".into(),
             model: None,
+            assigned_by: None,
+            title: None,
             started_at: now - 18 * 60_000,
             heartbeat_at: now - 5_000,
             progress_at: now - 10_000,
@@ -379,6 +406,32 @@ mod tests {
         s.activity.since = s.progress_at;
         assert_eq!(health(&s, NOW), "stalled");
         assert_eq!(exit_code(&s, "stalled"), 11);
+    }
+
+    #[test]
+    fn title_comes_from_the_first_heading() {
+        assert_eq!(derive_title("# 修复会话筛选\n\n正文……").as_deref(), Some("修复会话筛选"));
+        // 没有 `#` 也行 —— 标题只是标签，不是语义解析。
+        assert_eq!(derive_title("\n  离线夹具任务  \n").as_deref(), Some("离线夹具任务"));
+        // 一行的空白会被压平，超长会截断并留省略号。
+        let long = format!("# {}", "很长".repeat(60));
+        assert!(derive_title(&long).unwrap().chars().count() <= 80);
+        assert_eq!(derive_title("   \n\n").as_deref(), None);
+    }
+
+    #[test]
+    fn assigned_by_round_trips_through_the_status_file() {
+        let mut s = sample(NOW);
+        s.assigned_by = Some("sol".into());
+        s.title = Some("修复会话筛选".into());
+        let text = serde_json::to_string(&s).unwrap();
+        let back: StatusFile = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.assigned_by.as_deref(), Some("sol"));
+        assert_eq!(back.title.as_deref(), Some("修复会话筛选"));
+        // 缺席时不写进文件 —— 监控程序据此判断「没有这条边」。
+        let bare = serde_json::to_string(&sample(NOW)).unwrap();
+        assert!(!bare.contains("assigned_by"));
+        assert!(!bare.contains("\"title\""));
     }
 
     #[test]

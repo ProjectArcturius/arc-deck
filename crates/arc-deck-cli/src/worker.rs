@@ -65,6 +65,9 @@ struct Prepared {
     cancel_file: Option<PathBuf>,
     result_path: Option<PathBuf>,
     task_label: String,
+    /// 派工关系的边与节点标签：只在 `status.json` 里落一次，不改任何判定。
+    assigned_by: Option<String>,
+    title: Option<String>,
 }
 
 /// 运行时的启动参数。
@@ -103,6 +106,9 @@ fn prepare(args: &WorkerArgs) -> Result<Prepared, SpecError> {
     // 启动配置宽松就拿到写权限。
     let ceiling = registry.definition(agent)?.permission_profile;
     let plan = ExecutionPlan::resolve_with_ceiling(&config, &task, Some(ceiling))?;
+    // 派工关系与标题在**任何状态建立之前**取好；它们不进授权、不进 prompt。
+    let assigned_by = task.assigned_by.clone();
+    let title = status::derive_title(&task.instruction);
     // 工作区指令由 DSH 的既有机制装载（PRODUCT_PLAN §5.3），M1 不重复注入。
     let system_prompt = registry.compose_system_prompt(plan.policy.agent, plan.policy.mode, None)?;
 
@@ -145,6 +151,8 @@ fn prepare(args: &WorkerArgs) -> Result<Prepared, SpecError> {
         cancel_file: args.cancel_file.clone(),
         result_path: args.result.clone(),
         task_label,
+        assigned_by,
+        title,
     })
 }
 
@@ -350,6 +358,8 @@ async fn execute(prepared: Prepared) -> i32 {
             runtime_pid: None,
             workspace: prepared.plan.workspace.display().to_string(),
             model: prepared.config.model.as_ref().map(|m| format!("{}/{}", m.provider, m.model)),
+            assigned_by: prepared.assigned_by.clone(),
+            title: prepared.title.clone(),
             started_at: started,
             heartbeat_at: started,
             progress_at: started,

@@ -171,13 +171,13 @@ async fn cmd_run(argv: &[String]) -> CmdResult {
     let flags = Flags::parse(
         argv,
         &["--config", "--workspace", "--id", "--accept", "--preamble", "--worktree", "--git-base",
-          "--model", "--timeout", "--agent", "--state-root"],
+          "--model", "--timeout", "--agent", "--state-root", "--by"],
         &["--detach", "--rerun"],
     )?;
     let [task_arg] = flags.positional.as_slice() else {
         return Err(SpecError::new(
             code::CONFIG_INVALID,
-            "用法：arcdeck run <任务书.md|任务书.json|-> [--detach] [--id ID] [--worktree 分支] [--accept 命令]…",
+            "用法：arcdeck run <任务书.md|任务书.json|-> [--detach] [--id ID] [--by 派工者] [--worktree 分支] [--accept 命令]…",
         ));
     };
     let (cfg, cfg_path) = UserConfig::locate_and_load(flags.one("--config").map(Path::new))?;
@@ -315,6 +315,10 @@ async fn cmd_run(argv: &[String]) -> CmdResult {
         workspace: workspace.clone(),
         agent: flags.one("--agent").map(str::to_string).or_else(|| json_task.as_ref().and_then(|t| t.agent.clone())),
         mode: json_task.as_ref().and_then(|t| t.mode),
+        assigned_by: flags
+            .one("--by")
+            .map(str::to_string)
+            .or_else(|| json_task.as_ref().and_then(|t| t.assigned_by.clone())),
         instruction,
         constraints: json_task.as_ref().and_then(|t| t.constraints.clone()),
         acceptance,

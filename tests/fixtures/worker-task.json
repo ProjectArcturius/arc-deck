@@ -4,6 +4,7 @@
   "workspace": "../..",
   "agent": "echo",
   "mode": "build",
+  "assigned_by": "sol",
   "instruction": "离线夹具：只验证 worker 链路，不读取任何真实模型。",
   "constraints": {
     "write_paths": ["crates/"],

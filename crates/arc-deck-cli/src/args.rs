@@ -47,6 +47,7 @@ arcdeck —— Arc Deck（DSH 之上的编码 Agent）
   arcdeck run <任务书.md|.json|-> [选项] 执行一件任务（前台：stdout 是 JSONL，退出码 = 终态）
       --detach                          分离运行，立即返回任务 ID
       --id <ID>                         任务 ID（缺省取任务书文件名）
+      --by <谁>                         谁派的这件任务（claude / sol…），只记进状态，不进授权
       --workspace <目录>                缺省为当前目录
       --worktree <分支>                 在 workspace 仓上建/复用 git worktree 再跑
       --accept <命令>                   验收命令，可重复；按实际执行记录判定

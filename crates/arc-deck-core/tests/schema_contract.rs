@@ -83,6 +83,7 @@ fn task_example_matches_the_task_spec() {
     assert_eq!(task.task_id, "fix-session-filter");
     assert_eq!(task.agent.as_deref(), Some("echo"));
     assert_eq!(task.mode, Some(Mode::Build));
+    assert_eq!(task.assigned_by.as_deref(), Some("sol"));
     assert_eq!(task.timeout_seconds, Some(900));
     assert_eq!(task.acceptance.len(), 2);
     assert!(task.acceptance[0].is_command());
