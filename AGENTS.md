@@ -5,6 +5,8 @@
 需求、架构与 roadmap 的入口：[docs/PRODUCT_PLAN.md](docs/PRODUCT_PLAN.md)，先读它的 §0。
 此刻的状态、仓外的东西与换机器步骤：[docs/STATE_2026-10-14.md](docs/STATE_2026-10-14.md)。
 DSH 对非 DS 模型是否适用的调查：[docs/DSH_FINDINGS.md](docs/DSH_FINDINGS.md)。
+人格与风格怎么装（Claude Code 的做法）：[docs/PERSONA_FINDINGS.md](docs/PERSONA_FINDINGS.md)。
+不可让渡的规则与「什么算个性化」：[prompts/constitution.md](prompts/constitution.md)（草案）。
 
 - **当前焦点只有一件事：Rust 后端的 headless 在 Ether 上可用**（PRODUCT_PLAN M2a–M2c）。TUI 排在其后（M4）；两个桌面 GUI 冻结。
 - 一个可执行文件 `arcdeck`：工作目录下无参数运行进 TUI，带子命令进 headless。headless 的主用法是 Ether 的工人任务书；调度者靠 `arcdeck status` 一行 + 退出码判断「完成 / 在跑 / 卡死 / 出错」，不读长日志。健康由读者按时间戳计算，进程死了不能自称健康。
