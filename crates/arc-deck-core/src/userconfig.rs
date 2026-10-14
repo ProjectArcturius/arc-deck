@@ -159,10 +159,28 @@ fn default_base() -> String {
     "main".into()
 }
 
+/// 改过名的字段仍然**拒绝**（产品层只有一个说法，不收别名），但报错要说清改成什么。
+/// 4e1eae6 把 `sandbox` 改名后，开发机上那份旧配置让第一次真派工直接 64 退出，
+/// 报错只有 `expected one of …`，看不出旧值该对应哪一档。
+fn renamed_field_hint(serde_error: &str) -> &'static str {
+    if serde_error.contains("unknown field `sandbox`") {
+        "\n  `worker.sandbox` 已改名为 `worker.permission`：read-only → readonly，\
+         workspace-write → workspace，danger-full-access → full"
+    } else if serde_error.contains("unknown field `reasoning_effort`") {
+        "\n  `reasoning_effort` 已改名为 `effort`，取值不变"
+    } else {
+        ""
+    }
+}
+
 impl UserConfig {
     pub fn parse(raw: &str, origin: &Path) -> SpecResult<Self> {
         let config: UserConfig = serde_json::from_str(raw).map_err(|e| {
-            SpecError::new(code::CONFIG_INVALID, format!("{} 不是合法的 arcdeck.json —— {e}", origin.display()))
+            let e = e.to_string();
+            SpecError::new(
+                code::CONFIG_INVALID,
+                format!("{} 不是合法的 arcdeck.json —— {e}{}", origin.display(), renamed_field_hint(&e)),
+            )
         })?;
         crate::provider::split_model(&config.model)?;
         if config.worker.max_attempts == 0 {
@@ -309,6 +327,18 @@ mod tests {
         assert_eq!(c.dsh_version(), PINNED_DSH_VERSION);
         // 个性化默认关 —— 一般模式下一个字都不注入（用户 2026-10-14）。
         assert!(!c.personalization.enabled);
+    }
+
+    /// 旧字段名仍被拒绝，但报错给出新名字与取值对应 —— 不是静默接受成别名。
+    #[test]
+    fn renamed_fields_are_rejected_with_the_new_name() {
+        let raw = starter_config().replace("\"permission\": \"workspace\"", "\"sandbox\": \"workspace-write\"");
+        let err = UserConfig::parse(&raw, Path::new("x")).unwrap_err();
+        assert!(err.message.contains("worker.permission") && err.message.contains("workspace-write → workspace"), "{err}");
+
+        let raw = starter_config().replacen('{', "{\n  \"reasoning_effort\": \"high\",", 1);
+        let err = UserConfig::parse(&raw, Path::new("x")).unwrap_err();
+        assert!(err.message.contains("改名为 `effort`"), "{err}");
     }
 
     /// 授权级别是**闭集**：拼错要当场报错，不能静默退回默认值。
