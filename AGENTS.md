@@ -7,7 +7,10 @@
 DSH 对非 DS 模型是否适用的调查：[docs/DSH_FINDINGS.md](docs/DSH_FINDINGS.md)。
 人格与风格怎么装（Claude Code 的做法）：[docs/PERSONA_FINDINGS.md](docs/PERSONA_FINDINGS.md)。
 不可让渡的规则与「什么算个性化」：[prompts/constitution.md](prompts/constitution.md)（草案）。
+TUI 派工计划与状态（**队列 2026-10-14 起暂停**）：[docs/M4_PLAN.md](docs/M4_PLAN.md)；派工手册：[tasks/m4/README.md](tasks/m4/README.md)。
+授权 → DSH 执行层的映射与缺口：[docs/M3_GUARD.md](docs/M3_GUARD.md)。用 arcdeck 工人替代 OpenCode 工人的复盘：[docs/ARCDECK_WORKERS_REVIEW_2026-10-14.md](docs/ARCDECK_WORKERS_REVIEW_2026-10-14.md)。
 
+- **2026-10-14 补记**：用户随后要求用 arcdeck 工人把 TUI 做到日常可用，W1（Markdown / 主题 / 模型对话框）与 M3 第一段已合入；同日暂停派工，下一步重心转 GUI，剩余 TUI 队列可由替班按手册继续。**本机 C 盘已满：worktree、TEMP、构建输出都在 D 盘**（见 tasks/m4/README.md）。
 - **当前焦点只有一件事：Rust 后端的 headless 在 Ether 上可用**（PRODUCT_PLAN M2a–M2c）。TUI 排在其后（M4）；两个桌面 GUI 冻结。
 - 一个可执行文件 `arcdeck`：工作目录下无参数运行进 TUI，带子命令进 headless。headless 的主用法是 Ether 的工人任务书；调度者靠 `arcdeck status` 一行 + 退出码判断「完成 / 在跑 / 卡死 / 出错」，不读长日志。健康由读者按时间戳计算，进程死了不能自称健康。
 - **底层只用 DSH 一个内核**：DS 走 `deepseek-official`（Messages 协议，DS 优势只在官方路由上成立），非 DS 走 DSH 的 pi-ai 路由。不再造 OpenCode/Claude 的执行内核；它们只作 TUI、Agent、工具定义的设计参考。「非 DS 用 DSH 不劣于 OpenCode」未测，是 M2d 的对照门。

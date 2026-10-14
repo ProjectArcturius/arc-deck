@@ -31,6 +31,8 @@ cargo run -p arc-deck-cli --bin arcdeck --features test-runtime -- worker run \
 ```
 
 - **headless 已可用**（Windows 与 Arch 均实测）：`arcdeck runtime install` → `arcdeck run <任务书> --by <谁> --accept "<验收命令>" --detach` → `arcdeck status` / `report`。用法见 `arcdeck --help` 与 [PRODUCT_PLAN §10.2b](docs/PRODUCT_PLAN.md)；Ether 接入示例在 `examples/ether/`。
+- **TUI 已合入**：Markdown 渲染、OpenCode 2.0.27 语义主题（34 个内置主题 + 选择器）、模型 / provider / effort 对话框；**多轮会话、命令系统、工具视图等仍在队列里**（[docs/M4_PLAN.md](docs/M4_PLAN.md)）。
+- **授权落到执行层（M3 第一段）**：只读 / Plan 由 DSH 的 OS 沙箱强制，关 shell 即摘工具，表达不了的组合拒绝启动（[docs/M3_GUARD.md](docs/M3_GUARD.md)）。
 - **TUI 第一段已落地**：`cargo run -p arc-deck-cli --bin arcdeck --offline` 无参数进入。Windows 暂用 **F6 发送、Enter 换行**，避免原生多行粘贴触发请求；Ctrl+P 查看命令。完整审计、使用边界和验证见 [CORE_HEADLESS_AUDIT_2026-10-14.md](docs/CORE_HEADLESS_AUDIT_2026-10-14.md)。
 - 尚未实现 / 未验证：macOS、真实运行时卡死续跑、Remote 多轮与流式 TUI、Arch TUI、GUI 接线、M3 执行 guard。core 算出的 Plan/路径/提交限制尚未完整落实到真实工具执行，不以提示词或策略留档宣称隔离。
 - `REFS/` 是被 Git 忽略的本地参考；构建和发布不能依赖它。OpenCode 为 MIT；Claude Code 参考仓的根许可证不是 MIT，不默认复制其实现或提示词。
@@ -173,12 +175,17 @@ arc-deck/
 ├── docs/
 │   ├── PRODUCT_PLAN.md            产品需求与编码方向（**入口，先读 §0**）
 │   ├── STATE_2026-10-14.md        交接快照：此刻的状态、仓外的东西、换机器步骤
+│   ├── M4_PLAN.md                 TUI 派工计划与每件任务的状态（队列 2026-10-14 起暂停）
+│   ├── M3_GUARD.md                授权策略 → DSH 执行层的映射表、缺口与负例清单
+│   ├── ARCDECK_WORKERS_REVIEW_2026-10-14.md  用 arcdeck 工人替代 OpenCode 工人：实测、成本、对 Ether 的意义
+│   ├── CORE_HEADLESS_AUDIT_2026-10-14.md     core / headless 完备性审计与 M4a
 │   ├── DSH_FINDINGS.md            DSH 对非 DS 模型是否适用
 │   ├── PERSONA_FINDINGS.md        人格与风格怎么装（Claude Code 的做法）
 │   ├── ARCHITECTURE.md            Rust 侧早期架构快照（历史）
 │   ├── DESIGN_SYSTEM.md           正典落地取值（**只与 kanesumi/ 相关**）
 │   └── PERF_FINDINGS.md           流式排版实测
 ├── prompts/constitution.md        宪法草案（不可让渡层；**尚未接进装配**）
+├── tasks/m4/                      M4 任务书队列与派工手册（README.md：依赖、派工命令、收工七步、踩过的坑）
 └── AGENTS.md                      协作约定：通用 + kanesumi 侧 K1–K9 + uwp 侧 U1–U17
 ```
 

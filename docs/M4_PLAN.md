@@ -6,6 +6,12 @@ Claude 是派工者：写任务书、复跑验收、逐行审阅、在工人分�
 
 任务书在 `tasks/m4/`，共用条款在 `tasks/m4/_common.md`。**本文件只记计划与状态；证据在各提交正文里。**
 
+## 当前状态：队列暂停（2026-10-14 用户裁定）
+
+> 「目前在做的任务书完成后不再派发新的了」。顺序 0 与 w4-m3b-negative 收完即停；其余任务书**原样保留**，
+> 由替班（sol）或下一次调度按 `tasks/m4/README.md` 继续。本轮的使用复盘与对 Ether 的意义：
+> [`ARCDECK_WORKERS_REVIEW_2026-10-14.md`](ARCDECK_WORKERS_REVIEW_2026-10-14.md)。
+
 ## 「完全完成」的判据
 
 PRODUCT_PLAN §7.3 的八个组件、§7.4 的键位与命令、§7.5 的视觉与运行验收。其中有三样不是 TUI crate 自己能完成的：
@@ -26,13 +32,13 @@ PRODUCT_PLAN §7.3 的八个组件、§7.4 的键位与命令、§7.5 的视觉�
 |---|---|---|---|
 | 试点 | tui-model-catalog | 模型目录纯逻辑（§7.2） | ✅ 202b551 |
 | 0 | w1-markdown | 助手正文 Markdown（pulldown-cmark） | ✅ 6cf64bd |
-| 0 | w1-theme | 2.0.27 语义 token、v1→v2 迁移、内置主题、主题对话框 | 派出 |
+| 0 | w1-theme | 2.0.27 语义 token、v1→v2 迁移、内置主题、主题对话框 | ✅ e16e13d（合入时整合了取色接口） |
 | 0 | w1-model-dialog | 模型 / provider / effort 对话框，F2 循环，偏好落盘 | ✅ f82555f |
-| 0 | w2-remote-transport | Remote host / rpc / mux；0.2.1 协议核对文档 | 派出 |
+| 0 | w2-remote-transport | Remote host / rpc / mux；0.2.1 协议核对文档 | ⏸ 用户叫停时取消；半成品在分支 `dsh/w2-remote-transport`（两个 wip 提交，未审阅），一条 lib 测试会挂住。续做：同 id + `--rerun` + `w2-remote-transport-resume.md` |
 | 0 | w4-m3-guard | EffectivePolicy → DSH 配置行，映射表 + `--dump-config` 验证 | ✅ f545990（合入后真实冒烟一次通过） |
 | 1 | w3-commands | 命令系统：action 注册表、键位与上下文、slash 补全、面板、帮助 | 待 w1 全部合入 |
 | 1 | w2-remote-session | 会话操作、事件投影、审批数据、模型目录 | 待 w2-remote-transport |
-| 1 | w4-m3b-negative | 脚本化假模型端点驱动真实 DSH，证明越权被拒（零配额） | 派出 |
+| 1 | w4-m3b-negative | 脚本化假模型端点驱动真实 DSH，证明越权被拒（零配额） | ✅ fb4d482（17 条负例 live 全过；复跑时修了一条用例） |
 | 2 | w3-tui-input | `@` 文件、历史、粘贴摘要、Shift+Enter、外部编辑器、metadata | 待 w3-commands |
 | 2 | w3-session-core | TUI 改走 Remote：多轮、流式、思考、取消；`/runs` 保留看工人 | 待 w3-commands · w2-remote-session |
 | 3 | w3-session-list | 会话列表 / 恢复 / 改名 / 时间线；真实模型目录 | 待 w3-session-core |
