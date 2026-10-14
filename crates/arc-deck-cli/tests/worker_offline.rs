@@ -503,6 +503,10 @@ impl RunCase {
     }
 
     fn run(&self, extra: &[&str]) -> Run {
+        self.run_in(&self.workspace, extra)
+    }
+
+    fn run_in(&self, workspace: &Path, extra: &[&str]) -> Run {
         let mut command = Command::new(binary());
         command.env("ARCDECK_FIXTURE_SCENARIO", "success").arg("run");
         for arg in extra {
@@ -512,7 +516,7 @@ impl RunCase {
             .arg("--config")
             .arg(&self.config)
             .arg("--workspace")
-            .arg(&self.workspace)
+            .arg(workspace)
             .output()
             .expect("run");
         Run {
@@ -615,6 +619,41 @@ fn detached_run_against_a_working_fixture_reaches_completed() {
     .unwrap();
     assert_eq!(status["assigned_by"], "claude");
     assert!(status["state"].is_string());
+}
+
+/// `--worktree` 配非全权沙箱时必须在**派工那一秒**就警告。
+///
+/// 实测（Arch，2026-10-14，真实模型）：worktree 里的每条 git 命令都返回 128
+/// （worktree 的 `.git` 是个指向主仓的指针文件，主仓在 workspace 之外），
+/// 整轮以「验收未通过 accept-1（退出 128）」收场 —— 工人跑了 34 秒、烧了
+/// 8342 输入 token 才发现一件派工时就知道的事。
+#[test]
+fn worktree_without_full_sandbox_warns_at_dispatch_time() {
+    let case = RunCase::new();
+    // 得先有个 git 仓，`--worktree` 才有东西可建。
+    let repo = case.dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    for args in [vec!["init", "-q"], vec!["config", "user.email", "t@t"], vec!["config", "user.name", "t"]] {
+        let ok = Command::new("git").args(&args).current_dir(&repo).status().unwrap().success();
+        assert!(ok, "git {args:?} 失败");
+    }
+    std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+    assert!(Command::new("git").args(["add", "-A"]).current_dir(&repo).status().unwrap().success());
+    assert!(Command::new("git")
+        .args(["commit", "-qm", "init"])
+        .current_dir(&repo)
+        .status()
+        .unwrap()
+        .success());
+    // `--worktree` 的基线缺省是 `main`（PRODUCT_PLAN §6.6）。
+    assert!(Command::new("git").args(["branch", "-M", "main"]).current_dir(&repo).status().unwrap().success());
+
+    let run = case.run_in(&repo, &["顺手改一下 README", "--id", "wt-warn", "--worktree", "dsh/wt-warn"]);
+    assert!(
+        run.stderr.contains("worktree 里的 git 命令会全部失败"),
+        "派工时没有警告：stderr={}",
+        run.stderr
+    );
 }
 
 #[test]

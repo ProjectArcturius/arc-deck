@@ -244,6 +244,18 @@ async fn cmd_run(argv: &[String]) -> CmdResult {
         let (wt, base) = ensure_worktree(&cfg, &workspace, branch, &task_id)?;
         workspace = wt;
         git_base.get_or_insert(base);
+        // worktree 里的 `.git` 是个**指向主仓**的指针文件，而主仓在 workspace 之外。
+        // 沙箱不是 danger-full-access 时，worktree 里的 git 命令一律失败。
+        // 实测（Arch，2026-10-14）：`git status --short` 与 `git log --oneline -1`
+        // 都返回 128，整轮以「验收未通过 accept-1（退出 128）」收场，白烧 8342 输入 token。
+        // 这件事在派工的那一秒就能说清，不该让工人跑完才知道。
+        if cfg.worker.sandbox != "danger-full-access" {
+            eprintln!(
+                "arcdeck: 警告 —— worker.sandbox = `{}` 时 worktree 里的 git 命令会全部失败\
+                 （worktree 的 `.git` 指向主仓，主仓在沙箱外）。要提交请设成 danger-full-access",
+                cfg.worker.sandbox
+            );
+        }
     }
 
     // 状态目录：同一个 ID 不重跑，除非 --rerun（旧目录改名留档，不删）。

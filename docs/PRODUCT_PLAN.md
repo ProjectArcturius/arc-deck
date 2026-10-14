@@ -567,6 +567,20 @@ fix-filter  failed   done     验收 filter-regression 退出 101 · commits 2 �
 | `nohup … &`，日志在 `.oc/logs/` | `--detach`；`state_root` 可配到 `.oc/state/` |
 | 收尾打印 `git log main..HEAD` / `git status --porcelain` | 回报里「Arc Deck 采集的事实」 |
 
+**`--worktree` 必须配 `sandbox = danger-full-access`，否则派工时会警告。**
+worktree 里的 `.git` 是个**指向主仓**的指针文件，而主仓在 workspace 之外 —— 沙箱不是
+`danger-full-access` 时，worktree 里的 git 命令一律失败。**实测**（Arch，2026-10-14，真实模型）：
+
+```
+git status --short / git log --oneline -1  →  退出码 128
+整轮 34 秒、8342 输入 token，以「验收未通过 accept-1（退出 128）」收场，commits 0
+```
+
+同一件活改成 `danger-full-access` 之后：真提交 `132627b docs: append hello to README`、
+验收 `git log --oneline -1` 通过、`report` 里的 git 事实取自 git 而不是模型自报。
+所以这件事在**派工那一秒**就能说清，不该让工人跑完才知道 —— `arcdeck run --worktree`
+在沙箱不是 `danger-full-access` 时会往 stderr 打一条明确警告。
+
 **任务书**：Ether 的 Markdown 任务书（TASK_TEMPLATE 的五段）原样作为 `instruction`；机读字段从命令行给（`--id`、`--accept`、`--worktree`），或在 JSON 任务书里用新增的可选字段 `instruction_file` 指向 Markdown。
 **不解析 Markdown 的「验证」段来猜验收命令** —— 猜错就是假通过；验收命令由调度者显式给。
 
