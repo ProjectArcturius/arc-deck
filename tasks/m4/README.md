@@ -56,13 +56,15 @@ arcdeck report <id>           # 终态后：Arc Deck 采集的事实 vs 模型�
 
 - `--permission full` 是 `--worktree` 的硬要求（worktree 的 `.git` 指向主仓，非 full 时里面每条 git 命令返回 128）。
 - 模型用用户配置的默认值（`opencode-go/deepseek-v4.1-flash`）；不要换。
+- **大文件都在 D 盘**（2026-10-14 起，C 盘已满）：用户配置 `worktree.dir = D:/arcdeck/wt/{task_id}`，`env.TEMP/TMP = D:\arcdeck\tmp`；
+  主仓构建输出由**本机未入库**的 `.cargo/config.toml` 指到 `D:/arcdeck/target-main`。换机器时这三处按那台机器的磁盘重配。
 - 改了 arcdeck 自身的代码后，**先重编 release 并装到 `~/.cargo/bin` 再派工**（拿旧二进制派工，测的是旧代码）。
 
 ## 四、收工（每一件都要做，顺序不能省）
 
 1. `arcdeck report <id>`：先看「Arc Deck 采集的事实」（验收结果、改动文件），再看「模型的陈述」（**不是证据**）。
-2. **自己复跑验收**：在 `../.arcdeck/wt/<id>` 里把任务书的验收命令原样跑一遍。
-3. **读 diff**（`git -C ../.arcdeck/wt/<id> status` / `diff`，新文件直接读）。重点看：
+2. **自己复跑验收**：在 `D:/arcdeck/wt/<id>` 里把任务书的验收命令原样跑一遍。
+3. **读 diff**（`git -C D:/arcdeck/wt/<id> status` / `diff`，新文件直接读）。重点看：
    - 是否越出任务书允许的文件范围；
    - 有没有为了让测试过而改弱断言、删测试、`#[ignore]` 掉失败的测试；
    - 有没有编数据（演示数字、硬编码的模型档位）；
@@ -76,13 +78,13 @@ arcdeck report <id>           # 终态后：Arc Deck 采集的事实 vs 模型�
    而分支已在原 worktree 里检出，`git worktree add` 会失败。`--rerun` 把旧的运行记录挪到一边（`arcdeck report` 只看新的这次）。
 4. 在工人分支上提交（Conventional Commits，正文中文，写清**来源**：任务 id、模型、用时、步数，以及审阅者），然后：
    ```bash
-   git -C ../.arcdeck/wt/<id> add -A && git -C ../.arcdeck/wt/<id> commit -F <消息文件>
+   git -C D:/arcdeck/wt/<id> add -A && git -C D:/arcdeck/wt/<id> commit -F <消息文件>
    git cherry-pick <那个提交>              # 在主仓 main 上
    ```
    冲突时以 main 上已合并的接口为准改工人的代码，**改完重跑全量离线套件**。
 5. 主仓全量离线套件：
    `cargo test -p arc-deck-core -p arc-deck-dsh -p arc-deck-cli -p arc-deck-tui --features arc-deck-cli/test-runtime --offline`
-6. 清理：`git worktree remove --force ../.arcdeck/wt/<id>`（每个 worktree 的构建目录约 0.4–1 GB）；分支保留。
+6. 清理：`git worktree remove --force D:/arcdeck/wt/<id>`（每个 worktree 的构建目录约 0.4–1 GB）；分支保留。
 7. 更新 `docs/M4_PLAN.md` 的状态行（填提交号）。
 8. **不推送**。推送等用户明确指示。
 
@@ -95,5 +97,5 @@ arcdeck report <id>           # 终态后：Arc Deck 采集的事实 vs 模型�
 | `$(arcdeck run --detach)` 一直不返回 | 已修（b227176），同一根因的另一半 |
 | 工人「完成」但功能没生效 | 拿旧 release 二进制在跑；或改动没被编进去（AGENTS U16 同类） |
 | `completed` 但验收没跑 | 没带 `--accept`。永远带 |
-| 多个工人同时「心跳停了 / dead」，events 末尾是 `ENOSPC` | **C 盘写满**（2026-10-14 实测：456 GB 盘只剩 0.35 GB，3 件同时死）。每个 worktree 的构建目录 0.4–1 GB、主仓 `target/` 约 3 GB。**派工前看剩余空间，按每件 1.5 GB 留余量**；不够就少派几件、先 `cargo clean` 主仓、收完的 worktree 及时删。死掉的工人进度还在 worktree 里：写 `<id>-resume.md`（模板见 `w1-markdown-resume.md`），同 id + `--rerun` 续做 |
+| 多个工人同时「心跳停了 / dead」，events 末尾是 `ENOSPC` | **C 盘写满**（2026-10-14 实测：456 GB 盘只剩 0.35 GB，3 件同时死）。每个 worktree 的构建目录 0.4–1 GB、主仓 `target/` 约 3 GB。**派工前看剩余空间（现在是 D 盘），按每件 1.5 GB 留余量**；不够就少派几件、先 `cargo clean` 主仓、收完的 worktree 及时删。死掉的工人进度还在 worktree 里：写 `<id>-resume.md`（模板见 `w1-markdown-resume.md`），同 id + `--rerun` 续做 |
 | live / quota 测试 | `remote_live_*`、`m3_live_*`、`tui_live_*` 起真实运行时但不发 prompt（零配额）；`remote_quota_*` 会发一条极短消息（用户允许少量 flash） |
