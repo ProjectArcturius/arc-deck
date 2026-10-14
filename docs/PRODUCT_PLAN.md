@@ -11,7 +11,7 @@
 | 编号 | 决定 | 依据 |
 |---|---|---|
 | D1 | **当前焦点只有 Rust 后端，且其中只有 headless 可用这一件事。** 目的是尽快接进 Ether 的工人流程；TUI 排在 headless 之后，两个桌面 GUI 不在焦点内 | 用户 2026-10-14 |
-| D2 | **一个可执行文件 `arcdeck`**：在工作目录直接运行 `arcdeck`（无参数）进入 TUI；带子命令进入 headless（§6.0）。TUI 落地前，无参数运行给出明确提示并退出，不假装有界面 | 用户 2026-10-14 |
+| D2 | **一个可执行文件 `arcdeck`**：在工作目录直接运行 `arcdeck`（无参数）进入 TUI；带子命令进入 headless（§6.0）。TUI 落地前，无参数运行给出明确提示并退出，不假装有界面。**headless 本身分两条**：不给任务书、不带工人参数时是**一般模式**（与 `opencode run "…"` 同类，stdout 是给人看的回答）；带了工人那套参数才是**工人模式**。Arc Deck 不是一个工地，只是一个带工人优化方案的 agent | 用户 2026-10-14 |
 | D3 | **headless 的主用法是 Ether 的「工人任务书」**：调度者派一件任务、之后只靠 shell 上的一行状态判断「做完 / 在跑 / 卡死 / 出错」，不读长日志（§6.5–6.6） | 用户 2026-10-14；Ether `docs/DISPATCHER.md`、`tools/dispatch/dsh-runner.sh` |
 | D4 | **底层只用 DSH 一个内核**，非 DS 模型走 DSH 的 pi-ai 路由。调查结论：DSH 的优势一半 DS 专属（协议与缓存）、一半 provider 中立（loop 工程），后者对非 DS 适用；按用户规则「若有则全部 DSH」。OpenCode / Claude Code 只作 TUI、Agent、工具定义的设计参考 | [DSH_FINDINGS.md](DSH_FINDINGS.md) |
 | D5 | **DSH 的 DS 优势只在官方路由上成立**：worker 默认 `deepseek-official`；第三方网关上 DSH 同样出过 DSML 泄漏 | DSH_FINDINGS §1.4 |
@@ -220,6 +220,7 @@ Build/Plan 借鉴的是角色与行为，不将 OpenCode 的 provider、工具�
 ```text
 arcdeck                                   当前目录进 TUI（M4 前：打印「TUI 尚未实现」与 headless 用法，退出 64）
 arcdeck run <任务书> [选项]                前台执行一件任务；stdout 是 JSONL 协议，退出码 = 终态（§6.3）
+arcdeck run "<要对模型说的话>" [选项]       一般模式：不给任务书、不带工人参数；stdout 是给人看的回答
 arcdeck run <任务书> --detach [选项]       分离执行：等到工人接住（写出状态）才返回；接不住就报出原因
 arcdeck status [<id>…|--all] [--json]     每件任务一行；单件时退出码编码状态（§6.5）
 arcdeck wait <id> [--timeout <时长>]      阻塞到终态或超时，打印一行；退出码同 status
@@ -231,8 +232,24 @@ arcdeck worker run --config … --task …    M1 的底层入口，保留为 `ru
 ```
 
 `run` 的常用选项：`--config <路径>`、`--workspace <路径>`（缺省 = 当前目录）、`--id <任务ID>`
-（缺省取任务书文件名）、`--accept <命令>`（可重复，追加 `command` 类验收）、`--preamble <文件>`、
-`--worktree <分支>`（§6.6）、`--model <provider/model>`、`--timeout <时长>`。
+（缺省取任务书文件名）、`--by <谁>`（§6.2）、`--accept <命令>`（可重复，追加 `command` 类验收）、`--preamble <文件>`、
+`--worktree <分支>`（§6.6）、`--model <provider/model>`、`--timeout <时长>`、`--format <jsonl|text>`。
+
+**一般模式与工人模式（2026-10-14 定型）。** 判据是**工人参数**，不是「参数是不是文件」：
+
+| | 触发 | stdout | 工人守则 | 验收 |
+|---|---|---|---|---|
+| **一般模式** | 位置参数是一句话，且没有 `--accept` / `--worktree` / `--git-base` / `--by` / `--preamble` | 给人看的回答（`--format text`） | 不带 | 无 |
+| **工人模式** | 位置参数是任务书（已存在的文件，或 `-`），或出现上面任一工人参数 | 控制面 JSONL | 带上 | 按任务书 |
+
+**Arc Deck 不是一个工地** —— 它只是一个带工人优化方案的 agent（用户 2026-10-14）。
+所以不给任务书、不带工人参数时，它的行为与 `opencode run "…"` 同类：问一句、答一句。
+**两种模式都落状态目录、都写 `result.json`** —— 外部监控程序一视同仁，不必分两套读取。
+一般模式的缺省任务 ID 是 `run-<毫秒>`（每次唯一）：同一句话问两遍不该被
+「重复 task_id 不重跑」拒掉，那条规则是给工人任务用的。
+
+位置参数看着像路径（无空白、以 `.md`/`.json` 结尾或含分隔符）却不存在时**明确拒绝**，
+不把它当成一句话发给模型 —— 那多半是任务书路径打错了，静默改语义会得到一个莫名其妙的回答。
 
 **启动配置的查找顺序**：`--config` → `$ARCDECK_CONFIG` → 用户配置目录下的 `arcdeck/worker.json`。**永远不从 workspace 里找配置** —— 任务书和工作区文件不得扩大启动时授权（§5.3）。找不到就退出 64，
 不用内置默认值顶上。

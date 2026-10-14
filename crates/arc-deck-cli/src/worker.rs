@@ -68,6 +68,8 @@ struct Prepared {
     /// 派工关系的边与节点标签：只在 `status.json` 里落一次，不改任何判定。
     assigned_by: Option<String>,
     title: Option<String>,
+    /// stdout 的呈现方式：工人模式是 JSONL，一般模式给人看的文本。
+    format: crate::report::SinkFormat,
 }
 
 /// 运行时的启动参数。
@@ -94,6 +96,13 @@ pub async fn run(args: WorkerArgs) -> i32 {
 }
 
 fn prepare(args: &WorkerArgs) -> Result<Prepared, SpecError> {
+    // 先解析呈现方式：参数错了要在动任何状态之前拒绝。
+    let format = crate::report::SinkFormat::parse(&args.format).ok_or_else(|| {
+        SpecError::new(
+            code::CONFIG_INVALID,
+            format!("--format 只支持 jsonl 与 text，得到 `{}`", args.format),
+        )
+    })?;
     let config = WorkerConfig::load(&args.config)?;
     let (task, task_label) = load_task(&args.task)?;
 
@@ -153,6 +162,7 @@ fn prepare(args: &WorkerArgs) -> Result<Prepared, SpecError> {
         task_label,
         assigned_by,
         title,
+        format,
     })
 }
 
@@ -341,7 +351,7 @@ fn first_command(plan: &ExecutionPlan) -> Option<String> {
 async fn execute(prepared: Prepared) -> i32 {
     let task_id = prepared.plan.task_id.clone();
     let run_dir = prepared.run_dir.clone();
-    let mut sink = EventSink::new(&task_id, Some(run_dir.join("events.jsonl")));
+    let mut sink = EventSink::new(&task_id, Some(run_dir.join("events.jsonl")), prepared.format);
     let mut projection = Projection::new();
     let mut watcher = CancelWatcher::new(prepared.cancel_file.clone(), &task_id);
     let liveness = prepared.config.liveness.clone();
@@ -1468,6 +1478,17 @@ fn finish(
 
     let _ = sink.state(WorkerState::Terminal, &format!("终态 {}", result.status.as_str()));
     let _ = sink.result(&result);
+    if sink.format().is_text() {
+        // 一般模式：stdout 是给人看的回答。正文在这里一次性打出来 ——
+        // 事件流里没有逐 token 通道（§6.3），所以只能收尾时给全文。
+        println!("{}", result.summary.trim());
+        // 失败时给一行原因，别让退出码成为唯一的线索。
+        if result.status != TaskStatus::Completed {
+            if let Some(b) = result.blockers.first() {
+                eprintln!("{}: {}", b.code, status::clip(&b.message, 200));
+            }
+        }
+    }
     // 状态文件最后一个写：读者看到 terminal 时，result.json 一定已经在了。
     if result.status != TaskStatus::Completed {
         if let Some(b) = result.blockers.first() {

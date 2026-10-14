@@ -457,6 +457,142 @@ fn structured_error_fields_drive_the_classification() {
     assert_eq!(status["last_error"]["retryable"], false, "余额不足重派不会好");
 }
 
+// ── `run`：派工的生产路径 ────────────────────────────────────────────────
+//
+// `worker run` 是 M1 的底层入口，而 `run` 才是调度者真正用的那条（它负责物化配置、
+// 建 worktree、决定一般模式还是工人模式）。所以它必须有自己的端到端覆盖。
+//
+// 接假内核靠 `ARCDECK_FIXTURE_SCENARIO` —— 那是 `test-runtime` 构建里唯一的出口
+// （`cmd_run` 里 cfg 门控），发布构建编译不出它。
+
+struct RunCase {
+    dir: tempfile::TempDir,
+    config: PathBuf,
+    workspace: PathBuf,
+}
+
+impl RunCase {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().expect("建临时目录");
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let config = dir.path().join("arcdeck.json");
+        std::fs::write(
+            &config,
+            serde_json::to_string_pretty(&json!({
+                "model": "opencode-go/deepseek-v4.1-flash",
+                "state_root": dir.path().join("state").display().to_string()
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        Self { dir, config, workspace }
+    }
+
+    fn state(&self) -> PathBuf {
+        self.dir.path().join("state")
+    }
+
+    fn run(&self, extra: &[&str]) -> Run {
+        let mut command = Command::new(binary());
+        command.env("ARCDECK_FIXTURE_SCENARIO", "success").arg("run");
+        for arg in extra {
+            command.arg(arg);
+        }
+        let output = command
+            .arg("--config")
+            .arg(&self.config)
+            .arg("--workspace")
+            .arg(&self.workspace)
+            .output()
+            .expect("run");
+        Run {
+            code: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        }
+    }
+}
+
+/// 没有工人参数 = 一般模式：stdout 是**给人看的回答**，不是控制面协议。
+/// 但状态照落 —— 监控程序对一般模式与工人模式一视同仁（用户 2026-10-14）。
+#[test]
+fn plain_mode_answers_in_text_and_still_records_state() {
+    let case = RunCase::new();
+    let run = case.run(&["解释一下这段报错"]);
+    assert_eq!(run.code, 0, "stderr={}", run.stderr);
+    assert!(run.stdout.contains("离线完成"), "stdout={}", run.stdout);
+    assert!(
+        !run.stdout.contains("\"schema_version\""),
+        "一般模式的 stdout 不该是 JSONL：{}",
+        run.stdout
+    );
+
+    // 状态面必须齐全：谁派的没有（那是一般模式）、干什么有（标题就是那句话）、
+    // 终态有。
+    let runs = case.state().join("runs");
+    let entry = std::fs::read_dir(&runs)
+        .expect("状态目录里要有这次运行")
+        .flatten()
+        .find(|e| e.file_name().to_string_lossy().starts_with("run-"))
+        .expect("缺省 ID 形如 run-<毫秒>");
+    let status: Value =
+        serde_json::from_str(&std::fs::read_to_string(entry.path().join("status.json")).unwrap())
+            .unwrap();
+    assert_eq!(status["state"], "completed");
+    assert_eq!(status["title"], "解释一下这段报错");
+    assert!(status["assigned_by"].is_null(), "一般模式没有派工者");
+
+    let task: Value =
+        serde_json::from_str(&std::fs::read_to_string(entry.path().join("task.json")).unwrap())
+            .unwrap();
+    assert_eq!(task["instruction"], "解释一下这段报错", "位置参数就是指令原文");
+}
+
+/// 出现工人参数就切回工人模式：stdout 是控制面 JSONL，`--accept` 真的进了任务书。
+#[test]
+fn worker_flags_switch_back_to_the_jsonl_control_plane() {
+    let case = RunCase::new();
+    let run = case.run(&["修一下筛选", "--id", "w1", "--by", "sol", "--accept", "cargo test x"]);
+    assert_eq!(run.code, 0, "stderr={}", run.stderr);
+    assert!(run.stdout.contains("\"type\":\"result\""), "stdout={}", run.stdout);
+
+    let status: Value = serde_json::from_str(
+        &std::fs::read_to_string(case.state().join("runs/w1/status.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(status["assigned_by"], "sol");
+    assert_eq!(status["title"], "修一下筛选");
+    assert_eq!(status["terminal"], true);
+}
+
+/// 看着像路径却不存在 —— 明确拒绝，而不是把这串字符当问题发给模型。
+#[test]
+fn a_missing_task_book_path_is_refused_instead_of_sent_as_a_prompt() {
+    let case = RunCase::new();
+    let run = case.run(&["notes.md"]);
+    assert_eq!(run.code, 64, "stdout={} stderr={}", run.stdout, run.stderr);
+    assert!(run.stderr.contains("找不到任务书"), "stderr={}", run.stderr);
+    assert_eq!(run.stdout.trim(), "", "拒绝时不该有半句回答");
+}
+
+/// 派工握手在**成功**路径上也要成立：工人接住了才算派工成功。
+#[test]
+fn detached_run_against_a_working_fixture_reaches_completed() {
+    let case = RunCase::new();
+    let run = case.run(&["另一件活儿", "--id", "d1", "--by", "claude", "--detach"]);
+    assert_eq!(run.code, 0, "stderr={}", run.stderr);
+    assert!(run.stdout.contains("started"), "stdout={}", run.stdout);
+
+    // 握手返回时状态文件已经在了 —— 这正是它对「分离不等于成功」的保证。
+    let status: Value = serde_json::from_str(
+        &std::fs::read_to_string(case.state().join("runs/d1/status.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(status["assigned_by"], "claude");
+    assert!(status["state"].is_string());
+}
+
 #[test]
 fn blocked_turn_reports_blocked() {
     let case = Case::new("blocked", no_acceptance(), json!({}));

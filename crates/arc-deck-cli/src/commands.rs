@@ -171,27 +171,66 @@ async fn cmd_run(argv: &[String]) -> CmdResult {
     let flags = Flags::parse(
         argv,
         &["--config", "--workspace", "--id", "--accept", "--preamble", "--worktree", "--git-base",
-          "--model", "--timeout", "--agent", "--state-root", "--by"],
+          "--model", "--timeout", "--agent", "--state-root", "--by", "--format"],
         &["--detach", "--rerun"],
     )?;
     let [task_arg] = flags.positional.as_slice() else {
         return Err(SpecError::new(
             code::CONFIG_INVALID,
-            "用法：arcdeck run <任务书.md|任务书.json|-> [--detach] [--id ID] [--by 派工者] [--worktree 分支] [--accept 命令]…",
+            "用法：arcdeck run <任务书.md|.json|-> 或 arcdeck run \"<要对模型说的话>\" [--detach] [--id ID] [--by 派工者] [--worktree 分支] [--accept 命令]…",
         ));
     };
     let (cfg, cfg_path) = UserConfig::locate_and_load(flags.one("--config").map(Path::new))?;
     let root = flags.one("--state-root").map(PathBuf::from).unwrap_or_else(|| cfg.state_root());
 
-    // 任务书：Markdown 原样作为指令；JSON 走 M1 的任务书 v1。
-    let (instruction, json_task, default_id) = load_task_source(task_arg)?;
-    let task_id = match flags.one("--id") {
+    // ── 一般模式 vs 工人模式 ───────────────────────────────────────────────
+    //
+    // 判据是**工人参数**，不是「参数是不是文件」：没有工人参数时，位置参数就是
+    // 要对模型说的话（和 `opencode run "…"` 一样），stdout 换成给人看的回答。
+    // **Arc Deck 不是一个工地** —— 它只是一个带工人优化方案的 agent（用户 2026-10-14）。
+    //
+    // 两种模式都落状态目录、都写 result.json：监控程序一视同仁，不必分两套。
+    let worker_flags = !flags.all("--accept").is_empty()
+        || flags.one("--worktree").is_some()
+        || flags.one("--git-base").is_some()
+        || flags.one("--by").is_some()
+        || flags.one("--preamble").is_some();
+    let is_task_book = task_arg == "-" || Path::new(task_arg).is_file();
+    let (instruction, json_task, default_id) = if is_task_book {
+        load_task_source(task_arg)?
+    } else {
+        // 看着像路径却不存在，多半是任务书路径打错了。当成一句话发出去会得到一个
+        // 莫名其妙的回答，所以这里明确拒绝，而不是替用户猜。
+        if !task_arg.contains(char::is_whitespace)
+            && (task_arg.ends_with(".md")
+                || task_arg.ends_with(".json")
+                || task_arg.contains('/')
+                || task_arg.contains('\\'))
+        {
+            return Err(SpecError::new(
+                code::TASK_UNREADABLE,
+                format!("找不到任务书 `{task_arg}`。要把这句当指令原文用，请写成一个句子；要指文件请核对路径"),
+            ));
+        }
+        (task_arg.to_string(), None, String::new())
+    };
+    let worker_mode = is_task_book || worker_flags;
+
+    let mut task_id = match flags.one("--id") {
         Some(id) => sanitize_id(id),
         None => json_task.as_ref().map(|t| t.task_id.clone()).unwrap_or(default_id),
     };
     if task_id.is_empty() {
-        return Err(SpecError::new(code::TASK_INVALID, "取不到任务 ID；用 --id 指定"));
+        // 位置参数是一句话（不是任务书）且没给 `--id`。缺省 ID 必须**每次唯一** ——
+        // 同一句话问两遍、或同一句话派两件活儿，不该被「重复 task_id 不重跑」拒掉。
+        // （任务书那条路不会走到这里：Markdown 取文件名，JSON 的 `task_id` 是必填。）
+        task_id = format!("run-{}", status::now_ms());
     }
+    // stdout 的呈现方式：工人模式是控制面 JSONL，一般模式是给人看的文本。
+    let format = flags
+        .one("--format")
+        .map(str::to_string)
+        .unwrap_or_else(|| if worker_mode { "jsonl".into() } else { "text".into() });
 
     // workspace 与 worktree。
     let mut workspace = match (flags.one("--workspace"), &json_task) {
@@ -210,14 +249,7 @@ async fn cmd_run(argv: &[String]) -> CmdResult {
     let dir = run_dir(&root, &task_id);
     prepare_run_dir(&dir, &task_id, flags.has("--rerun"))?;
 
-    // 路由与密钥位置。
-    let model = flags.one("--model").unwrap_or(&cfg.model).to_string();
-    let route = provider::resolve(&model, &cfg.provider, &task_id)?;
-    let route_spec = route.to_spec()?;
-    let layout = RuntimeLayout::new(cfg.runtime_dir(), cfg.dsh_version());
-    layout.check().map_err(|m| SpecError::new(code::RUNTIME_ENTRY_MISSING, m))?;
-
-    // 内置 Agent 定义写进状态目录。
+    // 内置 Agent 定义与提示词写进状态目录（顺带留档：这次运行用的是哪一版）。
     let agents_dir = dir.join("agents");
     let prompts_dir = dir.join("prompts");
     for (d, files) in [(&agents_dir, EMBEDDED_AGENTS), (&prompts_dir, EMBEDDED_PROMPTS)] {
@@ -231,7 +263,12 @@ async fn cmd_run(argv: &[String]) -> CmdResult {
         Some(t) => parse_duration(t)?,
         None => json_task.as_ref().and_then(|t| t.timeout_seconds).unwrap_or(cfg.worker.timeout_seconds),
     };
-    let preamble = flags.one("--preamble").map(|p| absolute(Path::new(p))).or(cfg.worker.preamble.clone());
+    // 工人守则只在工人模式下带上：一般模式是普通 agent，不是工地。
+    let preamble = if worker_mode {
+        flags.one("--preamble").map(|p| absolute(Path::new(p))).or(cfg.worker.preamble.clone())
+    } else {
+        None
+    };
 
     let mut env = BTreeMap::new();
     for (k, v) in &cfg.env {
@@ -243,25 +280,55 @@ async fn cmd_run(argv: &[String]) -> CmdResult {
         );
     }
 
+    // ── 运行时与路由 ─────────────────────────────────────────────────────
+    //
+    // 测试专用出口：`run` 这条路上没有别的办法接假内核（物化的配置写死了 dsh-sdk），
+    // 而它**正是派工的生产路径** —— 没有端到端覆盖就等于没人真走过。
+    // 与隐藏子命令同一套纪律：只在 `test-runtime` 构建里存在，发布构建编译不出它。
+    #[cfg(feature = "test-runtime")]
+    let fixture_scenario = std::env::var("ARCDECK_FIXTURE_SCENARIO")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    #[cfg(not(feature = "test-runtime"))]
+    let fixture_scenario: Option<String> = None;
+
+    let (runtime_spec, model_route, model_label) = match fixture_scenario {
+        // 假内核不碰模型，路由与密钥一律不需要。
+        Some(scenario) => (
+            RuntimeSpec::FixtureSdk { entry: None, scenario: Some(scenario) },
+            None,
+            "（假内核）".to_string(),
+        ),
+        None => {
+            let model = flags.one("--model").unwrap_or(&cfg.model).to_string();
+            let route = provider::resolve(&model, &cfg.provider, &task_id)?;
+            let route_spec = route.to_spec()?;
+            let layout = RuntimeLayout::new(cfg.runtime_dir(), cfg.dsh_version());
+            layout.check().map_err(|m| SpecError::new(code::RUNTIME_ENTRY_MISSING, m))?;
+            // 路由只解析一次：启动配置里写一份，派工失败时写进状态面一份，两边逐字相同。
+            let spec = RuntimeSpec::DshSdk {
+                node: cfg.runtime.node.clone().unwrap_or_else(|| PathBuf::from("node")),
+                entry: layout.entry(),
+                version: cfg.dsh_version(),
+                profile: "sdk".into(),
+                route: Some(route_spec),
+                sandbox: cfg.worker.sandbox.clone(),
+                session_log_upload: cfg.runtime.session_log_upload,
+                preamble,
+            };
+            let route = Some(ModelRoute {
+                provider: route.dsh_provider.clone(),
+                model: route.model.clone(),
+                reasoning_effort: cfg.reasoning_effort.clone(),
+            });
+            (spec, route, model)
+        }
+    };
+
     let profile = if cfg.worker.sandbox == "read-only" { "workspace-readonly" } else { "workspace-development" };
-    // 路由只解析一次：启动配置里写一份，派工失败时写进状态面一份，两边必须逐字相同。
-    let model_route = Some(ModelRoute {
-        provider: route.dsh_provider.clone(),
-        model: route.model.clone(),
-        reasoning_effort: cfg.reasoning_effort.clone(),
-    });
     let config = WorkerConfig {
         schema_version: SCHEMA_VERSION,
-        runtime: RuntimeSpec::DshSdk {
-            node: cfg.runtime.node.clone().unwrap_or_else(|| PathBuf::from("node")),
-            entry: layout.entry(),
-            version: cfg.dsh_version(),
-            profile: "sdk".into(),
-            route: Some(route_spec),
-            sandbox: cfg.worker.sandbox.clone(),
-            session_log_upload: cfg.runtime.session_log_upload,
-            preamble,
-        },
+        runtime: runtime_spec,
         state_root: root.clone(),
         authorization: Authorization {
             workspace: workspace.clone(),
@@ -334,7 +401,7 @@ async fn cmd_run(argv: &[String]) -> CmdResult {
     let mut task_value = serde_json::to_value(&task).unwrap_or_default();
     task_value["workspace"] = serde_json::json!(workspace.display().to_string());
     write_json(&task_path, &task_value)?;
-    eprintln!("arcdeck: 配置 {} · 模型 {model} · workspace {}", cfg_path.display(), workspace.display());
+    eprintln!("arcdeck: 配置 {} · 模型 {model_label} · workspace {}", cfg_path.display(), workspace.display());
 
     let cancel = dir.join("cancel.json");
     if flags.has("--detach") {
@@ -345,13 +412,14 @@ async fn cmd_run(argv: &[String]) -> CmdResult {
             model: model_route.as_ref().map(|m| format!("{}/{}", m.provider, m.model)),
             assigned_by: task.assigned_by.clone(),
             title: status::derive_title(&task.instruction),
+            format: format.clone(),
         };
         return spawn_detached(&dir, &config_path, &task_path, &cancel, &facts);
     }
     let args = WorkerArgs {
         config: config_path,
         task: TaskSource::File(task_path),
-        format: "jsonl".into(),
+        format,
         result: None,
         cancel_file: Some(cancel),
     };
@@ -472,6 +540,8 @@ struct DispatchFacts {
     model: Option<String>,
     assigned_by: Option<String>,
     title: Option<String>,
+    /// 分离出去的子进程也要用同一种呈现方式，否则 `--detach` 会把它换回 JSONL。
+    format: String,
 }
 
 /// 派工握手的等待上限。工人写出 `status.json` 通常只要几十毫秒（预检全是本地
@@ -490,6 +560,8 @@ fn spawn_detached(dir: &Path, config: &Path, task: &Path, cancel: &Path, facts: 
         .arg(task)
         .arg("--cancel-file")
         .arg(cancel)
+        .arg("--format")
+        .arg(&facts.format)
         .stdin(std::process::Stdio::null())
         .stdout(out)
         .stderr(err);

@@ -39,6 +39,7 @@ arcdeck report <id>          # 终态后：Arc Deck 采集的事实与模型的�
 ```
 
 - **`--by` 记的是派工关系的边，不是授权。** 它落成 `status.json` 里的 `assigned_by`，供外部监控程序（`cute-agents-monitor`）画任务书流向。缺席就是没记，不改变任何判定。上两层不是 Arc Deck 任务，所以它是自由文本（`claude` / `sol`），不是任务 id。
+- **一般模式**：`arcdeck run "问句话"` 就是普通 agent —— 没有任务书、不带工人参数时 stdout 是给人看的回答，不是 JSONL。**Arc Deck 不是一个工地**，工人那套（任务书、验收、工人守则、worktree）只在你带上那些参数时才生效。两种模式都落状态目录，监控程序一视同仁。
 - **总是带 `--accept`。** 没有验收命令时 `completed` 只表示内核正常结束 —— §10.2b 里实测出现过「提交被拒但 completed」。
 - Ether 侧的派工脚本抄 `examples/ether/ad.sh`。
 

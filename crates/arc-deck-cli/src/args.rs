@@ -74,7 +74,7 @@ status / wait 的退出码：
 选项：
   --config <路径>       必需的启动配置（授权上限、运行时、状态目录）
   --task <路径|->       任务书；`-` 表示从 stdin 读一份 JSON
-  --format <jsonl>      事件输出格式，当前只支持 jsonl（默认 jsonl）
+  --format <jsonl|text> 事件输出格式（缺省 jsonl）。text = 一般模式：stdout 给人看
   --result <路径>       把最终结果同时写到这里（完整写入后发布）
   --cancel-file <路径>  观察该文件请求取消；启动时必须不存在
 
@@ -177,10 +177,10 @@ fn parse_worker(rest: &[String]) -> SpecResult<Command> {
         i += 1;
     }
 
-    if format != "jsonl" {
+    if crate::report::SinkFormat::parse(&format).is_none() {
         return Err(SpecError::new(
             code::CONFIG_INVALID,
-            format!("--format 只支持 jsonl，得到 `{format}`"),
+            format!("--format 只支持 jsonl 与 text，得到 `{format}`"),
         ));
     }
 
