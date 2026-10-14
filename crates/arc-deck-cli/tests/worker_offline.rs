@@ -329,14 +329,51 @@ fn failure_turn_reports_failed_and_surfaces_the_model_failure_exit() {
     let result = run.result();
     assert_eq!(result["status"], "failed");
     let blockers = result["blockers"].as_array().cloned().unwrap_or_default();
-    // 模型失败的唯一出口是 finish.reason.failure.message，必须出现在结果里。
+    // 模型失败的唯一出口是 finish.reason.failure.message，必须出现在结果里；
+    // 而且要被归成一个可判定的码 —— `supported API model names` 是路由/模型名错，
+    // 调度者据此知道「改配置，别重派」，不必去读英文原文。
     assert!(
         blockers
             .iter()
-            .any(|b| b["code"] == "MODEL_FAILURE"
+            .any(|b| b["code"] == "MODEL_ROUTE"
                 && b["message"].as_str().unwrap_or("").contains("deepseek-official")),
-        "没有把模型失败原文报出来：{blockers:?}"
+        "没有把模型失败原文与它的分类报出来：{blockers:?}"
     );
+
+    // 同一件事在状态面上也要能一眼看出来：码 + 能不能靠重派解决。
+    let status: Value = serde_json::from_str(
+        &std::fs::read_to_string(case.dir.path().join("state/runs/t1/status.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(status["last_error"]["code"], "MODEL_ROUTE");
+    assert_eq!(status["last_error"]["retryable"], false, "模型名错重派无用");
+}
+
+#[test]
+fn failing_acceptance_carries_a_decidable_reason() {
+    // 工人正常收工、验收命令却以非零退出 —— 这是最常见的一种「做完了但没做对」。
+    // 没有这条 blocker 的话，状态面上只有一个 `failed`，调度者得回去读 result.json。
+    let case = Case::new("failing-acceptance", command_acceptance(), json!({}));
+    let run = case.run();
+    assert_eq!(run.code, 1, "stderr={}", run.stderr);
+    let result = run.result();
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["verification"][0]["outcome"], "failed");
+    assert_eq!(result["verification"][0]["exit_code"], 101);
+
+    let blockers = result["blockers"].as_array().cloned().unwrap_or_default();
+    assert!(
+        blockers.iter().any(|b| b["code"] == "ACCEPTANCE_FAILED"
+            && b["message"].as_str().unwrap_or("").contains("check")),
+        "验收失败没有给出可判定的原因：{blockers:?}"
+    );
+
+    let status: Value = serde_json::from_str(
+        &std::fs::read_to_string(case.dir.path().join("state/runs/t1/status.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(status["last_error"]["code"], "ACCEPTANCE_FAILED");
+    assert_eq!(status["last_error"]["retryable"], false, "同一份活儿原样再派一次还是不过");
 }
 
 #[test]

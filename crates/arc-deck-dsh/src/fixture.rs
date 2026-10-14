@@ -44,6 +44,9 @@ pub enum Scenario {
     Hang,
     /// 同 `Hang`，用于取消。
     Cancel,
+    /// 正常收工，但验收命令非零退出 —— 验证「验收失败」在状态面上是一条
+    /// 可判定的原因，而不是只有一个 `failed`。
+    FailingAcceptance,
 }
 
 impl Scenario {
@@ -57,6 +60,7 @@ impl Scenario {
         "split-utf8",
         "hang",
         "cancel",
+        "failing-acceptance",
     ];
 
     pub fn parse(raw: &str) -> Option<Self> {
@@ -70,6 +74,7 @@ impl Scenario {
             "split-utf8" => Scenario::SplitUtf8,
             "hang" => Scenario::Hang,
             "cancel" => Scenario::Cancel,
+            "failing-acceptance" => Scenario::FailingAcceptance,
             _ => return None,
         })
     }
@@ -85,6 +90,7 @@ impl Scenario {
             Scenario::SplitUtf8 => "split-utf8",
             Scenario::Hang => "hang",
             Scenario::Cancel => "cancel",
+            Scenario::FailingAcceptance => "failing-acceptance",
         }
     }
 }
@@ -264,6 +270,25 @@ where
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
             // 走到这里说明没人管它；仍然不发 terminal。
+        }
+        Scenario::FailingAcceptance => {
+            send_event!(writer, seq, json!({"type":"turn/start","turn":1}));
+            if let Some(command) = fixture_command() {
+                let arguments =
+                    json!({"command": command, "cwd": ".", "timeout_ms": 120000}).to_string();
+                send_event!(writer, seq, json!({"type":"tool/call","turn":1,"step":1,
+                    "callId":"fixture-call-1","name":"shell","arguments":arguments}));
+                // `meta.exitCode` 与正文里的 `[exit code: N]` 都给上：前者是夹具的
+                // 造法，后者是真实 DSH shell 工具的形状，两边都要走得通。
+                send_event!(writer, seq, json!({"type":"tool/result","turn":1,"step":1,
+                    "callId":"fixture-call-1",
+                    "message":{"isError":false,"content":[{"type":"text","text":"夹具命令输出\n[exit code: 101]"}]},
+                    "meta":{"exitCode":101}}));
+            }
+            send_event!(writer, seq, json!({"type":"assistant/message","turn":1,"step":1,
+                "message":{"content":[{"type":"text","text":"我以为做完了"}]},
+                "usage":{"promptTokens":11,"completionTokens":2,"totalTokens":13}}));
+            send_event!(writer, seq, json!({"type":"turn/end","turn":1,"reason":{"kind":"completed"}}));
         }
     }
 }

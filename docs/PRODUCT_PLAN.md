@@ -372,7 +372,7 @@ Ether 现在的 runner 脚本（`tools/dispatch/dsh-runner.sh`、`runner.sh`）�
 - `started_at`；`heartbeat_at`（监工还活着）；`progress_at`（最后一次来自 DSH 的**实质**事件：模型输出块、工具开始或结束）
 - `activity`：`{kind: model|tool|verify|idle, name, summary（≤80 字）, since}` —— 此刻在做什么
 - `counters`：`steps`、`tool_calls`、`tool_errors`、`commits`（worktree 上 `main..HEAD` 的提交数）
-- `attempt`、`max_attempts`、`last_error: {code, message（≤200 字）}`
+- `attempt`、`max_attempts`、`last_error: {code, message（≤200 字）, retryable}` —— `retryable` 见 §6.5.6
 - `usage`：provider 实际报告的输入 / 缓存命中 / 输出 token；没有就不写
 - `limits`：`{heartbeat_s, model_idle_s, tool_grace_s}` —— 判定用的阈值跟着文件写出，读者不必去猜配置
 
@@ -426,6 +426,37 @@ fix-filter  failed   done     验收 filter-regression 退出 101 · commits 2 �
   - **模型的陈述**：摘要、未完成 / 不确定、范围外发现 —— 取自最终消息里的固定小节（Ether 工人守则第 10 条的四节）；缺小节标「模型未给出」，不报错。
 - 缺省输出控制在约 2 KB；长内容只给路径（完整最终消息、diff、工具输出）。
 - 回报让「要不要细看」变便宜，**不替代审查**：调度者仍按 Ether DISPATCHER §四 自己看 diff 与截图。
+
+#### 6.5.6 失败原因：可判定的码，不用回去翻日志
+
+调度者要的回答是「要不要再派一次」，不是一段英文。所以每条终态失败都带一个稳定的
+**原因码**与一个 `retryable`：
+
+| 码 | 意思 | retryable |
+|---|---|---|
+| `MODEL_ROUTE` | 模型名/路由不被接受（如实测原文 `supported API model names…`） | false |
+| `MODEL_QUOTA_EXHAUSTED` | 额度/余额用尽 | false |
+| `MODEL_AUTH` | 401/403、密钥无效 | false |
+| `MODEL_RATE_LIMITED` | 429/529、限流 | **true** |
+| `MODEL_NETWORK` | 连接/代理/DNS 类 | **true** |
+| `MODEL_CONTEXT_LENGTH` | 上下文超限 | false |
+| `MODEL_FAILURE` | 认不出的兜底 | false |
+| `ACCEPTANCE_FAILED` / `ACCEPTANCE_UNFINISHED` | 验收没过 / 没执行 | false |
+| `TOOL_CALL_AS_TEXT`、`STALLED`、`RUNTIME_EXITED`… | 见 §6.5.4 | 前两者按 §6.5.4 处理 |
+
+- 模型侧的原文只从一条通道出来（`finish.reason.failure`，参 AGENTS.md P3），归成上表；
+  **原文永远保留在 `message` 里** —— 标签可能认错，原文不会。
+- 验收失败也必须有码。没有它，一条验收不过的任务在状态面上只有一个 `failed`，
+  调度者还得回去读 `result.json` 才知道是哪一条命令、退出码多少。
+- `retryable` 是给调度者的**建议**，不是自动动作：Arc Deck 不会因为它去重试
+  （§6.5.4 的重试只针对卡死与 DSML 泄漏）。判定表在 `arc-deck-core::failure`。
+- **认不出就保守**：`MODEL_FAILURE` 且 `retryable = false`。分类错成「不可重派」只是多
+  看一眼；错成「可重派」会白烧一次配额 —— 两边代价不对称，所以往保守那边倒。
+
+**这张表是尽力而为，不是规范。** 上游没有给错误分类，provider 的措辞也不保证稳定；
+它的输入目前只有 `finish.reason.failure` 这一条通道。其它失败形状（例如网络断在运行时
+自身、或网关在握手阶段就拒绝）**没有真实样本，尚未分类** —— 认得出的一律是子串匹配，
+认不出的一律落到兜底。要收紧这张表，得先攒真实原文。
 
 ### 6.6 Ether 接入
 
@@ -755,6 +786,7 @@ M1 交付的离线覆盖（每一项都有对应测试）：成功 / 内核失�
 | worker 缺省工具组合（`sdk` 完整工具集 vs `sdk-minimal` RL 两工具） | 未测 | M2d E2 |
 | 非 DS 模型是否需要第二内核 | 按 D4 不建；未测 | M2d E3；DSH 明显更差才重新讨论 |
 | headless 的缺省阈值（心跳 15 s、模型空闲 300 s、续跑 3 次） | 初值，来自 DSH 默认值与 Ether runner 经验 | M2c 用真实批次校准，改了写明依据 |
+| 失败分类表（§6.5.6） | 按子串匹配写，输入只有 `finish.reason.failure` 一条通道；**限流/额度/网络的真实原文没攒到**，只有路由错有实测原文 | M2c/M2d 攒真实失败原文后收紧；在此之前认不出的一律落兜底且不可重派 |
 | TUI 基线取「v1」的哪一支 | 已按 `v1.19.0:packages/tui/src` 记录（§7.1），待确认 | 该检出里「v1」有三种含义（TS TUI / Go TUI / 配置 v1）。若用户指的是 Go TUI，需要重新评估；确认后把基线提交号钉进 §3.1 |
 | v1 TUI 的移植量 | 187 个 TSX 文件，**未评估工时** | M4 开工前先做一次组件清单与工作量评估，把结论报出来；移植量不可接受时由用户决定降级方案 |
 | OpenCode 视觉迁移的满意度 | 目标已明确，效果未验证 | M4 提供同终端对照，由用户判断视觉；不先要求设计另一套主题 |

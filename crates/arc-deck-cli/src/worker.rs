@@ -771,7 +771,11 @@ fn conclude(
         );
     }
     if !projection.failures.is_empty() {
-        result.blocker("MODEL_FAILURE", projection.failures.join(" / "));
+        // 归成一个可判定的码：调度者要的回答是「要不要再派一次」，不是一段英文。
+        // 原文照旧带在 message 里 —— 标签可能认错，原文不会（参 core::failure）。
+        let text = projection.failures.join(" / ");
+        let class = arc_deck_core::failure::classify_model_failure(&text);
+        result.blocker(class.code, text);
     }
     if prepared.plan.acceptance.is_empty() {
         result.unverified.push(
@@ -800,7 +804,15 @@ fn conclude(
                 TaskStatus::Unknown
             }
             Some(end) => match end.kind.as_str() {
-                "completed" => result.derive_status_from_verification(),
+                "completed" => {
+                    // 验收的结论也留一条 blocker：没有它，一条验收失败的任务在
+                    // 状态面上只有 `failed` 一个词、`last_error` 是空的，调度者
+                    // 还得回去读 result.json 才知道是哪条命令没过。
+                    if let Some((code, message)) = acceptance_blocker(&result.verification) {
+                        result.blocker(code, message);
+                    }
+                    result.derive_status_from_verification()
+                }
                 "blocked" => {
                     result.blocker(
                         "TURN_BLOCKED",
@@ -1314,6 +1326,38 @@ fn build_verification(
             },
         })
         .collect()
+}
+
+/// 验收没全过时留一条可判定的 blocker（PRODUCT_PLAN §6.3、§6.5.5）。
+///
+/// 为什么必须有：`derive_status_from_verification` 只给终态、不写原因 —— 一条
+/// 验收失败的任务在 `status.json` 里只有 `failed` 一个词、`last_error` 是空的，
+/// 调度者得回去读 `result.json` 才知道是哪条命令、退出码多少。那正是「不要回去
+/// 找日志」要消掉的一步。
+///
+/// 顺序与 `derive_status_from_verification` 一致：先 failed，再 pending/not-run。
+fn acceptance_blocker(verification: &[VerificationRecord]) -> Option<(&'static str, String)> {
+    let describe = |record: &VerificationRecord| match record.exit_code {
+        Some(code) => format!("{}（退出 {code}）", record.id),
+        None => record.id.clone(),
+    };
+    let failed: Vec<String> = verification
+        .iter()
+        .filter(|v| v.outcome == VerificationOutcome::Failed)
+        .map(describe)
+        .collect();
+    if !failed.is_empty() {
+        return Some(("ACCEPTANCE_FAILED", format!("验收未通过：{}", failed.join("、"))));
+    }
+    let unfinished: Vec<String> = verification
+        .iter()
+        .filter(|v| matches!(v.outcome, VerificationOutcome::Pending | VerificationOutcome::NotRun))
+        .map(describe)
+        .collect();
+    if !unfinished.is_empty() {
+        return Some(("ACCEPTANCE_UNFINISHED", format!("验收没执行或还在等人工：{}", unfinished.join("、"))));
+    }
+    None
 }
 
 /// M1 的命令匹配规则：把空白折叠后，整串相等，**或者某个 shell 片段相等**。

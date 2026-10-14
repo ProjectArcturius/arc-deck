@@ -14,6 +14,7 @@ pub mod authz;
 pub mod config;
 pub mod error;
 pub mod event;
+pub mod failure;
 pub mod mode;
 pub mod paths;
 pub mod provider;

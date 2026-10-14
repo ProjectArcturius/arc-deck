@@ -50,6 +50,12 @@ pub struct Limits {
 pub struct LastError {
     pub code: String,
     pub message: String,
+    /// 能不能靠「再派一次」解决（调度者的下一个决定）。缺席 = false。
+    ///
+    /// 是给调度者的**建议**，不是自动动作：Arc Deck 自己不会因为它去重试。
+    /// 判定表在 [`arc_deck_core::failure::retryable`]。
+    #[serde(default)]
+    pub retryable: bool,
 }
 
 /// `status.json`。
@@ -162,7 +168,11 @@ impl StatusWriter {
     }
 
     pub fn error(&mut self, code: &str, message: &str) {
-        self.status.last_error = Some(LastError { code: code.into(), message: clip(message, 200) });
+        self.status.last_error = Some(LastError {
+            code: code.into(),
+            message: clip(message, 200),
+            retryable: arc_deck_core::failure::retryable(code),
+        });
         self.dirty = true;
     }
 
@@ -353,7 +363,11 @@ pub fn write_preflight_failure(run_dir: &Path, failure: PreflightFailure) -> boo
         // 0 次：一次都没真正跑起来。`report` 里的「运行 N 次」要如实反映这一点。
         attempt: 0,
         max_attempts: 1,
-        last_error: Some(LastError { code: failure.code, message: clip(&failure.message, 200) }),
+        last_error: Some(LastError {
+            code: failure.code.clone(),
+            message: clip(&failure.message, 200),
+            retryable: arc_deck_core::failure::retryable(&failure.code),
+        }),
         usage: None,
         limits: Limits { heartbeat_s: 15, model_idle_s: 300, tool_stall_s: 1800 },
     };
@@ -426,7 +440,6 @@ mod tests {
             limits: Limits { heartbeat_s: 15, model_idle_s: 600, tool_stall_s: 1800 },
         }
     }
-
     const NOW: u64 = 10_000_000_000;
 
     #[test]
