@@ -181,6 +181,27 @@ Build/Plan 借鉴的是角色与行为，不将 OpenCode 的 provider、工具�
 
 保留 DSH 基础指导、真实工具说明及上下文管理，再组合 Arc Deck 工程规则、Agent 行为、模式、Echo 风格、工作区指令与任务。策略高于提示词；项目文件与任务文字不得扩大启动时授权。
 
+#### 5.3.1 装什么进 system prompt：三档（2026-10-14 定型）
+
+用户裁定：「**人格特性生效于非 workers 场景，并且是用户开启个性化设置的情况下启用；
+否则不记录、不调用、不修改，直接按模型供应商本体特性行事**」。
+
+| 档位 | 什么时候 | 装什么 |
+|---|---|---|
+| `worker` | 工人模式 | 工程纪律 + 角色 + 模式行为。**不带风格** |
+| `personalized` | 一般模式 + `personalization.enabled` | 上面这些 **+ 风格** |
+| `bare` | 一般模式 + 个性化关（**缺省**） | **一段都不加** |
+
+- 档位由 `cmd_run` 判定，写进物化的启动配置（`WorkerConfig.prompt_scope`），
+  由 worker 在组装时读 —— 装配点只有一个。
+- `bare` 是**空集**，不是「加得少」：这是「按供应商本体行事」的可判定形式，
+  调用方据此写出空的 `personaSuffix`。
+- 为什么工人不带风格：工人交出去的是结果与证据，风格不影响它们，而每一段提示词
+  都要花掉上下文。工人那层是**功能契约**，不是人格。
+- 判据与边界（哪些属于个性化、哪些属于宪法）见 `prompts/constitution.md`。
+- **宪法尚未接进装配**：`prompts/constitution.md` 目前只是文档，不产生任何行为。
+  接通它要等它的正文定稿。
+
 - Echo 文本进入真正的 system prompt/persona 配置，不能仅塞进普通 user message 然后宣称导入完成。
 - 使用 DSH profile/preset 与必要的 scoped 插件；SDK wire 没有 Agent/preset/tools 参数，worker 必须在启动前完成部署配置。
 - DSH 自带 Plan 是协作状态，不是只读保证；不得不经适配直接要求 headless 调用其人工评审工具。worker 的 Plan 结果由主控接受，只有新的明确 Build 任务才实施。
@@ -241,6 +262,9 @@ arcdeck worker run --config … --task …    M1 的底层入口，保留为 `ru
 |---|---|---|---|---|
 | **一般模式** | 位置参数是一句话，且没有 `--accept` / `--worktree` / `--git-base` / `--by` / `--preamble` | 给人看的回答（`--format text`） | 不带 | 无 |
 | **工人模式** | 位置参数是任务书（已存在的文件，或 `-`），或出现上面任一工人参数 | 控制面 JSONL | 带上 | 按任务书 |
+
+一般模式下**装不装 Arc Deck 的人格**由 `personalization.enabled` 决定，**缺省关**：
+关的时候一段都不注入，按供应商本体行事（§5.3.1）。
 
 **Arc Deck 不是一个工地** —— 它只是一个带工人优化方案的 agent（用户 2026-10-14）。
 所以不给任务书、不带工人参数时，它的行为与 `opencode run "…"` 同类：问一句、答一句。
