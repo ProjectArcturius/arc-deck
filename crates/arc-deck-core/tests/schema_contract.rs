@@ -35,6 +35,25 @@ fn read_example(name: &str) -> String {
         .unwrap_or_else(|e| panic!("读不到契约示例 {}：{e}", path.display()))
 }
 
+/// 契约示例里的路径是照 Windows 写的（`C:/work/project`）—— 那份文件要钉住的
+/// 是**字段名与形状**，路径取值只是为了让示例像一份真配置。
+///
+/// 但 `C:/…` 在非 Windows 上**不是**绝对路径（`Path::is_absolute()` 为 false），
+/// 于是 `resolve_against` 把它拼在基准目录后面，得到
+/// `C:/work/project/C:/work/project`，再被 `TASK_INVALID` / `CONFIG_INVALID`
+/// 拒掉 —— 干净克隆到 Linux 上跑测试就是挂在这里。
+///
+/// 所以这里把盘符换成平台自己的根。**改的是测试的输入，不是 `schemas/` 下的示例**：
+/// 示例仍保持它本来的 Windows 形状，改动只发生在两个平台上都能解析的那一侧。
+fn platformize(raw: &str) -> String {
+    if cfg!(windows) { raw.to_string() } else { raw.replace("C:/", "/") }
+}
+
+/// 与 [`platformize`] 同一件事，用在传给 `parse` 的基准目录上。
+fn example_base(path: &str) -> PathBuf {
+    PathBuf::from(platformize(path))
+}
+
 /// 重新序列化后与原值语义相等。
 fn assert_round_trip<T>(original: &Value, value: &T, what: &str)
 where
@@ -56,9 +75,9 @@ fn normalize(value: &Value) -> Value {
 
 #[test]
 fn task_example_matches_the_task_spec() {
-    let raw = read_example("task.example.json");
+    let raw = platformize(&read_example("task.example.json"));
     let original: Value = serde_json::from_str(&raw).unwrap();
-    let task = TaskSpec::parse(&raw, Path::new("C:/work/project")).unwrap();
+    let task = TaskSpec::parse(&raw, &example_base("C:/work/project")).unwrap();
 
     assert_eq!(task.schema_version, 1);
     assert_eq!(task.task_id, "fix-session-filter");
@@ -77,9 +96,9 @@ fn task_example_matches_the_task_spec() {
 
 #[test]
 fn config_example_matches_the_worker_config() {
-    let raw = read_example("config.example.json");
+    let raw = platformize(&read_example("config.example.json"));
     let original: Value = serde_json::from_str(&raw).unwrap();
-    let config = WorkerConfig::parse(&raw, Path::new("C:/arc-deck")).unwrap();
+    let config = WorkerConfig::parse(&raw, &example_base("C:/arc-deck")).unwrap();
 
     assert_eq!(config.authorization.profile, "workspace-readonly");
     assert_eq!(config.authorization.allowed_agents.len(), 3);
@@ -132,8 +151,8 @@ fn event_example_matches_the_event_envelope() {
 
 #[test]
 fn example_task_parses_across_every_acceptance_shape() {
-    let raw = read_example("task.example.json");
-    let task = TaskSpec::parse(&raw, Path::new("C:/work/project")).unwrap();
+    let raw = platformize(&read_example("task.example.json"));
+    let task = TaskSpec::parse(&raw, &example_base("C:/work/project")).unwrap();
     match &task.acceptance[0] {
         Acceptance::Command { id, .. } => assert_eq!(id, "filter-regression"),
         other => panic!("第一项应该是 command：{other:?}"),
