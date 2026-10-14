@@ -1,0 +1,20 @@
+[package]
+name = "arc-deck-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Arc Deck terminal interface"
+
+[dependencies]
+arc-deck-core = { path = "../arc-deck-core" }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
+crossterm = "0.29"
+unicode-width = "0.2"
+unicode-segmentation = "1"
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

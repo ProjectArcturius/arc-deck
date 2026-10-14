@@ -3,10 +3,11 @@
 #   crates/arc-deck-core  Rust 共用产品模型（任务/配置/结果/事件/Agent/授权）
 #   crates/arc-deck-dsh   DSH 适配与假 SDK 对端
 #   crates/arc-deck-cli   headless worker 命令
+#   crates/arc-deck-tui   终端呈现（由同一个 arcdeck 的无参数入口启动）
 #   kanesumi/             早期自绘 GUI（已暂停新增功能，见 docs/PRODUCT_PLAN.md §4.2）
 #   uwp/                  Windows GUI（C# + WinUI 2，MSBuild 管，不在本 workspace）
 #
-# 跨 crate 依赖方向：core → dsh → cli，反向不允许（参 PRODUCT_PLAN §4.1）。
+# 跨 crate 依赖方向：core → dsh → cli、core → tui → cli；呈现层不自建 DSH 客户端。
 
 [workspace]
 resolver = "2"
@@ -14,6 +15,7 @@ members = [
     "crates/arc-deck-core",
     "crates/arc-deck-dsh",
     "crates/arc-deck-cli",
+    "crates/arc-deck-tui",
     "kanesumi/crates/arc-deck-shell",
     "kanesumi/probes/ime-probe",
     "kanesumi/probes/layout-bench",

@@ -22,7 +22,7 @@ pub enum Command {
     /// 高层命令（run / status / wait / report / logs / cancel / usage / ls / auth / runtime / config），
     /// 原样转给 `commands.rs` 自己解析。
     Ops(Vec<String>),
-    /// 无参数：交互界面。TUI 落地前只打印提示（PRODUCT_PLAN §6.0）。
+    /// 无参数：交互界面。
     Tui,
     /// 隐藏子命令：把自己作为假 SDK 对端启动。只在 `test-runtime` 下可达。
     FixtureSdk { scenario: String },
@@ -43,7 +43,7 @@ pub struct WorkerArgs {
 pub const USAGE: &str = "\
 arcdeck —— Arc Deck（DSH 之上的编码 Agent）
 
-  arcdeck                               当前目录进 TUI（尚未实现）
+  arcdeck                               当前目录进 TUI（独立运行、历史、工具进度、取消）
   arcdeck run <任务书.md|.json|-> [选项] 执行一件任务（前台：stdout 是 JSONL，退出码 = 终态）
       --detach                          分离运行；等工人接住（写出状态）才返回，接不住就报出原因
       --prompt <原文|->                 明确作为指令；- 从 stdin 读文本（不按任务书解析）

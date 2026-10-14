@@ -612,6 +612,16 @@ fn conflicting_literal_and_task_inputs_are_rejected_without_running() {
     assert!(!case.state().join("runs").exists());
 }
 
+#[test]
+fn no_arguments_without_a_terminal_reports_the_headless_alternative() {
+    let case = RunCase::new();
+    let output = Command::new(binary()).env("ARCDECK_CONFIG", &case.config)
+        .current_dir(&case.workspace).output().unwrap();
+    assert_eq!(output.status.code(), Some(64));
+    assert!(String::from_utf8(output.stderr).unwrap().contains("交互终端"));
+    assert!(!case.state().join("runs").exists());
+}
+
 /// 出现工人参数就切回工人模式：stdout 是控制面 JSONL，`--accept` 真的进了任务书。
 #[test]
 fn worker_flags_switch_back_to_the_jsonl_control_plane() {
