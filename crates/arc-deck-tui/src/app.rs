@@ -7,7 +7,10 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKin
 use crate::catalog::{self, ModelPrefs, ModelRef};
 use crate::model_dialog::{self, EffortDialogState, ModelDialogState, ProviderDialogState};
 use crate::{
-    Boot, Preferences, Request, RunDetail, RunRecord, StartRequest, Update, editor::Editor,
+    Boot, Preferences, Request, RunDetail, RunRecord, StartRequest, Update,
+    editor::Editor,
+    theme::{DEFAULT_THEME, Theme},
+    theme_dialog::{ThemeDialog, ThemeDialogAction},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +23,7 @@ pub(crate) enum Action {
     Tools,
     Latest,
     Theme,
+    Mode,
     Cancel,
     Usage,
     Evidence,
@@ -72,6 +76,11 @@ pub(crate) const COMMANDS: &[Command] = &[
     Command {
         action: Action::Theme,
         slash: "/theme",
+        label: "选择主题",
+    },
+    Command {
+        action: Action::Mode,
+        slash: "/mode",
         label: "切换深 / 浅色",
     },
     Command {
@@ -106,11 +115,16 @@ pub(crate) enum Dialog {
     Models(ModelDialogState),
     Providers(ProviderDialogState),
     Efforts(EffortDialogState),
+    Theme,
 }
 
 pub(crate) struct App {
     pub boot: Boot,
     pub preferences: Preferences,
+    /// Resolved theme tokens. Re-resolved only when the theme name or mode changes, never per
+    /// frame: `Theme::load` parses and resolves the whole document, and the draw path runs on
+    /// every keystroke.
+    pub theme: Theme,
     pub editor: Editor,
     pub runs: Vec<RunRecord>,
     pub selected: Option<String>,
@@ -125,6 +139,8 @@ pub(crate) struct App {
     /// 收藏 / 最近 / effort 改过就置位；退出时按它决定要不要落盘。
     pub model_prefs_dirty: bool,
     pub dialog: Option<Dialog>,
+    /// Non-`None` while the theme picker is open; it owns that dialog's filter and cursor.
+    pub theme_dialog: Option<ThemeDialog>,
     pub filter: String,
     pub choice: usize,
     pub leader: bool,
@@ -139,6 +155,7 @@ pub(crate) struct App {
 
 impl App {
     pub fn new(boot: Boot, preferences: Preferences, model_prefs: ModelPrefs) -> Self {
+        let (theme, theme_notice) = resolve_theme(&preferences);
         // 配置里的路由就是启动时的当前模型。解析不出来（配置缺失或被改坏）时留空 ——
         // 界面此时显示「未配置」，而不是编一条路由出来。
         let model = boot.model.as_deref().and_then(catalog::parse_route);
@@ -146,14 +163,17 @@ impl App {
             .as_ref()
             .and_then(|model| model_prefs.effort(model).map(str::to_string))
             .or_else(|| boot.effort.clone());
+        let notice = boot
+            .config_error
+            .clone()
+            .or(theme_notice)
+            .unwrap_or_else(|| "每次提交是独立请求；多轮会话正在接入".into());
         Self {
-            notice: boot
-                .config_error
-                .clone()
-                .unwrap_or_else(|| "每次提交是独立请求；多轮会话正在接入".into()),
+            notice,
             effort,
             boot,
             preferences,
+            theme,
             editor: Editor::default(),
             runs: Vec::new(),
             selected: None,
@@ -165,6 +185,7 @@ impl App {
             model_prefs,
             model_prefs_dirty: false,
             dialog: None,
+            theme_dialog: None,
             filter: String::new(),
             choice: 0,
             leader: false,
@@ -176,6 +197,30 @@ impl App {
             serial: 0,
         }
     }
+
+    /// Re-resolves from preferences. Used by `/mode` and at startup; previews go through
+    /// `preview_theme` instead so they do not silently persist.
+    pub fn apply_preferences_theme(&mut self) {
+        self.theme = Theme::load(self.preferences.theme_name(), self.preferences.mode())
+            .unwrap_or_else(|_| Theme::fallback(self.preferences.mode()));
+        self.dirty = true;
+    }
+
+    /// Live preview while the picker is open. Writes the preference in memory but never to
+    /// disk before the dialog is confirmed — `main` persists once, on exit.
+    pub fn preview_theme(&mut self, name: &str) {
+        if self.preferences.theme.as_deref() == Some(name) && self.theme.name == name {
+            return;
+        }
+        self.preferences.theme = Some(name.to_string());
+        self.apply_preferences_theme();
+    }
+
+    pub fn commit_theme(&mut self, name: &str) {
+        self.preview_theme(name);
+        self.notice = format!("主题：{}（已保存）", self.theme.name);
+    }
+
     pub fn update(&mut self, update: Update) {
         match update {
             Update::Runs(runs) if self.runs != runs => {
@@ -227,9 +272,14 @@ impl App {
             .collect()
     }
     pub fn open_dialog(&mut self, dialog: Dialog) {
+        // `Dialog` 带着模型对话框的状态，不是 Copy：先记下是不是主题选择器再移进去。
+        let is_theme = dialog == Dialog::Theme;
         self.dialog = Some(dialog);
         self.filter.clear();
         self.choice = 0;
+        // The picker snapshots the current theme on open so Esc can put it back; a stale
+        // snapshot from a previous open would restore the wrong theme.
+        self.theme_dialog = is_theme.then(|| ThemeDialog::open(self));
     }
     /// 换一个对话框但**保留搜索框**：模型 → provider → 限定的模型列表这条路
     /// 来回走的时候，用户刚打进去的过滤串不该每次都被清掉。
@@ -245,6 +295,9 @@ impl App {
             Some(Dialog::Models(state)) => self.model_rows(*state).len(),
             Some(Dialog::Providers(_)) => self.provider_rows().len(),
             Some(Dialog::Efforts(_)) => self.effort_count(),
+            // The theme picker keeps its own cursor; this only has to be non-zero so the
+            // generic `Up`/`Down` branch cannot clamp it away before the dialog sees the key.
+            Some(Dialog::Theme) => 1,
             None => 0,
         }
     }
@@ -359,7 +412,12 @@ impl App {
                 }
             }
             Action::Latest => self.scroll = None,
-            Action::Theme => self.preferences.light = !self.preferences.light,
+            Action::Theme => self.open_dialog(Dialog::Theme),
+            Action::Mode => {
+                self.preferences.light = !self.preferences.light;
+                self.apply_preferences_theme();
+                self.notice = format!("界面模式：{}", self.preferences.mode().as_str());
+            }
             Action::Cancel => {
                 if let Some(id) = self
                     .selected
@@ -554,6 +612,9 @@ impl App {
                 }
             }
             Some(Dialog::Efforts(state)) => self.select_effort(&state),
+            // Enter inside the picker is handled by `ThemeDialog::confirm` before this runs;
+            // reaching here means the dialog was already settled.
+            Some(Dialog::Theme) => {}
             None => {}
         }
         false
@@ -628,14 +689,27 @@ impl App {
             Event::Paste(text) => {
                 if self.dialog.is_none() {
                     self.editor.insert(&text);
+                } else if self.theme_dialog.is_some() {
+                    // A pasted theme name filters the list the same way typing does. Newlines
+                    // are dropped rather than kept: the filter is a single-line field, and a
+                    // pasted multi-line blob would otherwise match nothing.
+                    let filter = format!("{}{}", self.theme_dialog_filter(), text.replace('\n', ""));
+                    self.set_theme_dialog_filter(filter);
                 }
                 return false;
             }
             Event::Mouse(mouse) => {
-                match mouse.kind {
-                    MouseEventKind::ScrollUp => self.scroll_up(3),
-                    MouseEventKind::ScrollDown => self.scroll_down(3),
-                    _ => {}
+                let delta = match mouse.kind {
+                    MouseEventKind::ScrollUp => -3,
+                    MouseEventKind::ScrollDown => 3,
+                    _ => return false,
+                };
+                if self.theme_dialog.is_some() {
+                    self.move_theme_dialog(delta);
+                } else if delta < 0 {
+                    self.scroll_up(3);
+                } else {
+                    self.scroll_down(3);
                 }
                 return false;
             }
@@ -657,6 +731,11 @@ impl App {
                 return false;
             }
             if self.dialog.take().is_some() {
+                if let Some(dialog) = self.theme_dialog.take() {
+                    // Upstream restores the opening theme in `onCleanup` unless Enter confirmed.
+                    let action = dialog.restore();
+                    self.apply_theme_dialog_action(action);
+                }
                 return false;
             }
             if self.selected_is_running() || self.active.is_some() {
@@ -667,6 +746,24 @@ impl App {
             return false;
         }
         if self.dialog.is_some() {
+            if self.theme_dialog.is_some() {
+                match key.code {
+                    KeyCode::Enter => {
+                        let action = self.theme_dialog.as_mut().and_then(|dialog| dialog.confirm());
+                        self.theme_dialog = None;
+                        self.dialog = None;
+                        self.apply_theme_dialog_action(action);
+                        return false;
+                    }
+                    _ => {
+                        let action = self.theme_dialog.as_mut().and_then(|dialog| dialog.key(key.code, ctrl));
+                        if let Some(action) = action {
+                            self.apply_theme_dialog_action(Some(action));
+                            return false;
+                        }
+                    }
+                }
+            }
             // 对话框上下文的键位先判：Ctrl+F / Ctrl+A 只在模型对话框里有意义，
             // 与同名会话级绑定不冲突（§7.4：冲突按上下文解析，不能全局覆盖）。
             if ctrl && key.code == KeyCode::Char('f') {
@@ -711,6 +808,7 @@ impl App {
                 KeyCode::Char('a') => Some(Action::Agents),
                 KeyCode::Char('m') => Some(Action::Models),
                 KeyCode::Char('b') => Some(Action::Sidebar),
+                KeyCode::Char('t') => Some(Action::Theme),
                 _ => None,
             };
             if let Some(action) = action {
@@ -775,6 +873,38 @@ impl App {
         } else {
             Some(next)
         };
+    }
+    fn theme_dialog_filter(&self) -> String {
+        self.theme_dialog.as_ref().map(|dialog| dialog.filter().to_string()).unwrap_or_default()
+    }
+    fn set_theme_dialog_filter(&mut self, filter: String) {
+        let action = self.theme_dialog.as_mut().map(|dialog| dialog.set_filter(filter));
+        self.apply_theme_dialog_action(action);
+    }
+    fn move_theme_dialog(&mut self, delta: isize) {
+        let action = self.theme_dialog.as_mut().map(|dialog| dialog.move_by(delta));
+        self.apply_theme_dialog_action(action);
+    }
+    fn apply_theme_dialog_action(&mut self, action: Option<ThemeDialogAction>) {
+        match action {
+            Some(ThemeDialogAction::Preview(name)) => self.preview_theme(&name),
+            Some(ThemeDialogAction::Commit(name)) => self.commit_theme(&name),
+            None => {}
+        }
+    }
+}
+
+/// Resolves the saved preference, falling back to the default theme in the requested mode.
+/// An unknown theme name is a warning, not a startup failure: `tui-preferences.json` is a file
+/// a user can edit by hand, and a typo must not stop the TUI from opening.
+fn resolve_theme(preferences: &Preferences) -> (Theme, Option<String>) {
+    let mode = preferences.mode();
+    match Theme::load(preferences.theme_name(), mode) {
+        Ok(theme) => (theme, None),
+        Err(error) => (
+            Theme::fallback(mode),
+            Some(format!("{error}；已回退到默认主题 {DEFAULT_THEME}")),
+        ),
     }
 }
 
@@ -1329,5 +1459,148 @@ mod tests {
         }
         assert!(rx.try_recv().is_err());
         assert_eq!(app.editor.text, "第一行\n第二行\n\n/exit\n");
+    }
+
+    fn with_theme(theme: Option<&str>, light: bool) -> App {
+        App::new(
+            Boot {
+                workspace: ".".into(),
+                model: None,
+                effort: None,
+                config_error: None,
+                preferences: "unused".into(),
+                catalog: Vec::new(),
+                model_prefs: "unused".into(),
+            },
+            Preferences { light, theme: theme.map(str::to_string), ..Preferences::default() },
+            crate::catalog::ModelPrefs::default(),
+        )
+    }
+
+    /// `tui-preferences.json` shipped with only `light` and `sidebar`. `#[serde(default)]` is
+    /// what keeps that file readable after `theme` was added; without it the whole file fails to
+    /// parse and every preference silently resets.
+    #[test]
+    fn an_older_preferences_file_still_loads() {
+        let old: Preferences = serde_json::from_str(r#"{"light":true,"sidebar":false}"#).unwrap();
+        assert!(old.light);
+        assert!(!old.sidebar);
+        assert_eq!(old.theme, None, "an absent theme means `never chosen`");
+        assert_eq!(old.theme_name(), DEFAULT_THEME);
+        assert_eq!(old.mode(), crate::theme::Mode::Light);
+
+        // And the fields the picker writes round-trip.
+        let text = serde_json::to_string(&Preferences {
+            light: true,
+            sidebar: false,
+            theme: Some("nord".into()),
+        })
+        .unwrap();
+        let back: Preferences = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.theme_name(), "nord");
+    }
+
+    /// A name that is not in the registry is a warning, not a startup failure:
+    /// `tui-preferences.json` is hand-editable, and a typo there must not stop the TUI opening.
+    #[test]
+    fn an_unknown_theme_name_falls_back_instead_of_failing_to_start() {
+        for name in ["", "Nope", "opencode-v1", "一"] {
+            let app = with_theme(Some(name), false);
+            assert_eq!(app.theme.name, DEFAULT_THEME, "{name:?} should have fallen back");
+            assert!(app.notice.contains(DEFAULT_THEME), "the notice should say what it used");
+        }
+        // The invalid name is kept as written so the warning repeats rather than the typo being
+        // rewritten to the default behind the user's back.
+        let app = with_theme(Some("Nope"), false);
+        assert_eq!(app.preferences.theme.as_deref(), Some("Nope"));
+    }
+
+    /// `/theme` now opens the picker and `/mode` owns the dark/light toggle. Both are in
+    /// `COMMANDS`, which is the single source the slash parser and the command palette share.
+    #[test]
+    fn the_mode_toggle_moved_to_slash_mode() {
+        let theme = COMMANDS.iter().find(|command| command.action == Action::Theme).unwrap();
+        assert_eq!(theme.slash, "/theme");
+        let mode = COMMANDS.iter().find(|command| command.action == Action::Mode).unwrap();
+        assert_eq!(mode.slash, "/mode");
+        let mut slashes: Vec<&str> = COMMANDS.iter().map(|command| command.slash).collect();
+        let count = slashes.len();
+        slashes.sort_unstable();
+        slashes.dedup();
+        assert_eq!(slashes.len(), count, "two commands share a slash");
+
+        let mut app = app();
+        let (tx, _rx) = mpsc::channel();
+        assert_eq!(app.theme.mode, crate::theme::Mode::Dark);
+        app.editor.insert("/mode");
+        app.input(key(KeyCode::F(6)), &tx);
+        assert!(app.preferences.light);
+        assert_eq!(app.theme.mode, crate::theme::Mode::Light);
+        assert!(app.notice.contains("light"), "the notice should name the mode: {}", app.notice);
+    }
+
+    /// `onMove` previews live and `onCleanup` restores unless Enter confirmed. The preview is a
+    /// real theme change through the same code path the rest of the UI uses, so it has to be
+    /// visible on `App::theme` and reversible by Esc.
+    #[test]
+    fn the_picker_previews_live_and_esc_puts_the_theme_back() {
+        let mut app = app();
+        let (tx, _rx) = mpsc::channel();
+        let initial = app.theme.name.clone();
+        app.editor.insert("/theme");
+        app.input(key(KeyCode::F(6)), &tx);
+        assert_eq!(app.dialog, Some(Dialog::Theme));
+        assert!(app.theme_dialog.is_some());
+
+        app.input(key(KeyCode::Down), &tx);
+        let previewed = app.theme.name.clone();
+        assert_ne!(previewed, initial, "↓ must preview without an Enter");
+        assert_eq!(app.preferences.theme.as_deref(), Some(previewed.as_str()));
+
+        app.input(key(KeyCode::Esc), &tx);
+        assert_eq!(app.theme.name, initial, "Esc must restore the theme that was open");
+        assert_eq!(app.preferences.theme.as_deref(), Some(initial.as_str()));
+        assert_eq!(app.dialog, None);
+        assert!(app.theme_dialog.is_none());
+    }
+
+    /// Enter commits — and the commit is what survives the close, so `restore` must not undo it.
+    #[test]
+    fn enter_in_the_picker_commits_the_theme_under_the_cursor() {
+        let mut app = app();
+        let (tx, _rx) = mpsc::channel();
+        app.open_dialog(Dialog::Theme);
+        app.input(key(KeyCode::Down), &tx);
+        app.input(key(KeyCode::Down), &tx);
+        let chosen = app.theme.name.clone();
+        app.input(key(KeyCode::Enter), &tx);
+        assert_eq!(app.dialog, None);
+        assert_eq!(app.theme.name, chosen);
+        assert_eq!(app.preferences.theme.as_deref(), Some(chosen.as_str()));
+        assert!(app.notice.contains(&chosen), "the notice should confirm the choice: {}", app.notice);
+        // A second Esc (no dialog open) must not undo the commit.
+        app.input(key(KeyCode::Esc), &tx);
+        assert_eq!(app.theme.name, chosen);
+    }
+
+    /// Typing filters the list and previews the first match; clearing the query puts the opening
+    /// theme back. Backspace is the only way to clear the query from the keyboard.
+    #[test]
+    fn typing_in_the_picker_filters_and_clearing_restores() {
+        let mut app = app();
+        let (tx, _rx) = mpsc::channel();
+        let initial = app.theme.name.clone();
+        app.open_dialog(Dialog::Theme);
+        for c in "drac".chars() {
+            app.input(key(KeyCode::Char(c)), &tx);
+        }
+        assert_eq!(app.theme.name, "dracula");
+        for _ in 0..4 {
+            app.input(key(KeyCode::Backspace), &tx);
+        }
+        assert_eq!(app.theme.name, initial);
+        // A paste filters the same way typing does, newlines dropped.
+        app.input(Event::Paste("nor\nd".into()), &tx);
+        assert_eq!(app.theme.name, "nord");
     }
 }

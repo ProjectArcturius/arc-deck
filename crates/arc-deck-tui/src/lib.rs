@@ -3,10 +3,12 @@
 
 mod app;
 pub mod catalog;
+mod color;
 mod editor;
 mod markdown;
 mod model_dialog;
 mod theme;
+mod theme_dialog;
 mod view;
 
 use std::io::{self, IsTerminal};
@@ -97,18 +99,36 @@ pub enum Update {
     Notice(String),
 }
 
+/// UI preferences, persisted to `tui-preferences.json`. `serde(default)` is load-bearing: the
+/// first released file only had `light` and `sidebar`, and dropping a field or adding one must
+/// not make an older file unreadable.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(default)]
-struct Preferences {
+pub(crate) struct Preferences {
     light: bool,
     sidebar: bool,
+    /// Built-in theme name. `None` means "never chosen", which resolves to `DEFAULT_THEME`.
+    /// Kept as written even when the name is unknown so the warning repeats instead of the
+    /// typo being silently rewritten to the default.
+    theme: Option<String>,
 }
 impl Default for Preferences {
     fn default() -> Self {
         Self {
             light: false,
             sidebar: true,
+            theme: None,
         }
+    }
+}
+
+impl Preferences {
+    pub(crate) fn theme_name(&self) -> &str {
+        self.theme.as_deref().unwrap_or(theme::DEFAULT_THEME)
+    }
+
+    pub(crate) fn mode(&self) -> theme::Mode {
+        if self.light { theme::Mode::Light } else { theme::Mode::Dark }
     }
 }
 

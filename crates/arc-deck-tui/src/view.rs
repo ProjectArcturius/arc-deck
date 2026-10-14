@@ -1,9 +1,14 @@
 //! Home/composer/sidebar proportions follow OpenCode v1.19.0, not its session tabs.
 //! Copyright (c) 2025 opencode. MIT notice: ../LICENSE-OpenCode.
+//!
+//! Colours come from the v2.0.27 semantic tokens (`theme.rs`). Most call sites still want the
+//! flat role names the old hand-written `Theme` had, so the small helpers at the bottom of this
+//! file are the single place where a role is spelled as a token plus a state — the alternative
+//! was repeating `text.action(primary, &[])` at forty call sites and drifting.
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
 };
@@ -15,14 +20,87 @@ use crate::{
     app::{App, Dialog, token},
     markdown::{self, MarkdownPalette},
     model_dialog,
-    theme::Theme,
+    theme::{Feedback, State, Theme, Variant},
+    theme_dialog,
 };
+
+/// `text.action.secondary.base` — the flat "normal text" role, distinct from `text.base`.
+pub(crate) fn muted(t: &Theme) -> Color {
+    t.text_action(Variant::Secondary, &[]).over(t.background)
+}
+
+/// `text.action.primary.base`: the theme's accent. Upstream's v1 migration points primary at
+/// `$text.base`, which would make it invisible, so the *selected* state (the interactive hue)
+/// is what reads as an accent for body chrome such as brand text and section labels.
+pub(crate) fn accent(t: &Theme) -> Color {
+    t.text_action(Variant::Primary, &[State::Selected]).over(t.background)
+}
+
+/// `background.raised.base` — the secondary surface used by the sidebar and dialogs. This is
+/// what the old hand-written palette's `background_panel` maps onto.
+pub(crate) fn panel_deep(t: &Theme) -> Color {
+    t.background_raised.over(t.background)
+}
+
+/// `background.raised.high` — one step up from `panel_deep`. This is the token the old
+/// hand-written palette's `background_element` maps onto: `background.action.primary.$hovered`
+/// is the fill for a *hovered primary action*, and painting a code block with it made the block
+/// the same shade as the panel it sits on.
+pub(crate) fn panel_highlight(t: &Theme) -> Color {
+    t.background_raised_high.over(t.background_raised)
+}
+
+/// `text.base` 铺在页面底色上 —— 旧调色板的 `text`。
+pub(crate) fn text(t: &Theme) -> Color {
+    t.text.over(t.background)
+}
+
+/// `text.action.primary.$disabled` —— 旧调色板的 `action_disabled`（映射与测试见下方
+/// `old_fields_map_to_pinned_tokens` 一类的断言）。
+pub(crate) fn disabled(t: &Theme) -> Color {
+    t.text_action(Variant::Primary, &[State::Disabled]).over(t.background)
+}
+
+/// 对话框底色：与 `popup` 画的那一块同一个 token，模型对话框不另取一份。
+pub(crate) fn dialog_bg(t: &Theme) -> Color {
+    t.dialog_background(t.background_raised).over(t.background)
+}
+
+pub(crate) fn warning(t: &Theme) -> Color {
+    t.text_feedback(Feedback::Warning, false).over(t.background)
+}
+
+fn danger(t: &Theme) -> Color {
+    t.text_feedback(Feedback::Error, false).over(t.background)
+}
+
+fn ok(t: &Theme) -> Color {
+    t.text_feedback(Feedback::Success, false).over(t.background)
+}
+
+/// The foreground/background pair for the highlighted row of a dialog, painted the way upstream's
+/// `DialogSelect` paints it: the same `$focused` state on both halves of the `action.primary`
+/// pair. (An earlier version used `$selected` on both halves, and in every built-in theme those
+/// resolve to the same `$hue.interactive.200` — the row was painted in its own background and
+/// read as blank. `every_built_in_theme_draws_the_picker_in_both_modes` and the sibling test in
+/// `theme_dialog` are the guards.)
+///
+/// Shared with `theme_dialog` so the app has one "the cursor is here" treatment rather than one
+/// per dialog.
+pub(crate) fn row_focus(t: &Theme) -> (Color, Color) {
+    let surface = t.dialog_background(t.background_raised);
+    (
+        t.text_action(Variant::Primary, &[State::Focused]).over(surface),
+        t.background_action(Variant::Primary, &[State::Focused]).over(surface),
+    )
+}
 
 pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
-    let theme = Theme::new(app.preferences.light);
+    let theme = app.theme.clone();
+    let t = &theme;
     frame.render_widget(
-        Block::new().style(Style::default().fg(theme.text).bg(theme.background)),
+        Block::new().style(Style::default().fg(t.text.to_ratatui()).bg(t.background.to_ratatui())),
         area,
     );
     if area.width < 20 || area.height < 8 {
@@ -32,32 +110,29 @@ pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
     let footer = Rect::new(area.x + 1, area.bottom() - 2, area.width - 2, 2);
     frame.render_widget(
         Paragraph::new(vec![
-            Line::styled(
-                clean(&app.notice),
-                Style::default().fg(theme.feedback_warning),
-            ),
+            Line::styled(clean(&app.notice), Style::default().fg(warning(t))),
             Line::styled(
                 if app.leader {
-                    "leader: n 新请求 · l 历史 · a Agent · m 模型 · b 信息栏"
+                    "leader: n 新请求 · l 历史 · a Agent · m 模型 · b 信息栏 · t 主题"
                 } else if cfg!(windows) && area.width < 65 {
                     "F6发送 Enter换行 ^P命令 /exit退出"
                 } else if cfg!(windows) {
-                    "F6 发送 · Enter 换行 · ^P 命令 · ^X leader · PgUp 上滚 · Esc 取消 · /exit 退出"
+                    "F6 发送 · Enter 换行 · ^P 命令 · ^X leader · PgUp 上滚 · Esc 取消 · /theme 主题 · /exit 退出"
                 } else if area.width < 65 {
                     "Enter发送 ^J换行 ^P命令 ^C退出"
                 } else {
-                    "Enter 发送 · ^J 换行 · ^P 命令 · ^X leader · PgUp 上滚 · Esc 取消 · ^C 退出"
+                    "Enter 发送 · ^J 换行 · ^P 命令 · ^X leader · PgUp 上滚 · Esc 取消 · /theme 主题 · ^C 退出"
                 },
-                Style::default().fg(theme.text_muted),
+                Style::default().fg(muted(t)),
             ),
         ]),
         footer,
     );
     let content = Rect::new(area.x, area.y, area.width, area.height - 2);
     if app.selected.is_none() {
-        home(frame, app, content, &theme);
+        home(frame, app, content, t);
     } else {
-        session(frame, app, content, &theme);
+        session(frame, app, content, t);
     }
     if app.sidebar_overlay
         && app.preferences.sidebar
@@ -69,11 +144,11 @@ pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
             frame,
             app,
             Rect::new(content.right() - w, content.y, w, content.height),
-            &theme,
+            t,
         );
     }
     if let Some(dialog) = &app.dialog {
-        popup(frame, app, dialog, content, &theme);
+        popup(frame, app, dialog, content, t);
     }
 }
 
@@ -84,16 +159,16 @@ fn home(frame: &mut Frame, app: &App, area: Rect, t: &Theme) {
     let y = area.y + area.height.saturating_sub(height) / 2;
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("Arc ", Style::default().fg(t.text_muted)),
+            Span::styled("Arc ", Style::default().fg(muted(t))),
             Span::styled(
                 "Deck",
-                Style::default().fg(t.action).add_modifier(Modifier::BOLD),
+                Style::default().fg(accent(t)).add_modifier(Modifier::BOLD),
             ),
         ])),
         Rect::new(x, y, width, 1),
     );
     frame.render_widget(
-        Paragraph::new("从当前项目开始一次独立请求").style(Style::default().fg(t.text_muted)),
+        Paragraph::new("从当前项目开始一次独立请求").style(Style::default().fg(muted(t))),
         Rect::new(x, y + 2, width, 1),
     );
     composer(
@@ -105,7 +180,7 @@ fn home(frame: &mut Frame, app: &App, area: Rect, t: &Theme) {
     if area.height > 16 {
         frame.render_widget(
             Paragraph::new(clean(&app.boot.workspace.display().to_string()))
-                .style(Style::default().fg(t.text_muted)),
+                .style(Style::default().fg(muted(t))),
             Rect::new(x, y + height + 1, width, 1),
         );
     }
@@ -133,7 +208,7 @@ fn session(frame: &mut Frame, app: &mut App, area: Rect, t: &Theme) {
         .unwrap_or("正在接入运行记录…");
     frame.render_widget(
         Paragraph::new(clean(&format!(" Arc Deck  /  {label}")))
-            .style(Style::default().fg(t.text).bg(t.background_panel)),
+            .style(Style::default().fg(t.text.to_ratatui()).bg(panel_deep(t))),
         Rect::new(main.x, main.y, main.width, 1),
     );
     let width = main.width.saturating_sub(4).max(2);
@@ -178,11 +253,15 @@ fn composer(frame: &mut Frame, app: &App, area: Rect, t: &Theme) {
     if area.height < 3 || area.width < 4 {
         return;
     }
+    // `background.formfield.base` is `transparent` in OpenCode's own themes, which is a real
+    // change from the old hand-written palette (a `#1e1e1e` input tint). Keeping the token as
+    // the theme defines it is the point of the migration; the left rule plus the muted
+    // placeholder still mark the input, and `over` resolves transparency against the base.
     frame.render_widget(
         Block::new()
             .borders(Borders::LEFT)
-            .border_style(Style::default().fg(t.action))
-            .style(Style::default().bg(t.formfield)),
+            .border_style(Style::default().fg(accent(t)))
+            .style(Style::default().bg(t.background_formfield(&[]).over(t.background))),
         area,
     );
     let inner = Rect::new(area.x + 2, area.y + 1, area.width - 3, area.height - 3);
@@ -196,12 +275,15 @@ fn composer(frame: &mut Frame, app: &App, area: Rect, t: &Theme) {
             .take(inner.height as usize)
             .collect()
     };
+    // The composer *is* the form field, so its text colour is `text.formfield`, not `text` —
+    // the token group exists for exactly this element. Both resolve to `$hue.neutral.200` in
+    // OpenCode's own theme, so this is a naming fix rather than a visual change.
     frame.render_widget(
         Paragraph::new(visible.join("\n")).style(Style::default().fg(
             if app.editor.text.is_empty() {
-                t.text_muted
+                muted(t)
             } else {
-                t.text
+                t.text_formfield(&[]).over(t.background)
             },
         )),
         inner,
@@ -218,7 +300,7 @@ fn composer(frame: &mut Frame, app: &App, area: Rect, t: &Theme) {
         metadata.push_str(&format!(" · effort {effort}"));
     }
     frame.render_widget(
-        Paragraph::new(metadata).style(Style::default().fg(t.action)),
+        Paragraph::new(metadata).style(Style::default().fg(accent(t))),
         Rect::new(inner.x, area.bottom() - 2, inner.width, 1),
     );
     let overlay = app.sidebar_overlay
@@ -237,9 +319,9 @@ fn sidebar(frame: &mut Frame, app: &App, area: Rect, t: &Theme) {
     frame.render_widget(Clear, area);
     frame.render_widget(
         Block::new()
-            .style(Style::default().bg(t.background_panel))
+            .style(Style::default().bg(panel_deep(t)))
             .borders(Borders::LEFT)
-            .border_style(Style::default().fg(t.border)),
+            .border_style(Style::default().fg(t.border.to_ratatui())),
         area,
     );
     let inner = Rect::new(
@@ -249,7 +331,7 @@ fn sidebar(frame: &mut Frame, app: &App, area: Rect, t: &Theme) {
         area.height.saturating_sub(2),
     );
     let mut lines = vec![
-        Line::styled("工作区", Style::default().fg(t.action)),
+        Line::styled("工作区", Style::default().fg(accent(t))),
         Line::raw(clean(&app.boot.workspace.display().to_string())),
         Line::raw(""),
     ];
@@ -261,14 +343,14 @@ fn sidebar(frame: &mut Frame, app: &App, area: Rect, t: &Theme) {
             ("活动", d.record.activity.as_str()),
             ("模型", d.record.model.as_deref().unwrap_or("未记录")),
         ] {
-            lines.push(Line::styled(name, Style::default().fg(t.text_muted)));
+            lines.push(Line::styled(name, Style::default().fg(muted(t))));
             lines.push(Line::raw(clean(value)));
         }
         if let Some(u) = &d.record.usage {
             lines.push(Line::raw(""));
             lines.push(Line::styled(
                 "用量（provider 实报）",
-                Style::default().fg(t.action),
+                Style::default().fg(accent(t)),
             ));
             lines.push(Line::raw(format!(
                 "输入 {} · 输出 {}",
@@ -280,7 +362,7 @@ fn sidebar(frame: &mut Frame, app: &App, area: Rect, t: &Theme) {
         lines.push(Line::raw(""));
         lines.push(Line::styled(
             "证据 /evidence",
-            Style::default().fg(t.action),
+            Style::default().fg(accent(t)),
         ));
         lines.push(Line::raw(clean(&d.evidence_dir.display().to_string())));
     }
@@ -299,12 +381,12 @@ fn body_lines(app: &App, t: &Theme, width: u16) -> Vec<Line<'static>> {
     let Some(d) = &app.detail else {
         return vec![Line::styled(
             "等待监工写入状态…",
-            Style::default().fg(t.text_muted),
+            Style::default().fg(muted(t)),
         )];
     };
     let mut lines = vec![Line::styled(
         "你",
-        Style::default().fg(t.action).add_modifier(Modifier::BOLD),
+        Style::default().fg(accent(t)).add_modifier(Modifier::BOLD),
     )];
     lines.extend(
         clean(&d.instruction)
@@ -320,15 +402,15 @@ fn body_lines(app: &App, t: &Theme, width: u16) -> Vec<Line<'static>> {
             clean(&d.record.activity)
         ),
         Style::default().fg(if d.record.health == "dead" || d.record.state == "failed" {
-            t.feedback_error
+            danger(t)
         } else {
-            t.text_muted
+            muted(t)
         }),
     ));
     if let Some(notice) = &d.record.notice {
         lines.push(Line::styled(
             clean(notice),
-            Style::default().fg(t.feedback_warning),
+            Style::default().fg(warning(t)),
         ));
     }
     let expanded = app.expanded.get(&d.record.id).copied().unwrap_or(false);
@@ -363,7 +445,7 @@ fn body_lines(app: &App, t: &Theme, width: u16) -> Vec<Line<'static>> {
         {
             lines.push(Line::styled(
                 clean(&str_at("message")),
-                Style::default().fg(t.feedback_warning),
+                Style::default().fg(warning(t)),
             ));
         }
     }
@@ -375,13 +457,13 @@ fn body_lines(app: &App, t: &Theme, width: u16) -> Vec<Line<'static>> {
                 tools.len(),
                 if expanded { "折叠" } else { "展开" }
             ),
-            Style::default().fg(t.text_muted),
+            Style::default().fg(muted(t)),
         ));
         for (_, name, state, summary) in tools {
             let color = match state.as_str() {
-                "success" | "ok" => t.feedback_success,
-                "error" | "failed" | "denied" => t.feedback_error,
-                _ => t.text_muted,
+                "success" | "ok" => ok(t),
+                "error" | "failed" | "denied" => danger(t),
+                _ => muted(t),
             };
             lines.push(Line::styled(
                 format!("  {name} · {state}"),
@@ -401,13 +483,13 @@ fn body_lines(app: &App, t: &Theme, width: u16) -> Vec<Line<'static>> {
         lines.push(Line::raw(""));
         lines.push(Line::styled(
             "Arc Deck 采集的事实",
-            Style::default().fg(t.action),
+            Style::default().fg(accent(t)),
         ));
         lines.push(Line::raw(format!("终态：{}", r.status.as_str())));
         for b in &r.blockers {
             lines.push(Line::styled(
                 clean(&format!("{}: {}", b.code, b.message)),
-                Style::default().fg(t.feedback_error),
+                Style::default().fg(danger(t)),
             ));
         }
         for v in &r.verification {
@@ -419,11 +501,11 @@ fn body_lines(app: &App, t: &Theme, width: u16) -> Vec<Line<'static>> {
         for text in &r.unverified {
             lines.push(Line::styled(
                 clean(text),
-                Style::default().fg(t.feedback_warning),
+                Style::default().fg(warning(t)),
             ));
         }
         lines.push(Line::raw(""));
-        lines.push(Line::styled("模型的陈述", Style::default().fg(t.action)));
+        lines.push(Line::styled("模型的陈述", Style::default().fg(accent(t))));
         // Rendered to the body width here, under its heading; `fit_width` leaves rows that
         // already fit alone, so the hanging indents survive. (The first cut appended this at
         // the end of `body_lines`, which slid the truncation warning between heading and body.)
@@ -432,19 +514,19 @@ fn body_lines(app: &App, t: &Theme, width: u16) -> Vec<Line<'static>> {
         lines.push(Line::raw(""));
         lines.push(Line::styled(
             "状态已终止，但结果文件不可读；请检查 /evidence",
-            Style::default().fg(t.feedback_warning),
+            Style::default().fg(warning(t)),
         ));
     } else {
         lines.push(Line::raw(""));
         lines.push(Line::styled(
             "等待最终正文；此通道没有实时 token 输出",
-            Style::default().fg(t.text_muted),
+            Style::default().fg(muted(t)),
         ));
     }
     if d.truncated {
         lines.push(Line::styled(
             "显示内容已截断；完整内容见 /evidence",
-            Style::default().fg(t.feedback_warning),
+            Style::default().fg(warning(t)),
         ));
     }
     lines
@@ -470,24 +552,34 @@ fn statement_lines(app: &App, t: &Theme, width: u16) -> Vec<Line<'static>> {
 /// other theme tokens on purpose: a Markdown role that borrowed an unrelated colour
 /// would break the "状态不借用无关颜色" rule in PRODUCT_PLAN §7.3.
 fn markdown_palette(t: &Theme) -> MarkdownPalette {
+    // 主题的 markdown token 优先（OpenCode 主题里的 markdown* 一组）；缺的回退到正文色 ——
+    // 2.0.27 的规则就是「未命中回落 text」，不去借 feedback 之类不相干的状态色。
+    let text = t.text.over(t.background);
+    let ink = |name: &str| t.markdown(name).map(|ink| ink.over(t.background)).unwrap_or(text);
     MarkdownPalette {
-        text: t.text,
-        muted: t.text_muted,
-        heading: t.action,
-        link: t.action,
-        link_text: t.action_selected,
-        code: t.feedback_success,
-        code_block_fg: t.text,
-        code_block_bg: t.background_element,
-        block_quote: t.action,
-        emph: t.action_selected,
-        strong: t.text,
-        list_marker: t.action_disabled,
-        hr: t.border,
+        text: ink("text"),
+        muted: muted(t),
+        heading: ink("heading"),
+        link: ink("link"),
+        link_text: ink("link_text"),
+        code: ink("code"),
+        code_block_fg: ink("code_block"),
+        code_block_bg: panel_highlight(t),
+        block_quote: ink("block_quote"),
+        emph: ink("emph"),
+        strong: ink("strong"),
+        list_marker: ink("list_item"),
+        hr: ink("horizontal_rule"),
     }
 }
 
 fn popup(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, t: &Theme) {
+    if matches!(dialog, Dialog::Theme) {
+        if let Some(theme_dialog) = &app.theme_dialog {
+            theme_dialog::draw(frame, theme_dialog, area, t);
+        }
+        return;
+    }
     // 模型/provider/effort 三个对话框在 model_dialog 里，其余三个仍是这里的小浮层。
     match dialog {
         Dialog::Models(state) => {
@@ -536,7 +628,8 @@ fn popup(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, t: &Theme) {
             );
             return;
         }
-        Dialog::Commands | Dialog::Runs | Dialog::Agents => {}
+        // 主题选择器在函数开头就交给 theme_dialog 画了。
+        Dialog::Commands | Dialog::Runs | Dialog::Agents | Dialog::Theme => {}
     }
     // 40×12 之类的窄终端会给出一条负宽度的矩形；用 saturating_sub 而不是 `-`，
     // 否则 debug 构建直接 panic（「窗口太小」正是这条路径最常遇到的情形）。
@@ -552,6 +645,7 @@ fn popup(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, t: &Theme) {
         Dialog::Commands => "命令",
         Dialog::Runs => "运行历史",
         Dialog::Agents => "Agent",
+        Dialog::Theme => return,
         // 上面已经把这三个分支返回掉了；这里给编译器一个穷尽的分支。
         Dialog::Models(_) | Dialog::Providers(_) | Dialog::Efforts(_) => return,
     };
@@ -559,8 +653,8 @@ fn popup(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, t: &Theme) {
     frame.render_widget(
         Block::bordered()
             .title(title)
-            .border_style(Style::default().fg(t.border))
-            .style(Style::default().bg(t.background_panel)),
+            .border_style(Style::default().fg(t.border.to_ratatui()))
+            .style(Style::default().bg(t.dialog_background(t.background_raised).over(t.background))),
         rect,
     );
     let inner = Rect::new(rect.x + 2, rect.y + 1, rect.width - 4, rect.height - 2);
@@ -581,6 +675,7 @@ fn popup(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, t: &Theme) {
             ("Build · 实施".into(), true),
             ("Plan · 不可用：执行 guard 尚未接通".into(), false),
         ],
+        Dialog::Theme => return,
         Dialog::Models(_) | Dialog::Providers(_) | Dialog::Efforts(_) => return,
     };
     if rows.is_empty() {
@@ -592,7 +687,7 @@ fn popup(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, t: &Theme) {
         "↑↓ 选择 · Enter 确定 · Esc 返回".into()
     };
     frame.render_widget(
-        Paragraph::new(search).style(Style::default().fg(t.text_muted)),
+        Paragraph::new(search).style(Style::default().fg(muted(t))),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
     let start = app
@@ -605,15 +700,20 @@ fn popup(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, t: &Theme) {
         .take(inner.height.saturating_sub(2) as usize)
         .map(|(i, (row, enabled))| {
             let style = if i == app.choice {
+                let (fg, bg) = row_focus(t);
                 Style::default()
                     .fg(if enabled {
-                        t.action_selected
+                        fg
                     } else {
-                        t.action_disabled
+                        t.text_action(Variant::Primary, &[State::Disabled]).over(t.background)
                     })
-                    .bg(t.background_element)
+                    .bg(if enabled { bg } else { panel_highlight(t) })
             } else {
-                Style::default().fg(if enabled { t.text } else { t.action_disabled })
+                Style::default().fg(if enabled {
+                    t.text.to_ratatui()
+                } else {
+                    t.text_action(Variant::Primary, &[State::Disabled]).over(t.background)
+                })
             };
             Line::styled(
                 clean(&format!(
@@ -769,7 +869,7 @@ mod tests {
         for (width, height) in [(40, 12), (80, 24), (120, 30), (160, 40)] {
             for light in [false, true] {
                 let mut a = app();
-                a.preferences.light = light;
+                set_mode(&mut a, light);
                 let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
                 terminal.draw(|f| draw(f, &mut a)).unwrap();
                 let buffer = terminal.backend().buffer();
@@ -790,14 +890,53 @@ mod tests {
                     })),
                 ] {
                     a.dialog = dialog;
+                    a.theme_dialog = None;
                     terminal.draw(|f| draw(f, &mut a)).unwrap();
                 }
+                // The theme picker is rendered by its own module, so it gets its own pass here
+                // rather than being folded into the list above.
+                a.open_dialog(Dialog::Theme);
+                terminal.draw(|f| draw(f, &mut a)).unwrap();
+                let buffer = terminal.backend().buffer();
+                let dump = row_text(buffer, 1);
+                assert!(
+                    contains_wrapped(buffer, "主题"),
+                    "theme dialog title missing at {width}x{height}: {dump:?}"
+                );
+                assert!(
+                    contains_wrapped(buffer, "opencode"),
+                    "the default theme name is missing at {width}x{height}"
+                );
+                a.dialog = None;
+                a.theme_dialog = None;
                 assert_eq!(
                     terminal.backend().buffer().area,
                     Rect::new(0, 0, width, height)
                 );
             }
         }
+    }
+    /// The app owns the resolved theme, so a test that wants a mode has to go through the same
+    /// path the UI does rather than constructing a `Theme` directly.
+    fn set_mode(app: &mut App, light: bool) {
+        app.preferences.light = light;
+        app.apply_preferences_theme();
+    }
+    /// Matches inside one rendered row. Cells are stepped by grapheme width, not by one, because
+    /// a CJK glyph's second cell repeats the same symbol — reading cell by cell inserts a
+    /// duplicate and makes `contains` miss ("主题" reads back as "主主题").
+    fn contains_wrapped(buffer: &ratatui::buffer::Buffer, needle: &str) -> bool {
+        (0..buffer.area.height).any(|y| row_text(buffer, y).contains(needle))
+    }
+    fn row_text(buffer: &ratatui::buffer::Buffer, y: u16) -> String {
+        let mut row = String::new();
+        let mut x = 0;
+        while x < buffer.area.width {
+            let glyph = buffer[(x, y)].symbol();
+            row.push_str(glyph);
+            x += (glyph.width() as u16).max(1);
+        }
+        row
     }
     #[test]
     fn model_dialogs_still_render_at_the_smallest_supported_terminal() {
@@ -827,7 +966,7 @@ mod tests {
     fn failure_details_are_visible_even_when_tools_are_folded() {
         let mut a = app();
         long_run(&mut a);
-        let text = body_lines(&a, &Theme::new(false), 80)
+        let text = body_lines(&a, &a.theme.clone(), 80)
             .iter()
             .map(Line::to_string)
             .collect::<Vec<_>>()
@@ -847,28 +986,132 @@ mod tests {
         assert_eq!(cursor.x, 9);
         assert!(cursor.y < 12);
     }
+    /// Kept from the hand-written palette era: normal text must never be painted with the
+    /// failure colour, and the input surface must be distinguishable from the page. Both are
+    /// still meaningful now that the colours come from OpenCode's tokens, and both would fail
+    /// if a role were wired to the wrong token.
     #[test]
     fn semantic_themes_do_not_use_failure_color_for_normal_text() {
-        for light in [false, true] {
-            let t = Theme::new(light);
-            assert_ne!(t.text, t.feedback_error);
-            assert_ne!(t.background, t.formfield);
+        for mode in [crate::theme::Mode::Dark, crate::theme::Mode::Light] {
+            let t = crate::theme::Theme::load(crate::theme::DEFAULT_THEME, mode).unwrap();
+            let body = t.text.to_ratatui();
+            for kind in [
+                crate::theme::Feedback::Error,
+                crate::theme::Feedback::Warning,
+                crate::theme::Feedback::Success,
+            ] {
+                assert_ne!(body, t.text_feedback(kind, false).over(t.background));
+            }
+            assert_ne!(t.background.to_ratatui(), muted(&t));
+            // `muted` must stay a *text* role: the accent and the primary background are for
+            // chrome, not for prose.
+            assert_ne!(muted(&t), accent(&t));
+            assert_ne!(
+                t.text_feedback(crate::theme::Feedback::Error, false).over(t.background),
+                t.text_feedback(crate::theme::Feedback::Success, false).over(t.background)
+            );
         }
     }
+    /// §7.3's "the picture must not get worse" is otherwise unfalsifiable. Each role the
+    /// hand-written two-colour palette held is pinned to the value the 2.0.27 tokens resolve to
+    /// for the default theme, so a re-wiring shows up as a number rather than as an impression.
+    ///
+    /// Three roles do not land on their exact old value, and all three are recorded here on
+    /// purpose:
+    /// - `background_element` `#282828` → `background.raised.high` `#1e1e1e`. `#282828` is
+    ///   `darkStep4` of the v1 palette and is not a step of the v2 neutral scale; `raised.high`
+    ///   is the nearest token with the same meaning ("one surface above the panel").
+    /// - `action_disabled` `#606060` → `text.action.primary.$disabled` `#808080`.
+    /// - `formfield` `#1e1e1e` → `background.formfield`, which is `$background.base` in every
+    ///   built-in theme, so the composer loses its tint (see the note in `composer`).
+    ///
+    /// `feedback_warning` also moves (`#e5c07b` → `#f5a742`) because OpenCode's own default theme
+    /// moved it, not because of the mapping.
+    #[test]
+    fn every_hand_written_role_lands_on_a_token() {
+        use crate::theme::{DEFAULT_THEME, Mode, Theme};
+        let t = Theme::load(DEFAULT_THEME, Mode::Dark).unwrap();
+        let exact = [
+            ("text", t.text.to_ratatui(), 0xeeeeee),
+            ("text_muted", muted(&t), 0x808080),
+            ("background", t.background.to_ratatui(), 0x0a0a0a),
+            ("background_panel", panel_deep(&t), 0x141414),
+            ("action", accent(&t), 0xfab283),
+            ("border", t.border.to_ratatui(), 0x484848),
+            ("feedback_error", danger(&t), 0xe06c75),
+            ("feedback_success", ok(&t), 0x7fd88f),
+            ("feedback_warning", warning(&t), 0xf5a742),
+            // The three documented moves.
+            ("background_element", panel_highlight(&t), 0x1e1e1e),
+            (
+                "action_disabled",
+                t.text_action(Variant::Primary, &[State::Disabled]).over(t.background),
+                0x808080,
+            ),
+            (
+                "formfield",
+                t.background_formfield(&[]).over(t.background),
+                0x0a0a0a,
+            ),
+        ];
+        for (role, actual, expected) in exact {
+            let expected = Color::Rgb((expected >> 16) as u8, (expected >> 8) as u8, expected as u8);
+            assert_eq!(actual, expected, "{role} moved");
+        }
+    }
+
+    /// The highlighted row must be legible in **every** built-in theme: this is the pair
+    /// `DialogSelect` paints, and getting it wrong is invisible-looking (same colour on both
+    /// sides) rather than obviously broken.
+    #[test]
+    fn default_themes_paint_the_highlighted_row_legibly() {
+        for name in crate::theme::theme_names() {
+            for mode in [crate::theme::Mode::Dark, crate::theme::Mode::Light] {
+                let t = crate::theme::Theme::load(name, mode).unwrap();
+                let (fg, bg) = row_focus(&t);
+                assert_ne!(fg, bg, "{name} ({mode:?}) paints the highlighted row invisibly");
+            }
+        }
+    }
+
+    /// The picker previews a theme the moment the cursor lands on it, so every built-in theme has
+    /// to survive a full draw in both modes. Resolving successfully is not enough: a theme that
+    /// panics while painting would blank the screen mid-browse.
+    #[test]
+    fn every_built_in_theme_draws_the_picker_in_both_modes() {
+        for name in crate::theme::theme_names() {
+            for mode in [crate::theme::Mode::Dark, crate::theme::Mode::Light] {
+                let mut a = app();
+                a.preferences.theme = Some(name.to_string());
+                set_mode(&mut a, mode == crate::theme::Mode::Light);
+                a.open_dialog(Dialog::Theme);
+                let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+                terminal.draw(|f| draw(f, &mut a)).unwrap();
+                assert!(
+                    contains_wrapped(terminal.backend().buffer(), "主题"),
+                    "{name} ({mode:?}) did not paint the picker"
+                );
+            }
+        }
+    }
+
     #[test]
     fn generate_reviewable_cell_snapshots() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tui-preview");
         std::fs::create_dir_all(&dir).unwrap();
         for (w, h) in [(40, 12), (80, 24), (120, 30), (160, 40)] {
             for light in [false, true] {
-                for screen in ["home", "run", "commands"] {
+                for screen in ["home", "run", "commands", "theme"] {
                     let mut a = app();
-                    a.preferences.light = light;
+                    set_mode(&mut a, light);
                     if screen != "home" {
                         long_run(&mut a);
                     }
                     if screen == "commands" {
                         a.open_dialog(Dialog::Commands);
+                    }
+                    if screen == "theme" {
+                        a.open_dialog(Dialog::Theme);
                     }
                     let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
                     terminal.draw(|f| draw(f, &mut a)).unwrap();

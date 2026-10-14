@@ -1140,24 +1140,25 @@ fn render_table(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::Theme;
-
+    /// 渲染器的测试只关心「按调色板上色」，不关心主题：这里钉死旧手写浅色调色板的取值，
+    /// 断言的含义因此与主题系统解耦（主题换实现时这些测试不该跟着变）。
     fn palette() -> MarkdownPalette {
-        let t = Theme::new(false);
+        let c = |v: u32| Color::Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8);
+        let (text, muted, action, selected) = (c(0x1a1a1a), c(0x6b6b6b), c(0x3b7dd8), c(0x2968c3));
         MarkdownPalette {
-            text: t.text,
-            muted: t.text_muted,
-            heading: t.action,
-            link: t.action,
-            link_text: t.action_selected,
-            code: t.feedback_success,
-            code_block_fg: t.text,
-            code_block_bg: t.background_element,
-            block_quote: t.action,
-            emph: t.action_selected,
-            strong: t.text,
-            list_marker: t.action_disabled,
-            hr: t.border,
+            text,
+            muted,
+            heading: action,
+            link: action,
+            link_text: selected,
+            code: c(0x3d9a57),
+            code_block_fg: text,
+            code_block_bg: c(0xebebeb),
+            block_quote: action,
+            emph: selected,
+            strong: text,
+            list_marker: c(0x8a8a8a),
+            hr: c(0xb8b8b8),
         }
     }
 

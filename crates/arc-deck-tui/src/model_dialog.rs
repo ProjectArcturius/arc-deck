@@ -226,7 +226,7 @@ pub fn draw_model(frame: &mut Frame, area: Rect, t: &Theme, view: ModelView<'_>)
     frame.render_widget(
         Paragraph::new(Line::styled(
             "切换模型对下一次请求生效，运行中不会热切换",
-            Style::default().fg(t.feedback_warning),
+            Style::default().fg(crate::view::warning(t)),
         )),
         Rect::new(inner.x, inner.y + 1, inner.width, 1),
     );
@@ -247,7 +247,7 @@ pub fn draw_model(frame: &mut Frame, area: Rect, t: &Theme, view: ModelView<'_>)
             }
             lines.push(Line::styled(
                 block.title.clone(),
-                Style::default().fg(t.action).add_modifier(Modifier::BOLD),
+                Style::default().fg(crate::view::accent(t)).add_modifier(Modifier::BOLD),
             ));
         }
         for row in &block.rows {
@@ -258,7 +258,7 @@ pub fn draw_model(frame: &mut Frame, area: Rect, t: &Theme, view: ModelView<'_>)
     if lines.is_empty() {
         lines.push(Line::styled(
             "没有匹配的模型",
-            Style::default().fg(t.text_muted),
+            Style::default().fg(crate::view::muted(t)),
         ));
     }
     let (start, shown) = window(lines.len(), chosen_line.unwrap_or(0), list.height as usize);
@@ -303,13 +303,13 @@ pub fn draw_providers(frame: &mut Frame, area: Rect, t: &Theme, view: ProviderVi
         let active = index == choice;
         let style = if active {
             Style::default()
-                .fg(t.action_selected)
-                .bg(t.background_element)
+                .fg(crate::view::row_focus(t).0)
+                .bg(crate::view::row_focus(t).1)
                 .add_modifier(Modifier::BOLD)
         } else if option.current {
-            Style::default().fg(t.action)
+            Style::default().fg(crate::view::accent(t))
         } else {
-            Style::default().fg(t.text)
+            Style::default().fg(crate::view::text(t))
         };
         lines.push(Line::styled(
             fill(
@@ -323,7 +323,7 @@ pub fn draw_providers(frame: &mut Frame, area: Rect, t: &Theme, view: ProviderVi
     if lines.is_empty() {
         lines.push(Line::styled(
             "没有匹配的 provider",
-            Style::default().fg(t.text_muted),
+            Style::default().fg(crate::view::muted(t)),
         ));
     }
     let (start, shown) = window(lines.len(), choice, list.height as usize);
@@ -398,13 +398,13 @@ pub fn draw_efforts(frame: &mut Frame, area: Rect, t: &Theme, view: EffortView<'
         let is_current = title == selected;
         let style = if active {
             Style::default()
-                .fg(t.action_selected)
-                .bg(t.background_element)
+                .fg(crate::view::row_focus(t).0)
+                .bg(crate::view::row_focus(t).1)
                 .add_modifier(Modifier::BOLD)
         } else if is_current {
-            Style::default().fg(t.action)
+            Style::default().fg(crate::view::accent(t))
         } else {
-            Style::default().fg(t.text)
+            Style::default().fg(crate::view::text(t))
         };
         lines.push(Line::styled(
             fill(
@@ -437,11 +437,11 @@ fn title_for(t: &Theme, providers: &[Provider], state: ModelDialogState) -> Line
         Some(provider) => Line::from(vec![
             Span::styled(
                 "选择模型",
-                Style::default().fg(t.text).add_modifier(Modifier::BOLD),
+                Style::default().fg(crate::view::text(t)).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("  ·  {}", provider.name),
-                Style::default().fg(t.text_muted),
+                Style::default().fg(crate::view::muted(t)),
             ),
         ]),
         None => headline(t, "选择模型"),
@@ -451,7 +451,7 @@ fn title_for(t: &Theme, providers: &[Provider], state: ModelDialogState) -> Line
 fn headline(t: &Theme, text: &str) -> Line<'static> {
     Line::styled(
         text.to_string(),
-        Style::default().fg(t.text).add_modifier(Modifier::BOLD),
+        Style::default().fg(crate::view::text(t)).add_modifier(Modifier::BOLD),
     )
 }
 
@@ -461,8 +461,8 @@ fn frame_in(frame: &mut Frame, rect: Rect, title: Line<'static>, t: &Theme) -> R
         Block::new()
             .borders(Borders::ALL)
             .title(title)
-            .border_style(Style::default().fg(t.border))
-            .style(Style::default().bg(t.background_panel)),
+            .border_style(Style::default().fg(t.border.to_ratatui()))
+            .style(Style::default().bg(crate::view::dialog_bg(t))),
         rect,
     );
     Rect::new(
@@ -490,18 +490,18 @@ fn model_line(row: &ModelRow, active: bool, width: u16, t: &Theme) -> Line<'stat
     let disabled = row.disabled.is_some();
     let style = if active && !disabled {
         Style::default()
-            .fg(t.action_selected)
-            .bg(t.background_element)
+            .fg(crate::view::row_focus(t).0)
+            .bg(crate::view::row_focus(t).1)
             .add_modifier(Modifier::BOLD)
     } else if active {
         // 禁用且被选中：仍然要看起来是禁用的，只把光标那一行的底色画出来。
-        Style::default().fg(t.action_disabled).bg(t.background_element)
+        Style::default().fg(crate::view::disabled(t)).bg(crate::view::row_focus(t).1)
     } else if disabled {
-        Style::default().fg(t.action_disabled)
+        Style::default().fg(crate::view::disabled(t))
     } else if row.current {
-        Style::default().fg(t.action)
+        Style::default().fg(crate::view::accent(t))
     } else {
-        Style::default().fg(t.text)
+        Style::default().fg(crate::view::text(t))
     };
 
     // 副标题：收藏标记与不可用原因，两者可能同时存在。
@@ -523,9 +523,9 @@ fn model_line(row: &ModelRow, active: bool, width: u16, t: &Theme) -> Line<'stat
         Span::styled(
             format!("{note}{}", " ".repeat(pad)),
             if disabled {
-                Style::default().fg(t.action_disabled)
+                Style::default().fg(crate::view::disabled(t))
             } else {
-                Style::default().fg(t.text_muted)
+                Style::default().fg(crate::view::muted(t))
             },
         ),
         Span::styled(
@@ -533,7 +533,7 @@ fn model_line(row: &ModelRow, active: bool, width: u16, t: &Theme) -> Line<'stat
             if active && !disabled {
                 style
             } else {
-                Style::default().fg(t.text_muted)
+                Style::default().fg(crate::view::muted(t))
             },
         ),
     ])
@@ -553,7 +553,7 @@ fn marker(current: bool) -> &'static str {
 
 fn footer(frame: &mut Frame, inner: Rect, text: &str, t: &Theme) {
     frame.render_widget(
-        Paragraph::new(clean(text)).style(Style::default().fg(t.text_muted)),
+        Paragraph::new(clean(text)).style(Style::default().fg(crate::view::muted(t))),
         Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
     );
 }
