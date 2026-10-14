@@ -262,8 +262,13 @@ fn system_source_messages_stay_out_of_the_conversation() {
     assert!(!summary.contains("系统提示词"), "系统来源的消息进了对话：{summary}");
 }
 
+/// 提示词片段要留痕：`system prompt 片段 <名字> ← <来源>`，这样「Echo 到底进没进
+/// system prompt」是可核对的，不必去猜。
+///
+/// 2026-10-14 起契约改了：**工人不带风格**（人格生效于非 workers 场景），所以这里
+/// 同时钉住两件事 —— 功能片段要记，风格片段**不能**记。
 #[test]
-fn echo_style_sections_are_recorded_as_evidence() {
+fn prompt_sections_are_recorded_and_workers_carry_no_style() {
     let case = Case::new("success", command_acceptance(), json!({}));
     let run = case.run();
     let sections: Vec<String> = run
@@ -273,12 +278,16 @@ fn echo_style_sections_are_recorded_as_evidence() {
         .map(|e| e["data"]["message"].as_str().unwrap_or_default().to_string())
         .collect();
     assert!(
-        sections.iter().any(|s| s.contains("echo-style.md")),
-        "没有记录到 Echo 风格片段：{sections:?}"
+        sections.iter().any(|s| s.contains("arc-deck-engineering.md")),
+        "没有记录到工程纪律片段：{sections:?}"
     );
     assert!(
-        sections.iter().any(|s| s.contains("arc-deck-engineering.md")),
-        "没有记录到工程规则片段：{sections:?}"
+        sections.iter().any(|s| s.contains("echo.md")),
+        "没有记录到角色定义片段：{sections:?}"
+    );
+    assert!(
+        !sections.iter().any(|s| s.contains("echo-style.md")),
+        "工人不该带风格（人格生效于非 workers 场景）：{sections:?}"
     );
 }
 
@@ -547,6 +556,11 @@ fn plain_mode_answers_in_text_and_still_records_state() {
         serde_json::from_str(&std::fs::read_to_string(entry.path().join("task.json")).unwrap())
             .unwrap();
     assert_eq!(task["instruction"], "解释一下这段报错", "位置参数就是指令原文");
+
+    // 个性化关（缺省）：**一段都不加** —— 这是「按供应商本体行事」的可判定形式。
+    // 不是「加得少」，是空：调用方据此写出空的 personaSuffix。
+    let prompt = std::fs::read_to_string(entry.path().join("system-prompt.md")).unwrap();
+    assert!(prompt.trim().is_empty(), "一般模式 + 个性化关不该注入任何文本：{prompt}");
 }
 
 /// 出现工人参数就切回工人模式：stdout 是控制面 JSONL，`--accept` 真的进了任务书。
@@ -564,6 +578,16 @@ fn worker_flags_switch_back_to_the_jsonl_control_plane() {
     assert_eq!(status["assigned_by"], "sol");
     assert_eq!(status["title"], "修一下筛选");
     assert_eq!(status["terminal"], true);
+
+    // 工人拿功能契约，但**不拿风格**（人格生效于非 workers 场景）。
+    let sections: Vec<String> = run
+        .events()
+        .into_iter()
+        .filter(|e| e["type"] == "diagnostic" && e["data"]["code"] == "PROMPT_SECTION")
+        .map(|e| e["data"]["message"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(sections.iter().any(|s| s.contains("arc-deck-engineering.md")), "{sections:?}");
+    assert!(!sections.iter().any(|s| s.contains("echo-style.md")), "工人不该带风格：{sections:?}");
 }
 
 /// 看着像路径却不存在 —— 明确拒绝，而不是把这串字符当问题发给模型。

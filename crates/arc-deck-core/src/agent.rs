@@ -228,6 +228,31 @@ fn split_front_matter(raw: &str) -> Option<(&str, &str)> {
     Some((head, body))
 }
 
+/// 装什么进 system prompt。**这三档是行为契约，不是风格偏好。**
+///
+/// 用户 2026-10-14：「人格特性生效于非 workers 场景，并且是用户开启个性化设置的情况下
+/// 启用，否则不记录、不调用、不修改，直接按照模型供应商本体特性行事。」
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptScope {
+    /// 工人：功能契约 —— 工程纪律 + 角色 + 模式行为。**不带风格。**
+    ///
+    /// 工人交出去的是结果与证据，风格不影响它们，而每一段提示词都要花掉上下文。
+    Worker,
+    /// 一般模式 + 个性化开：在功能契约之上加风格，成为「你的」agent。
+    Personalized,
+    /// 一般模式 + 个性化关（缺省）：**一段都不加**，按供应商本体的行为行事。
+    Bare,
+}
+
+impl Default for PromptScope {
+    /// 缺省是 [`PromptScope::Worker`]：给「没有这个字段」的旧启动配置用，
+    /// 而那些配置都是工人模式下物化的。
+    fn default() -> Self {
+        Self::Worker
+    }
+}
+
 /// 提示词的一段。保留来源，才能回答「Echo 风格到底有没有进 system prompt」。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptSection {
@@ -351,10 +376,17 @@ impl AgentRegistry {
     /// 话，一段强调「简短回答」的风格提示会覆盖掉「先取证再结论」的纪律。
     pub fn compose_system_prompt(
         &self,
+        scope: PromptScope,
         id: AgentId,
         mode: Mode,
         workspace_instructions: Option<&str>,
     ) -> SpecResult<SystemPrompt> {
+        // 一般模式 + 个性化关：**一段都不加**（用户 2026-10-14）。返回空集而不是
+        // 「加了但很短」——「不加」必须是可判定的：调用方据此写出空 personaSuffix。
+        if scope == PromptScope::Bare {
+            return Ok(SystemPrompt { agent: id, mode, sections: Vec::new() });
+        }
+
         let def = self.definition(id)?;
         // 组合合法性在这里再确认一次：调用方可能拿配置里的模式直接进来。
         crate::mode::AgentMode::resolve(Some(id), Some(mode))?;
@@ -367,8 +399,12 @@ impl AgentRegistry {
             text: def.body.clone(),
         });
         sections.push(self.prompt_section("mode", mode_prompt_name(mode))?);
-        if let Some(style) = &def.style {
-            sections.push(self.prompt_section("style", style)?);
+        // 风格只在个性化那一档进 —— 工人交出去的是结果与证据，风格不影响它们，
+        // 而每一段提示词都要花掉上下文（用户 2026-10-14：「人格生效于非 workers 场景」）。
+        if scope == PromptScope::Personalized {
+            if let Some(style) = &def.style {
+                sections.push(self.prompt_section("style", style)?);
+            }
         }
         if let Some(extra) = workspace_instructions {
             let extra = extra.trim();
@@ -465,7 +501,7 @@ mod tests {
         assert!(registry.ids().contains(&AgentId::Echo));
 
         let prompt = registry
-            .compose_system_prompt(AgentId::Echo, Mode::Build, Some("工作区规则"))
+            .compose_system_prompt(PromptScope::Personalized, AgentId::Echo, Mode::Build, Some("工作区规则"))
             .unwrap();
         assert!(prompt.has_section("engineering"));
         assert!(prompt.has_section("agent"));
@@ -479,12 +515,44 @@ mod tests {
         assert!(prompt.text().contains(first_rule), "风格首条规则没有进入提示词");
     }
 
+    /// 三档的人格边界（用户 2026-10-14 的裁定）。
+    #[test]
+    fn prompt_scope_decides_whether_style_and_discipline_are_injected() {
+        let root = repo_root();
+        let registry = AgentRegistry::load(&root.join("agents"), &root.join("prompts")).unwrap();
+
+        let worker = registry
+            .compose_system_prompt(PromptScope::Worker, AgentId::Echo, Mode::Build, None)
+            .unwrap();
+        assert!(worker.has_section("engineering"));
+        assert!(worker.has_section("agent"));
+        assert!(worker.has_section("mode"));
+        assert!(!worker.has_section("style"), "工人不带风格");
+
+        let personalized = registry
+            .compose_system_prompt(PromptScope::Personalized, AgentId::Echo, Mode::Build, None)
+            .unwrap();
+        assert!(personalized.has_section("style"), "个性化开了才有风格");
+
+        // 关的时候是**一段都不加**，不是「加得少」。这条要能被程序判定 ——
+        // 调用方据此写出空的 personaSuffix。
+        let bare = registry
+            .compose_system_prompt(PromptScope::Bare, AgentId::Echo, Mode::Build, Some("工作区规则"))
+            .unwrap();
+        assert!(bare.sections.is_empty(), "个性化关：{bare:?}");
+        assert_eq!(bare.text(), "");
+    }
+
     #[test]
     fn plan_composition_differs_from_build() {
         let root = repo_root();
         let registry = AgentRegistry::load(&root.join("agents"), &root.join("prompts")).unwrap();
-        let build = registry.compose_system_prompt(AgentId::Echo, Mode::Build, None).unwrap();
-        let plan = registry.compose_system_prompt(AgentId::Echo, Mode::Plan, None).unwrap();
+        let build = registry
+            .compose_system_prompt(PromptScope::Worker, AgentId::Echo, Mode::Build, None)
+            .unwrap();
+        let plan = registry
+            .compose_system_prompt(PromptScope::Worker, AgentId::Echo, Mode::Plan, None)
+            .unwrap();
         assert_ne!(build.text(), plan.text());
         assert!(plan.section("mode").unwrap().source.ends_with("plan-behavior.md"));
     }

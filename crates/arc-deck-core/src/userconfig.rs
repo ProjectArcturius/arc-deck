@@ -18,6 +18,22 @@ use crate::provider::ProviderConfig;
 /// 当前钉住的 DSH 版本（PRODUCT_PLAN §9.2a）。升级是刻意的工程动作。
 pub const PINNED_DSH_VERSION: &str = "0.2.1-alpha.2";
 
+/// 个性化设置。**默认关。**（用户 2026-10-14）
+///
+/// 关着的时候：不加风格、不加工程规则、不写风格相关的留档 ——
+/// 直接按模型供应商本体的行为行事。
+///
+/// 哪些东西归这里，见 `prompts/constitution.md` 第四节：提交粒度与权限、语言与称呼、
+/// 工具偏好、测试多少。判据是「**改掉之后产品还可不可信**」—— 改了只是换种口味的是偏好，
+/// 改了就让回报失去意义的才是宪法。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Personalization {
+    /// 缺省 **false**：一般模式下不注入任何 Arc Deck 文本。
+    #[serde(default)]
+    pub enabled: bool,
+}
+
 /// `arcdeck.json`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -26,6 +42,9 @@ pub struct UserConfig {
     pub schema: Option<String>,
     /// `<provider>/<model>`。没有内置默认值：缺了就报错，不编一个路由。
     pub model: String,
+    /// 个性化：管风格与个人习惯。**默认关**。
+    #[serde(default)]
+    pub personalization: Personalization,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     /// OpenCode 形状的供应商块。
@@ -210,6 +229,7 @@ pub fn starter_config() -> String {
   "model": "opencode-go/deepseek-v4.1-flash",
   "provider": {},
   "runtime": { "session_log_upload": false },
+  "personalization": { "enabled": false },
   "worker": {
     "sandbox": "workspace-write",
     "allow_commit": false,
@@ -299,6 +319,8 @@ mod tests {
         assert_eq!(c.worker.max_attempts, 3);
         assert!(!c.runtime.session_log_upload);
         assert_eq!(c.dsh_version(), PINNED_DSH_VERSION);
+        // 个性化默认关 —— 一般模式下一个字都不注入（用户 2026-10-14）。
+        assert!(!c.personalization.enabled);
     }
 
     #[test]

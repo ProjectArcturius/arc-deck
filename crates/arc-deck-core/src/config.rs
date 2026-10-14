@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::agent::PromptScope;
 use crate::error::{code, SpecError, SpecResult};
 use crate::paths;
 use crate::SCHEMA_VERSION;
@@ -236,6 +237,9 @@ pub struct Authorization {
 pub struct WorkerConfig {
     pub schema_version: u32,
     pub runtime: RuntimeSpec,
+    /// 装什么进 system prompt（工人 / 个性化 / 什么都不加）。见 [`PromptScope`]。
+    #[serde(default)]
+    pub prompt_scope: PromptScope,
     /// 状态目录：重复 task_id 的检测与原始事件落盘都在这里。必须显式给出。
     pub state_root: PathBuf,
     pub authorization: Authorization,

@@ -102,6 +102,8 @@ fn config_example_matches_the_worker_config() {
     let config = WorkerConfig::parse(&raw, &example_base("C:/arc-deck")).unwrap();
 
     assert_eq!(config.authorization.profile, "workspace-readonly");
+    // 提示词的装配档位是启动配置的一部分：它决定工人拿到的 system prompt 里有什么。
+    assert_eq!(config.prompt_scope, arc_deck_core::agent::PromptScope::Worker);
     assert_eq!(config.authorization.allowed_agents.len(), 3);
     assert_eq!(config.model.as_ref().unwrap().model, "deepseek-v4.1-flash");
     assert_eq!(config.liveness.max_attempts, 3);

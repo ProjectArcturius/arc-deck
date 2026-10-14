@@ -119,7 +119,8 @@ fn prepare(args: &WorkerArgs) -> Result<Prepared, SpecError> {
     let assigned_by = task.assigned_by.clone();
     let title = status::derive_title(&task.instruction);
     // 工作区指令由 DSH 的既有机制装载（PRODUCT_PLAN §5.3），M1 不重复注入。
-    let system_prompt = registry.compose_system_prompt(plan.policy.agent, plan.policy.mode, None)?;
+    let system_prompt =
+        registry.compose_system_prompt(config.prompt_scope, plan.policy.agent, plan.policy.mode, None)?;
 
     let run_dir = config.state_root.join("runs").join(&plan.task_id);
     // 运行时能力在建立任何状态之前就查清。

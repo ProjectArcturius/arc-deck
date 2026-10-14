@@ -12,6 +12,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use arc_deck_core::agent::PromptScope;
 use arc_deck_core::config::{
     AgentSources, Authorization, Liveness, ModelRoute, RuntimeSpec, Timeouts, WorkerConfig,
 };
@@ -326,9 +327,19 @@ async fn cmd_run(argv: &[String]) -> CmdResult {
     };
 
     let profile = if cfg.worker.sandbox == "read-only" { "workspace-readonly" } else { "workspace-development" };
+    // 装什么进 system prompt：工人模式是功能契约；一般模式看个性化开关，
+    // **关着就一段都不加**，按供应商本体行事（用户 2026-10-14）。
+    let prompt_scope = if worker_mode {
+        PromptScope::Worker
+    } else if cfg.personalization.enabled {
+        PromptScope::Personalized
+    } else {
+        PromptScope::Bare
+    };
     let config = WorkerConfig {
         schema_version: SCHEMA_VERSION,
         runtime: runtime_spec,
+        prompt_scope,
         state_root: root.clone(),
         authorization: Authorization {
             workspace: workspace.clone(),
