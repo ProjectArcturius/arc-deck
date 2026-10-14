@@ -353,7 +353,7 @@ fn failure_turn_reports_failed_and_surfaces_the_model_failure_exit() {
 fn failing_acceptance_carries_a_decidable_reason() {
     // 工人正常收工、验收命令却以非零退出 —— 这是最常见的一种「做完了但没做对」。
     // 没有这条 blocker 的话，状态面上只有一个 `failed`，调度者得回去读 result.json。
-    let case = Case::new("failing-acceptance", command_acceptance(), json!({}));
+    let case = Case::new("failing-acceptance", command_acceptance(), json!({ "assigned_by": "sol" }));
     let run = case.run();
     assert_eq!(run.code, 1, "stderr={}", run.stderr);
     let result = run.result();
@@ -374,6 +374,22 @@ fn failing_acceptance_carries_a_decidable_reason() {
     .unwrap();
     assert_eq!(status["last_error"]["code"], "ACCEPTANCE_FAILED");
     assert_eq!(status["last_error"]["retryable"], false, "同一份活儿原样再派一次还是不过");
+
+    // 调度者的第二个命令。一条 `report` 要把五件事答完：谁派的（派工 sol）、
+    // 干什么（任务书标题）、什么样（failed + 验收明细）、为什么（ACCEPTANCE_FAILED）、
+    // 要不要再派（不能）。答不完就得回去翻 result.json 或 events.jsonl —— 那正是要消掉的成本。
+    let report = Command::new(binary())
+        .arg("report")
+        .arg("t1")
+        .arg("--state-root")
+        .arg(case.dir.path().join("state"))
+        .output()
+        .expect("report");
+    assert_eq!(report.status.code(), Some(1));
+    let text = String::from_utf8_lossy(&report.stdout).to_string();
+    for needle in ["派工 sol", "离线夹具任务", "ACCEPTANCE_FAILED", "再派一次能解决吗：不能"] {
+        assert!(text.contains(needle), "report 里没有 `{needle}`：\n{text}");
+    }
 }
 
 #[test]

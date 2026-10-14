@@ -17,7 +17,7 @@ use arc_deck_core::config::{
 };
 use arc_deck_core::error::{code, SpecError};
 use arc_deck_core::provider::{self, AuthStore};
-use arc_deck_core::result::TaskResult;
+use arc_deck_core::result::{TaskResult, TaskStatus};
 use arc_deck_core::task::{Acceptance, TaskSpec};
 use arc_deck_core::userconfig::{self, UserConfig};
 use arc_deck_core::{EXIT_SPEC_ERROR, SCHEMA_VERSION};
@@ -726,11 +726,39 @@ fn cmd_report(argv: &[String]) -> CmdResult {
 }
 
 /// 紧凑回报（PRODUCT_PLAN §6.5.5）：事实与模型陈述分开标。目标约 2 KB。
+///
+/// 开头四行回答派工的五件事：谁派的（`assigned_by`）、干什么（`title`）、
+/// 结果（`status`）、要不要再派一次（`retryable`）—— 「做什么样」在下面的事实里。
 fn render_report(r: &TaskResult, st: Option<&StatusFile>, dir: &Path, now: u64) -> String {
     let mut o = String::new();
     let elapsed = st.map(|s| status::human(s.heartbeat_at.saturating_sub(s.started_at) / 1000)).unwrap_or_default();
     let attempts = st.map(|s| s.attempt).unwrap_or(1);
-    o.push_str(&format!("# {}  {}  · {elapsed} · 运行 {attempts} 次\n", r.task_id, r.status.as_str()));
+    match st.and_then(|s| s.title.as_deref()) {
+        Some(title) => o.push_str(&format!("# {}  {}\n", r.task_id, status::clip(title, 80))),
+        None => o.push_str(&format!("# {}\n", r.task_id)),
+    }
+    o.push_str(&format!(
+        "{} · 派工 {} · {elapsed} · 运行 {attempts} 次\n",
+        r.status.as_str(),
+        st.and_then(|s| s.assigned_by.as_deref()).unwrap_or("（未记录）"),
+    ));
+    // 「要不要再派一次」是调度者的下一个决定，所以放在最上面 —— 别让它翻到下面才看得到。
+    if r.status != TaskStatus::Completed {
+        // 单一来源：`status.json` 的 `last_error` 是终态时写下的那一条；没有就退回
+        // 第一个 blocker（两者的码在 `finish()` 里是同一个）。
+        let code = st
+            .and_then(|s| s.last_error.as_ref())
+            .map(|e| e.code.clone())
+            .or_else(|| r.blockers.first().map(|b| b.code.clone()));
+        if let Some(code) = code {
+            let verdict = if arc_deck_core::failure::retryable(&code) {
+                "可能 —— 这类失败通常是临时的，换一次再派，或等一会儿"
+            } else {
+                "不能 —— 重派不会让它变好；先改配置或看下面的事实"
+            };
+            o.push_str(&format!("再派一次能解决吗：{verdict}（{code}）\n"));
+        }
+    }
     let _ = now;
     o.push_str("\n## Arc Deck 采集的事实\n");
     for b in &r.blockers {
