@@ -20,6 +20,28 @@ DSH 对非 DS 模型是否适用的调查：[docs/DSH_FINDINGS.md](docs/DSH_FIND
 
 下文保留旧实现约束与历史实测；其中「两条 GUI」「C# 协议层作为新宿主引用」及原分线安排不再支配新开发。若历史路线与当前产品方向冲突，以 PRODUCT_PLAN 为准；非冲突的工程/证据纪律继续执行。
 
+## 派工：谁把任务书递给谁
+
+本仓在整条链上**几乎只做工人**。所以派工这一侧只有一条规矩要记：**派工时把「谁派的」带上。**
+
+| 座位 | 谁 | 跑在哪 |
+|---|---|---|
+| 绝对高位调度者（老板） | Claude，用自己的 Claude Code 发任务书 | 本仓之外 |
+| 组长 | Sol，用自己的 Codex；可替班，也可小做修改与 feat | 本仓之外 |
+| 工人 | `arcdeck` worker | 本机 / Ether |
+
+派一件工人任务，跟踪都在这三行里：
+
+```bash
+arcdeck run <任务书.md> --id <id> --by <谁> --worktree dsh/<id> --accept "<验收命令>" --detach
+arcdeck status <id>          # 每次检查只读这一行；退出码见 PRODUCT_PLAN §6.5.3
+arcdeck report <id>          # 终态后：Arc Deck 采集的事实与模型的陈述分开
+```
+
+- **`--by` 记的是派工关系的边，不是授权。** 它落成 `status.json` 里的 `assigned_by`，供外部监控程序（`cute-agents-monitor`）画任务书流向。缺席就是没记，不改变任何判定。上两层不是 Arc Deck 任务，所以它是自由文本（`claude` / `sol`），不是任务 id。
+- **总是带 `--accept`。** 没有验收命令时 `completed` 只表示内核正常结束 —— §10.2b 里实测出现过「提交被拒但 completed」。
+- Ether 侧的派工脚本抄 `examples/ether/ad.sh`。
+
 ## 旧实现与历史记录
 
 此前 Arc Deck 是 DeepSeek Harness 的原生桌面客户端，有两个并列实现，

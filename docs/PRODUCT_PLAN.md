@@ -267,6 +267,7 @@ M1 只支持 `runtime.kind=fixture-sdk` 与 `offline-test`，且仅在 `test-run
   "workspace": "C:/work/project",
   "agent": "echo",
   "mode": "build",
+  "assigned_by": "sol",
   "instruction": "修复会话筛选，并补回归测试",
   "constraints": {
     "read_paths": ["."],
@@ -284,6 +285,7 @@ M1 只支持 `runtime.kind=fixture-sdk` 与 `offline-test`，且仅在 `test-run
 
 - `workspace` 是显式绝对路径；范围相对 workspace 解析，检查路径逃逸、链接与平台大小写语义。示例不是所有项目通用的测试命令。
 - `agent/mode` 可省略并按 §5.1 解析；`constraints` 可缺省为启动配置上限再取模式限制，但缺省不等于 full access。显式要求越过上限时拒绝，不静默扩大或裁剪要求。
+- `assigned_by` 是**派工关系的边**（谁把任务书递过来的），不是授权。它是自由文本（`claude` / `sol` / 某个任务 id），因为 Arc Deck 里几乎全是工人，树的上两层（Claude Code、Codex）**不是 Arc Deck 任务**、没有自己的状态目录 —— 记任务 id 会指向查不到的东西。命令行给法 `arcdeck run <任务书> --by <谁>`；用途是让外部监控程序画任务书流向，不影响任何判定。
 - `acceptance` 可省略为 `[]`；v1 每项均为必需项，ID 唯一，只支持下面两类。空列表只表示没有额外交付门槛，不表示代码已经测试。
 - 同一状态目录重复 `task_id` 不自动重跑；重试用新 ID 并关联原任务。首版不承诺跨崩溃 exactly-once。
 - 超时为整个任务的墙钟预算，不是单次 LLM 的输出上限。总 token/费用硬预算只有在完整 accounting 与停止机制验证后才开放，不做假预算开关。
@@ -359,6 +361,7 @@ Ether 现在的 runner 脚本（`tools/dispatch/dsh-runner.sh`、`runner.sh`）�
 
 - `schema_version`、`task_id`、`state`（`accepted/starting/running/verifying` 或终态）、`host`
 - `pid` 与 `pid_started_at`（监工），`runtime_pid`
+- `assigned_by`、`title`：派工的边与节点标签，给外部监控程序用；缺席不写。**判进程是否还在时应比对 `pid` 与启动时间** —— 只看 pid 存在会被 pid 复用骗过去（`pid_started_at` 待补，见 §10.2b）
 - `started_at`；`heartbeat_at`（监工还活着）；`progress_at`（最后一次来自 DSH 的**实质**事件：模型输出块、工具开始或结束）
 - `activity`：`{kind: model|tool|verify|idle, name, summary（≤80 字）, since}` —— 此刻在做什么
 - `counters`：`steps`、`tool_calls`、`tool_errors`、`commits`（worktree 上 `main..HEAD` 的提交数）
