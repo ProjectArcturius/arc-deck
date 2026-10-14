@@ -45,7 +45,7 @@ arcdeck —— Arc Deck（DSH 之上的编码 Agent）
 
   arcdeck                               当前目录进 TUI（尚未实现）
   arcdeck run <任务书.md|.json|-> [选项] 执行一件任务（前台：stdout 是 JSONL，退出码 = 终态）
-      --detach                          分离运行，立即返回任务 ID
+      --detach                          分离运行；等工人接住（写出状态）才返回，接不住就报出原因
       --id <ID>                         任务 ID（缺省取任务书文件名）
       --by <谁>                         谁派的这件任务（claude / sol…），只记进状态，不进授权
       --workspace <目录>                缺省为当前目录

@@ -308,6 +308,59 @@ pub fn read(path: &Path) -> Option<StatusFile> {
     serde_json::from_str(&raw).ok()
 }
 
+/// 派工方替「还没开始就死了的工人」写下的终态。
+///
+/// **为什么由派工方写**：工人是在预检（读配置、查运行时、取密钥）里死的，而预检
+/// 跑在第一个状态写手建立**之前** —— 它写不出自己的失败。没有这一条，一次配置错的
+/// 派工在状态面上完全不存在：`arcdeck status --all` 报「没有任务」，真正的原因
+/// 只躺在 `console.err` 里，调度者只能回去翻日志。那正是 §6.5 列的第四个问题
+/// （后台化漏了就静默消失）换了个形式。
+#[derive(Debug, Clone)]
+pub struct PreflightFailure {
+    pub task_id: String,
+    pub workspace: String,
+    pub model: Option<String>,
+    pub assigned_by: Option<String>,
+    pub title: Option<String>,
+    pub code: String,
+    pub message: String,
+}
+
+/// 原子写进 `<run_dir>/status.json`。目录不存在就什么都不做（返回 false）。
+pub fn write_preflight_failure(run_dir: &Path, failure: PreflightFailure) -> bool {
+    if !run_dir.is_dir() {
+        return false;
+    }
+    let now = now_ms();
+    let status = StatusFile {
+        schema_version: arc_deck_core::SCHEMA_VERSION,
+        task_id: failure.task_id,
+        state: "failed".into(),
+        terminal: Some(true),
+        host: host_name(),
+        // 没有监工进程可言：这一条记录是**代写的**，不冒充一个活着的写者。
+        pid: 0,
+        runtime_pid: None,
+        workspace: failure.workspace,
+        model: failure.model,
+        assigned_by: failure.assigned_by,
+        title: failure.title,
+        started_at: now,
+        heartbeat_at: now,
+        progress_at: now,
+        activity: Activity { kind: "idle".into(), name: None, summary: None, since: now },
+        counters: Counters::default(),
+        // 0 次：一次都没真正跑起来。`report` 里的「运行 N 次」要如实反映这一点。
+        attempt: 0,
+        max_attempts: 1,
+        last_error: Some(LastError { code: failure.code, message: clip(&failure.message, 200) }),
+        usage: None,
+        limits: Limits { heartbeat_s: 15, model_idle_s: 300, tool_stall_s: 1800 },
+    };
+    StatusWriter::new(run_dir, status);
+    true
+}
+
 pub fn human(secs: u64) -> String {
     if secs < 60 {
         format!("{secs}s")

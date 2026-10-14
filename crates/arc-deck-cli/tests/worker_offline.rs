@@ -481,6 +481,93 @@ fn status_file_tracks_a_successful_run_to_its_terminal_state() {
     assert!(status["heartbeat_at"].as_u64().unwrap() >= status["started_at"].as_u64().unwrap());
 }
 
+/// `run --detach` 的派工握手：**分离不等于成功**。
+///
+/// 只 `spawn` 就返回 0 的版本里，一次预检失败会打印「started」并退出 0，而
+/// `status --all` 报「没有任务」—— 原因只留在 `console.err` 里，调度者只能回去
+/// 翻日志。这条测试钉住两件事：失败要**报出来**（退出码与 stdout 都不冒充成功），
+/// 而且**要落进状态面**（否则监控程序与 `status` 都看不见这条派工）。
+///
+/// 密钥故意走 `{env:…}` 且变量名不存在，这样无论本机有没有配过 auth.json，
+/// 预检都必然失败 —— 测试不依赖运行环境。
+#[test]
+fn detached_dispatch_reports_a_preflight_failure_instead_of_printing_started() {
+    let dir = tempfile::tempdir().expect("建临时目录");
+
+    // 假运行时：只为让 `cmd_run` 的 `layout.check` 过去；预检会在取密钥那一步先失败。
+    let runtime = dir.path().join("runtime/node_modules/@deepseek-ai/dsh");
+    std::fs::create_dir_all(runtime.join("lib")).unwrap();
+    std::fs::write(runtime.join("package.json"), r#"{"version":"0.2.1-alpha.2"}"#).unwrap();
+    std::fs::write(runtime.join("lib/bin.js"), "// 不会被执行的假入口\n").unwrap();
+
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let state = dir.path().join("state");
+
+    let config = dir.path().join("arcdeck.json");
+    std::fs::write(
+        &config,
+        serde_json::to_string_pretty(&json!({
+            "model": "cam-no-key/some-model",
+            "provider": {
+                "cam-no-key": {
+                    "name": "测试用：永远取不到密钥的供应商",
+                    "api": "anthropic-messages",
+                    "options": {
+                        "baseURL": "http://127.0.0.1:1",
+                        "apiKey": "{env:ARCDECK_TEST_ABSENT_KEY}"
+                    },
+                    "models": { "some-model": { "name": "无" } }
+                }
+            },
+            "runtime": { "dir": dir.path().join("runtime").display().to_string() },
+            "state_root": state.display().to_string()
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let task = dir.path().join("task.md");
+    std::fs::write(&task, "# 派工握手测试\n\n正文……\n").unwrap();
+
+    let output = Command::new(binary())
+        .arg("run")
+        .arg(&task)
+        .arg("--id")
+        .arg("dispatch-handshake")
+        .arg("--by")
+        .arg("claude")
+        .arg("--config")
+        .arg(&config)
+        .arg("--workspace")
+        .arg(&workspace)
+        .arg("--state-root")
+        .arg(&state)
+        .arg("--detach")
+        .output()
+        .expect("派工");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    assert_eq!(output.status.code(), Some(64), "stdout={stdout} stderr={stderr}");
+    assert!(stderr.contains("CONFIG_INVALID"), "stderr={stderr}");
+    assert!(!stdout.contains("started"), "预检失败不该报 started：{stdout}");
+
+    // 关键的一条：失败要落在状态面上。
+    let status: Value = serde_json::from_str(
+        &std::fs::read_to_string(state.join("runs/dispatch-handshake/status.json"))
+            .expect("预检失败也要写出 status.json"),
+    )
+    .unwrap();
+    assert_eq!(status["state"], "failed");
+    assert_eq!(status["terminal"], true);
+    assert_eq!(status["last_error"]["code"], "CONFIG_INVALID");
+    // 派工的边与标签由派工方代写 —— 工人没跑到那一步就死了。
+    assert_eq!(status["assigned_by"], "claude");
+    assert_eq!(status["title"], "派工握手测试");
+    assert_eq!(status["attempt"], 0, "一次都没真正跑起来");
+}
+
 #[test]
 fn cancel_file_stops_the_run_and_confirms_the_process_exit() {
     let case = Case::new("cancel", no_acceptance(), json!({ "timeout_seconds": 30 }));

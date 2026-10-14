@@ -220,7 +220,7 @@ Build/Plan 借鉴的是角色与行为，不将 OpenCode 的 provider、工具�
 ```text
 arcdeck                                   当前目录进 TUI（M4 前：打印「TUI 尚未实现」与 headless 用法，退出 64）
 arcdeck run <任务书> [选项]                前台执行一件任务；stdout 是 JSONL 协议，退出码 = 终态（§6.3）
-arcdeck run <任务书> --detach [选项]       分离执行：立即打印任务 ID 一行并退出 0；监工在后台跑
+arcdeck run <任务书> --detach [选项]       分离执行：等到工人接住（写出状态）才返回；接不住就报出原因
 arcdeck status [<id>…|--all] [--json]     每件任务一行；单件时退出码编码状态（§6.5）
 arcdeck wait <id> [--timeout <时长>]      阻塞到终态或超时，打印一行；退出码同 status
 arcdeck report <id> [--json]              终态的紧凑回报（§6.5.4）
@@ -234,9 +234,16 @@ arcdeck worker run --config … --task …    M1 的底层入口，保留为 `ru
 （缺省取任务书文件名）、`--accept <命令>`（可重复，追加 `command` 类验收）、`--preamble <文件>`、
 `--worktree <分支>`（§6.6）、`--model <provider/model>`、`--timeout <时长>`。
 
-**启动配置的查找顺序**：`--config` → `$ARCDECK_CONFIG` → 用户配置目录下的 `arcdeck/worker.json`。
-**永远不从 workspace 里找配置** —— 任务书和工作区文件不得扩大启动时授权（§5.3）。找不到就退出 64，
+**启动配置的查找顺序**：`--config` → `$ARCDECK_CONFIG` → 用户配置目录下的 `arcdeck/worker.json`。**永远不从 workspace 里找配置** —— 任务书和工作区文件不得扩大启动时授权（§5.3）。找不到就退出 64，
 不用内置默认值顶上。
+
+**`--detach` 是一次派工握手，不是 fork 完就走。** 只 `spawn` 就返回 0，会把预检失败
+（缺密钥、运行时没装、Agent 不认）整个藏进子进程：派工的人拿到「started」，而
+`arcdeck status --all` 报「没有任务」，原因只躺在 `console.err` 里 —— 那正是 §6.5 第四个
+问题（漏了就静默消失）的翻版。所以 `--detach` 等到**工人写出 `status.json`** 才算派工成功；
+子进程在任何状态写出之前退出时，由派工方把这次失败**代写进 `status.json`**（终态 `failed`
+＋ `last_error`）再原样报出来。判据是确定的（状态文件出现 / 子进程先退出），不靠时间猜：
+只是慢、还活着的进程照常报「已启动」。
 
 ### 6.1 首版调用方式
 
@@ -368,6 +375,10 @@ Ether 现在的 runner 脚本（`tools/dispatch/dsh-runner.sh`、`runner.sh`）�
 - `attempt`、`max_attempts`、`last_error: {code, message（≤200 字）}`
 - `usage`：provider 实际报告的输入 / 缓存命中 / 输出 token；没有就不写
 - `limits`：`{heartbeat_s, model_idle_s, tool_grace_s}` —— 判定用的阈值跟着文件写出，读者不必去猜配置
+
+预检失败（工人还没开始就死了）由**派工方**代写一份终态 `status.json`：`state=failed`、
+`terminal=true`、`pid=0`（不冒充一个活着的写者）、`attempt=0`（一次都没真正跑起来），
+`last_error` 是预检报的那个结构化错误。没有这一条，一次配置错的派工在状态面上完全不存在。
 
 #### 6.5.2 健康判定：由读者计算，不由写者自报
 

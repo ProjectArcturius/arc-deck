@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arc_deck_core::config::{
     AgentSources, Authorization, Liveness, ModelRoute, RuntimeSpec, Timeouts, WorkerConfig,
@@ -244,6 +244,12 @@ async fn cmd_run(argv: &[String]) -> CmdResult {
     }
 
     let profile = if cfg.worker.sandbox == "read-only" { "workspace-readonly" } else { "workspace-development" };
+    // 路由只解析一次：启动配置里写一份，派工失败时写进状态面一份，两边必须逐字相同。
+    let model_route = Some(ModelRoute {
+        provider: route.dsh_provider.clone(),
+        model: route.model.clone(),
+        reasoning_effort: cfg.reasoning_effort.clone(),
+    });
     let config = WorkerConfig {
         schema_version: SCHEMA_VERSION,
         runtime: RuntimeSpec::DshSdk {
@@ -268,11 +274,7 @@ async fn cmd_run(argv: &[String]) -> CmdResult {
             allowed_agents: vec!["echo".into(), "build".into(), "plan".into()],
         },
         agents: AgentSources { dir: agents_dir, prompts_dir },
-        model: Some(ModelRoute {
-            provider: route.dsh_provider.clone(),
-            model: route.model.clone(),
-            reasoning_effort: cfg.reasoning_effort.clone(),
-        }),
+        model: model_route.clone(),
         env,
         timeouts: Timeouts { default_task_seconds: timeout, wait_seconds: timeout, ..Timeouts::default() },
         liveness: Liveness {
@@ -336,7 +338,15 @@ async fn cmd_run(argv: &[String]) -> CmdResult {
 
     let cancel = dir.join("cancel.json");
     if flags.has("--detach") {
-        return spawn_detached(&dir, &config_path, &task_path, &cancel, &task_id);
+        // 派工握手要用到这些事实：工人还没起来，它自己写不出「谁派的、干什么」。
+        let facts = DispatchFacts {
+            task_id: task_id.clone(),
+            workspace: workspace.display().to_string(),
+            model: model_route.as_ref().map(|m| format!("{}/{}", m.provider, m.model)),
+            assigned_by: task.assigned_by.clone(),
+            title: status::derive_title(&task.instruction),
+        };
+        return spawn_detached(&dir, &config_path, &task_path, &cancel, &facts);
     }
     let args = WorkerArgs {
         config: config_path,
@@ -455,7 +465,21 @@ fn ensure_worktree(cfg: &UserConfig, repo: &Path, branch: &str, task_id: &str) -
 
 /// 分离运行：子进程脱离当前终端与 ssh 会话，stdout/stderr 落文件。
 /// 取代 Ether 手册里的 `nohup … &`（「只加 & 不加 nohup，命令结束时任务被一起杀掉」实测过）。
-fn spawn_detached(dir: &Path, config: &Path, task: &Path, cancel: &Path, task_id: &str) -> CmdResult {
+/// 派工时就要落进状态面的事实 —— 工人还没起来，这些只能由派工方带着。
+struct DispatchFacts {
+    task_id: String,
+    workspace: String,
+    model: Option<String>,
+    assigned_by: Option<String>,
+    title: Option<String>,
+}
+
+/// 派工握手的等待上限。工人写出 `status.json` 通常只要几十毫秒（预检全是本地
+/// 文件操作）；这个上限只会在**失败**路径上被走满。
+const DISPATCH_HANDSHAKE: Duration = Duration::from_secs(10);
+const DISPATCH_POLL: Duration = Duration::from_millis(20);
+
+fn spawn_detached(dir: &Path, config: &Path, task: &Path, cancel: &Path, facts: &DispatchFacts) -> CmdResult {
     let exe = std::env::current_exe().map_err(|e| SpecError::new(code::CONFIG_INVALID, format!("{e}")))?;
     let out = std::fs::File::create(dir.join("console.jsonl")).map_err(io_err(dir))?;
     let err = std::fs::File::create(dir.join("console.err")).map_err(io_err(dir))?;
@@ -475,7 +499,7 @@ fn spawn_detached(dir: &Path, config: &Path, task: &Path, cancel: &Path, task_id
         cmd.process_group(0);
     }
     #[cfg(windows)]
-    {
+    let mut child = {
         use std::os::windows::process::CommandExt;
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
@@ -483,17 +507,108 @@ fn spawn_detached(dir: &Path, config: &Path, task: &Path, cancel: &Path, task_id
         const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
         // 先试脱离作业对象（ssh / 终端关掉时连带杀作业里的进程）；作业不允许脱离时退回普通分离。
         cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB);
-        if let Ok(child) = cmd.spawn() {
-            println!("{task_id}  started  pid {}  · arcdeck status {task_id}", child.id());
-            return Ok(0);
+        match cmd.spawn() {
+            Ok(child) => child,
+            Err(_) => {
+                cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+                cmd.spawn()
+                    .map_err(|e| SpecError::new(code::CONFIG_INVALID, format!("分离启动失败：{e}")))?
+            }
         }
-        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
-    }
-    let child = cmd
+    };
+    #[cfg(not(windows))]
+    let mut child = cmd
         .spawn()
         .map_err(|e| SpecError::new(code::CONFIG_INVALID, format!("分离启动失败：{e}")))?;
-    println!("{task_id}  started  pid {}  · arcdeck status {task_id}", child.id());
-    Ok(0)
+
+    handshake(dir, &mut child, facts)
+}
+
+/// 派工握手：**分离不等于成功**。
+///
+/// 只 `spawn` 就返回 0，会把预检失败（缺密钥、运行时没装、Agent 不认）整个藏进
+/// 子进程 —— 派工的人拿到「started」，而 `arcdeck status --all` 报「没有任务」，
+/// 原因只留在 `console.err` 里。这是 §6.5 第四个问题（漏了就静默消失）的翻版。
+///
+/// 判据是确定的，不靠时间猜：状态文件出现 = 接住了；子进程先退出 = 没接住。
+/// 只有「还活着但还没写出状态」才退回从前的行为 —— **慢不等于失败**。
+fn handshake(dir: &Path, child: &mut std::process::Child, facts: &DispatchFacts) -> CmdResult {
+    let pid = child.id();
+    let status_path = dir.join(status::STATUS_FILE);
+    let deadline = Instant::now() + DISPATCH_HANDSHAKE;
+    let mut exited = false;
+    loop {
+        if status_path.is_file() {
+            break;
+        }
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                exited = true;
+                break;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return Err(SpecError::new(code::CONFIG_INVALID, format!("等待分离进程失败：{e}")));
+            }
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(DISPATCH_POLL);
+    }
+
+    // 复查一次：`try_wait` 与写盘不是原子的，中间可能有竞态。
+    if status_path.is_file() {
+        println!("{}  started  pid {pid}  · arcdeck status {}", facts.task_id, facts.task_id);
+        return Ok(0);
+    }
+    if !exited {
+        // 还活着，只是慢。报已启动，但把「还没写出状态」这件事说出来。
+        eprintln!(
+            "arcdeck: 分离进程已起（pid {pid}），但 {} 秒内还没写出状态；用 `arcdeck status {}` 跟踪",
+            DISPATCH_HANDSHAKE.as_secs(),
+            facts.task_id
+        );
+        println!("{}  started  pid {pid}  · arcdeck status {}", facts.task_id, facts.task_id);
+        return Ok(0);
+    }
+
+    // 子进程在写出任何状态之前就退出了。这是**确定的失败**，把它的原因落进状态面
+    // 再原样报上去，调度者不必去翻 console.err。
+    let (failure_code, message) = read_preflight_error(dir).unwrap_or_else(|| {
+        (
+            "PREFLIGHT_FAILED".to_string(),
+            format!("分离的工人进程在任何状态写出之前退出（pid {pid}）"),
+        )
+    });
+    status::write_preflight_failure(
+        dir,
+        status::PreflightFailure {
+            task_id: facts.task_id.clone(),
+            workspace: facts.workspace.clone(),
+            model: facts.model.clone(),
+            assigned_by: facts.assigned_by.clone(),
+            title: facts.title.clone(),
+            code: failure_code.clone(),
+            message: message.clone(),
+        },
+    );
+    Err(SpecError::new(&failure_code, message))
+}
+
+/// 从 `console.err` 里取最后一条 `spec_error`（工人预检失败时写的）。取不到返回 None。
+fn read_preflight_error(dir: &Path) -> Option<(String, String)> {
+    let raw = std::fs::read_to_string(dir.join("console.err")).ok()?;
+    for line in raw.lines().rev() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if value["type"] != "spec_error" {
+            continue;
+        }
+        let code = value["data"]["code"].as_str()?.to_string();
+        let message = value["data"]["message"].as_str().unwrap_or_default().to_string();
+        return Some((code, message));
+    }
+    None
 }
 
 // ── status / wait / report / logs / cancel ─────────────────────────────
