@@ -173,17 +173,29 @@ fn parse_duration(raw: &str) -> Result<u64, SpecError> {
 async fn cmd_run(argv: &[String]) -> CmdResult {
     let flags = Flags::parse(
         argv,
-        &["--config", "--workspace", "--id", "--accept", "--preamble", "--worktree", "--git-base",
+        &["--config", "--workspace", "--id", "--accept", "--preamble", "--worktree", "--git-base", "--prompt",
           "--model", "--timeout", "--agent", "--state-root", "--by", "--format", "--permission",
           "--effort"],
         &["--detach", "--rerun"],
     )?;
-    let [task_arg] = flags.positional.as_slice() else {
-        return Err(SpecError::new(
-            code::CONFIG_INVALID,
-            "用法：arcdeck run <任务书.md|.json|-> 或 arcdeck run \"<要对模型说的话>\" [--detach] [--id ID] [--by 派工者] [--worktree 分支] [--accept 命令]…",
-        ));
+    // TUI 粘贴可能超过 Windows 的命令行长度，也可能恰好是文件名。
+    // 显式 prompt 从 stdin 读原文，避免把用户输入误当任务书或经 shell 插值。
+    let literal_prompt = flags.one("--prompt");
+    let task_arg = match (flags.positional.as_slice(), literal_prompt) {
+        ([], Some("-")) => {
+            let mut text = String::new();
+            std::io::stdin().read_to_string(&mut text)
+                .map_err(|e| SpecError::new(code::TASK_UNREADABLE, e.to_string()))?;
+            text
+        }
+        ([], Some(text)) => text.to_string(),
+        ([arg], None) => arg.clone(),
+        _ => return Err(SpecError::new(code::CONFIG_INVALID,
+            "用法：arcdeck run <任务书|指令> 或 arcdeck run --prompt <原文|->；二者不能同时提供")),
     };
+    if task_arg.trim().is_empty() {
+        return Err(SpecError::new(code::TASK_INVALID, "指令不能为空"));
+    }
     let (cfg, cfg_path) = UserConfig::locate_and_load(flags.one("--config").map(Path::new))?;
     let root = flags.one("--state-root").map(PathBuf::from).unwrap_or_else(|| cfg.state_root());
 
@@ -199,13 +211,13 @@ async fn cmd_run(argv: &[String]) -> CmdResult {
         || flags.one("--git-base").is_some()
         || flags.one("--by").is_some()
         || flags.one("--preamble").is_some();
-    let is_task_book = task_arg == "-" || Path::new(task_arg).is_file();
+    let is_task_book = literal_prompt.is_none() && (task_arg == "-" || Path::new(&task_arg).is_file());
     let (instruction, json_task, default_id) = if is_task_book {
-        load_task_source(task_arg)?
+        load_task_source(&task_arg)?
     } else {
         // 看着像路径却不存在，多半是任务书路径打错了。当成一句话发出去会得到一个
         // 莫名其妙的回答，所以这里明确拒绝，而不是替用户猜。
-        if !task_arg.contains(char::is_whitespace)
+        if literal_prompt.is_none() && !task_arg.contains(char::is_whitespace)
             && (task_arg.ends_with(".md")
                 || task_arg.ends_with(".json")
                 || task_arg.contains('/')

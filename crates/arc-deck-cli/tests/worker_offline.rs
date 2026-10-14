@@ -567,6 +567,51 @@ fn plain_mode_answers_in_text_and_still_records_state() {
     assert!(prompt.trim().is_empty(), "一般模式 + 个性化关不该注入任何文本：{prompt}");
 }
 
+#[test]
+fn explicit_prompt_does_not_open_a_file_or_inject_worker_rules() {
+    let case = RunCase::new();
+    let file = case.workspace.join("question.md");
+    std::fs::write(&file, "这不是指令原文").unwrap();
+    let literal = file.to_str().unwrap();
+    let run = case.run(&["--prompt", literal, "--id", "literal"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let dir = case.state().join("runs/literal");
+    let task: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("task.json")).unwrap()).unwrap();
+    assert_eq!(task["instruction"], literal);
+    assert!(std::fs::read_to_string(dir.join("system-prompt.md")).unwrap().is_empty());
+}
+
+#[test]
+fn tui_style_stdin_prompt_survives_windows_argument_limits_and_shell_metacharacters() {
+    let case = RunCase::new();
+    let prompt = format!("{}\n`literal` $(never execute) ; & |\n/不是命令", "中文👩‍💻".repeat(8000));
+    let mut child = Command::new(binary())
+        .env("ARCDECK_FIXTURE_SCENARIO", "success")
+        .args(["run", "--prompt", "-", "--format", "jsonl", "--id", "stdin-literal", "--agent", "echo", "--permission", "workspace"])
+        .arg("--config").arg(&case.config).arg("--workspace").arg(&case.workspace)
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
+        .spawn().unwrap();
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), prompt.as_bytes()).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", String::from_utf8_lossy(&output.stderr));
+    let events: Vec<Value> = String::from_utf8(output.stdout).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert_eq!(events.last().unwrap()["type"], "result");
+    let dir = case.state().join("runs/stdin-literal");
+    let task: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("task.json")).unwrap()).unwrap();
+    assert_eq!(task["instruction"], prompt);
+    let config: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
+    assert_eq!(config["prompt_scope"], "bare");
+    assert!(std::fs::read_to_string(dir.join("system-prompt.md")).unwrap().is_empty());
+}
+
+#[test]
+fn conflicting_literal_and_task_inputs_are_rejected_without_running() {
+    let case = RunCase::new();
+    let run = case.run(&["一条任务", "--prompt", "另一条"]);
+    assert_eq!(run.code, 64);
+    assert!(!case.state().join("runs").exists());
+}
+
 /// 出现工人参数就切回工人模式：stdout 是控制面 JSONL，`--accept` 真的进了任务书。
 #[test]
 fn worker_flags_switch_back_to_the_jsonl_control_plane() {
