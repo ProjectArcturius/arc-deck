@@ -45,3 +45,10 @@ PRODUCT_PLAN §7.3 的八个组件、§7.4 的键位与命令、§7.5 的视觉�
 
 - `4cf84b0` 旧配置字段（`sandbox` → `permission`）的报错不说新名字。
 - `b227176` Windows 上 headless 弹常驻 / 闪烁的终端窗口；`$(arcdeck run --detach)` 挂到任务结束。
+
+## 派工中发现、尚未修的
+
+- **磁盘写满被归为 `MODEL_FAILURE`**（w2-remote-transport，2026-10-14）：运行时因 `ENOSPC` 以 1 退出，`result.json` 的 blocker
+  是 `MODEL_FAILURE: ENOSPC…`。根因是环境（磁盘），不是模型；调度者按 `retryable` 决策时会被误导。应在失败分类里认出
+  `ENOSPC` / `no space left` 并给独立的码（如 `HOST_DISK_FULL`，不可重试直到腾出空间）。监工本身随之死亡，`status` 由读者
+  判 `dead` —— 这一半是设计如期生效（进程死了不能自称健康）。
