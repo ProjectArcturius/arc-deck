@@ -6,6 +6,10 @@
 
 ## 0. 2026-10-14 定型结论
 
+**本轮推进补记**：用户要求审查核心/headless 完备性后开始 TUI。审计及 M4a 第一段见
+[CORE_HEADLESS_AUDIT_2026-10-14.md](CORE_HEADLESS_AUDIT_2026-10-14.md)。无参数入口已替换为
+独立运行 TUI；这不代表 M2c/M2d/M3 或完整 M4 已通过。Remote 会话和执行 guard 仍待接通。
+
 本节是 0.2 版的变化摘要，与后文冲突时以本节为准；后文已按本节同步。
 
 | 编号 | 决定 | 依据 |
@@ -270,7 +274,7 @@ Build/Plan 借鉴的是角色与行为，不将 OpenCode 的 provider、工具�
 `opencode` / `opencode run` 分法：**无参数是交互，有子命令是 headless**。
 
 ```text
-arcdeck                                   当前目录进 TUI（M4 前：打印「TUI 尚未实现」与 headless 用法，退出 64）
+arcdeck                                   当前目录进 TUI（M4a：独立运行/历史/取消；非交互终端退出 64）
 arcdeck run <任务书> [选项]                前台执行一件任务；stdout 是 JSONL 协议，退出码 = 终态（§6.3）
 arcdeck run "<要对模型说的话>" [选项]       一般模式：不给任务书、不带工人参数；stdout 是给人看的回答
 arcdeck run <任务书> --detach [选项]       分离执行：等到工人接住（写出状态）才返回；接不住就报出原因
@@ -623,7 +627,10 @@ Ether 侧的改动（新的派工脚本、DISPATCHER §三 的改写）在 Ether
 
 ## 7. TUI 视觉与交互需求
 
-**排期**：M4，在 headless 可用（M2）与权限实装（M3）之后。本节规格保留不变；在那之前 `arcdeck` 无参数只打印提示（§6.0）。
+**排期**：完整 M4 在 headless 可用（M2）与权限实装（M3）之后。本节规格保留不变。
+2026-10-14 用户要求开始 TUI，先落地 M4a 的独立运行/历史/取消入口；Plan/readonly/confirm
+与 Remote 会话仍待接通，不把第一段当作完整 M4。Windows 暂用 F6 发送、Enter 换行，
+原因与验证见 [本轮审计 §4–5](CORE_HEADLESS_AUDIT_2026-10-14.md)。
 
 ### 7.1 迁移目标与「v1」基线
 

@@ -16,11 +16,12 @@
 - `crates/arc-deck-core/` 产品模型（任务/配置/结果/事件/Agent/授权）
 - `crates/arc-deck-dsh/` DSH 适配（行式 JSON-RPC、事件投影、假 SDK 对端）
 - `crates/arc-deck-cli/` `arcdeck` 二进制：headless 命令面（run / status / wait / report / usage / logs / cancel / ls / auth / runtime / config）
+- `crates/arc-deck-tui/` 无参数终端入口：独立运行、历史、工具进度、取消；当前是 M4a，尚无 Remote 多轮会话
 - `agents/`、`prompts/` 默认 Agent 与提示词；`schemas/` 契约示例
 
 ```bash
-# 全部离线测试（186 个）；test-runtime 是必需的，发布构建里没有夹具
-cargo test -p arc-deck-core -p arc-deck-dsh -p arc-deck-cli \
+# 全部离线测试；test-runtime 是必需的，发布构建里没有夹具
+cargo test -p arc-deck-core -p arc-deck-dsh -p arc-deck-cli -p arc-deck-tui \
     --features arc-deck-cli/test-runtime --offline
 
 # 端到端离线验收：不发任何模型请求，退出码 0 表示 completed
@@ -30,7 +31,8 @@ cargo run -p arc-deck-cli --bin arcdeck --features test-runtime -- worker run \
 ```
 
 - **headless 已可用**（Windows 与 Arch 均实测）：`arcdeck runtime install` → `arcdeck run <任务书> --by <谁> --accept "<验收命令>" --detach` → `arcdeck status` / `report`。用法见 `arcdeck --help` 与 [PRODUCT_PLAN §10.2b](docs/PRODUCT_PLAN.md)；Ether 接入示例在 `examples/ether/`。
-- 尚未实现 / 未验证：macOS 运行、真实运行时下的卡死续跑、TUI、GUI 接线、Plan 的执行层限制。
+- **TUI 第一段已落地**：`cargo run -p arc-deck-cli --bin arcdeck --offline` 无参数进入。Windows 暂用 **F6 发送、Enter 换行**，避免原生多行粘贴触发请求；Ctrl+P 查看命令。完整审计、使用边界和验证见 [CORE_HEADLESS_AUDIT_2026-10-14.md](docs/CORE_HEADLESS_AUDIT_2026-10-14.md)。
+- 尚未实现 / 未验证：macOS、真实运行时卡死续跑、Remote 多轮与流式 TUI、Arch TUI、GUI 接线、M3 执行 guard。core 算出的 Plan/路径/提交限制尚未完整落实到真实工具执行，不以提示词或策略留档宣称隔离。
 - `REFS/` 是被 Git 忽略的本地参考；构建和发布不能依赖它。OpenCode 为 MIT；Claude Code 参考仓的根许可证不是 MIT，不默认复制其实现或提示词。
 - 现有 `kanesumi/`、`uwp/` 与 C# `arc-deck-dsh/` 保留，不进行删除或真实数据迁移。
 
