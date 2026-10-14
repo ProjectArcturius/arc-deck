@@ -1,6 +1,6 @@
 # Arc Deck：产品需求与编码方向
 
-版本：0.2 · 日期：2026-10-14 · 状态：方向已定型（§0）；M1 已实测；**M2a/M2b 的主体与 M2c 的 Windows 部分已落地，并在 Windows 上用真实模型跑通**（§10.2b）；**Linux 一侧的目标改为 Arch（本机），Debian 不再作为目标** —— 本机已实测构建、离线套件与夹具端到端全过，真实 DSH 运行未做。§10.2b 之外的内容都不是功能完成声明。
+版本：0.2 · 日期：2026-10-14 · 状态：方向已定型（§0）；M1 已实测；**M2a/M2b 的主体与 M2c 的 Windows 部分已落地，并在 Windows 上用真实模型跑通**（§10.2b）；**Linux 一侧的目标改为 Arch（本机），Debian 不再作为目标** —— 本机已实测：构建、离线套件、夹具端到端，以及**真实 DSH 运行**（派工 / 探活 / 取消 / 杀监工 / 孤儿回收 / worktree 真提交）。§10.2b 之外的内容都不是功能完成声明。
 
 本文件是后续开发的产品方向入口。旧文档中「两条并列 GUI」与「新桌面宿主直接引用 C# 协议库」的路线由本文件取代；旧代码、历史实测和适用该代码的约束保留。未创建的目录、命令、schema 和测试在本文件中均为待实现规格。
 
@@ -378,6 +378,17 @@ JSONL 信封固定含 `schema_version/task_id/seq/type/data`，本任务 `seq` �
 
 交互运行另处理 `Ctrl+C`，Unix 处理可捕获的 `SIGTERM`，二者进入同一收尾路径。`--task -` 读完一份任务书后的 stdin EOF 是正常输入结束，不是取消；stdout 消费端断开则请求取消并尽可能写 `--result` 文件。`SIGKILL`/强制结束进程无法保证最终回报，主控记 `unknown` 并检查/清理任务进程树，不将强杀返回当成已确认取消。Windows 的无人值守脚本使用 cancel-file，而不是假定它能给所有 detached 进程发送 Ctrl+C。
 
+**监工已经死了的时候，`arcdeck cancel` 自己收进程树。** 写取消文件的前提是有人读它；
+监工被 `kill -9` 之后没人读了，而它拉起的运行时（以及运行时拉起的工具）会一直活着 ——
+**实测**（Arch，2026-10-14）：监工被杀后 DSH 运行时仍是活的孤儿，没有任何东西会回收它，
+而它会一直占着工作区与配额。所以 `cancel` 在下面两种情形下会按 `status.json` 里的
+`runtime_pid` 直接收掉那棵进程树（Unix 整组 SIGKILL 并**有界确认**组空了才算数）：
+
+1. 一开始就发现监工确认不在（`health = dead`）；
+2. 写了取消文件、等了 30 秒没收尾，再查一次发现监工已经死了。
+
+这是最后一道防线，不是常规路径：常规路径仍然是「写取消文件 → 监工自己收尾」。
+
 - 一任务一 DSH runtime；独立任务数据目录，明确 `DSH_HOME`、`DSH_AGENTS_HOME`、cwd、环境、凭据来源与技能来源，不复用 Desktop 真实 home。
 - SDK 无单会话取消；按有界 shutdown → 进程树终止进行收尾，确认退出后才能称取消完成。Windows 与 Unix 分别验证，不能只杀父进程。
 - 并发实施前使用独立工作树/目录与文件所有权；不自动合并，不覆盖用户原有变更，不清理未由本工具创建的数据。
@@ -408,8 +419,10 @@ Ether 现在的 runner 脚本（`tools/dispatch/dsh-runner.sh`、`runner.sh`）�
 `status.json` 的字段：
 
 - `schema_version`、`task_id`、`state`（`accepted/starting/running/verifying` 或终态）、`host`
-- `pid` 与 `pid_started_at`（监工），`runtime_pid`
-- `assigned_by`、`title`：派工的边与节点标签，给外部监控程序用；缺席不写。**判进程是否还在时应比对 `pid` 与启动时间** —— 只看 pid 存在会被 pid 复用骗过去（`pid_started_at` 待补，见 §10.2b）
+- `pid` 与 `pid_started_at`（监工）：**判进程是否还在时两者都要比** —— 只看 pid 存在会被 pid 复用骗过去。
+  `pid_started_at` 缺席 = 这个平台查不到（或这条记录是派工方代写的），读者退回心跳判据。
+- `runtime_pid`：运行时进程的 pid。监工被强杀之后，收它拉起的进程树就靠这一个字段（§6.4）
+- `assigned_by`、`title`：派工的边与节点标签，给外部监控程序用；缺席不写（§6.2）
 - `started_at`；`heartbeat_at`（监工还活着）；`progress_at`（最后一次来自 DSH 的**实质**事件：模型输出块、工具开始或结束）
 - `activity`：`{kind: model|tool|verify|idle, name, summary（≤80 字）, since}` —— 此刻在做什么
 - `counters`：`steps`、`tool_calls`、`tool_errors`、`commits`（worktree 上 `main..HEAD` 的提交数）、`model_retries`（中途的模型侧失败次数，见 §6.5.7）
@@ -432,10 +445,20 @@ Ether 现在的 runner 脚本（`tools/dispatch/dsh-runner.sh`、`runner.sh`）�
 | `ok` | 心跳新鲜，且 `progress_at` 在阈值内 |
 | `busy` | 正在跑工具，已超过 5 分钟但没超过该工具自己的超时 + `tool_grace_s` —— 长构建是正常的，不算卡 |
 | `stalled` | 心跳新鲜，但：在等模型且 `progress_at` 超过 `model_idle_s`（缺省 300 s，对齐 DSH 的 `streamIdleTimeoutMs`）；或工具超过其超时 + 宽限；或空闲超过 `model_idle_s` |
-| `dead` | 非终态，且心跳超过 `3 × heartbeat_s`、或监工进程不在 → 按终态 `unknown` 处理 |
+| `dead` | 非终态，且**监工进程确认不在**（快路径，立刻判），或心跳超过 `3 × heartbeat_s`、或监工进程不在 → 按终态 `unknown` 处理 |
 
 **为什么由读者算**：写者死了就写不出「我死了」。监工只写事实（时间戳、pid、在做什么），判定在读的那一刻按事实算。
-判断进程是否还在时，比对 `pid` **和**启动时间 —— 只看 pid 存在会被 pid 复用骗过去。
+
+**进程还在不在：比 `pid` 也比 `pid_started_at`。** 只看 pid 存在会被 pid 复用骗过去。
+判据（`status::supervisor_liveness`）：
+
+- **只在同一台机器上才可信** —— 先比 `host`，对不上就返回「不知道」，退回心跳判据。
+  pid 只在它自己的机器上有意义；经 ssh 读远端状态时，跑的是远端那个 `arcdeck status`，所以照样成立。
+- **Linux**：读 `/proc`（纯 `std::fs`，无 FFI）。已实测：`kill -9` 监工之后，
+  `arcdeck status` **1 秒内**报 `dead`，而不是等 45 秒。
+- **其余平台**：一律返回「不知道」并退回心跳判据。这是**刻意的降级**，不是遗漏 ——
+  本仓目前没有可编译验证 Windows 目标的手段（开发机没装 Windows target，
+  写了连 `cargo check` 都过不去），所以不写不能验证的实现。
 
 #### 6.5.3 一行输出与退出码
 
@@ -544,8 +567,7 @@ fix-filter  failed   done     验收 filter-regression 退出 101 · commits 2 �
 | `nohup … &`，日志在 `.oc/logs/` | `--detach`；`state_root` 可配到 `.oc/state/` |
 | 收尾打印 `git log main..HEAD` / `git status --porcelain` | 回报里「Arc Deck 采集的事实」 |
 
-**任务书**：Ether 的 Markdown 任务书（TASK_TEMPLATE 的五段）原样作为 `instruction`；机读字段从命令行给
-（`--id`、`--accept`、`--worktree`），或在 JSON 任务书里用新增的可选字段 `instruction_file` 指向 Markdown。
+**任务书**：Ether 的 Markdown 任务书（TASK_TEMPLATE 的五段）原样作为 `instruction`；机读字段从命令行给（`--id`、`--accept`、`--worktree`），或在 JSON 任务书里用新增的可选字段 `instruction_file` 指向 Markdown。
 **不解析 Markdown 的「验证」段来猜验收命令** —— 猜错就是假通过；验收命令由调度者显式给。
 
 Ether 侧的改动（新的派工脚本、DISPATCHER §三 的改写）在 Ether 仓里按 Ether 的流程做；
@@ -776,7 +798,7 @@ OpenCode Go 走的也是 Anthropic Messages 协议，缓存命中实测有效，
 | M0：需求基线 | 本文、README/AGENTS/旧工作流入口、参考与许可边界 | ✅ 已完成：产品要求/选定方案/未决项分开，旧双 GUI 路线不再支配新开发 |
 | M1：离线 worker 骨架 | core/adapter/CLI 最小 crate；任务/结果/JSONL schema；Echo 定义解析；假 SDK 子进程 | ✅ **已实测**：127 个离线测试通过（成功/失败/受阻/EOF/坏帧/分帧中文/错 ID/结果写失败/超时/取消），全程无模型请求 |
 | **M2a：真实 DSH 单任务**（焦点） | 钉 DSH 版本（Windows 与 Arch 同版）；`runtime.kind = dsh-sdk`；per-task `DSH_HOME` 与 profile 生成（§9.2）；新版本事件投影；Echo + `--preamble` 进 system prompt；usage 采集；二进制改名 `arcdeck`，无参数给出 TUI 未实现提示 | 一件真实的 Ether 风格任务在 Windows 上经 `deepseek-official` 跑到 `completed`，验收命令的退出码由 Arc Deck 采集；内核失败（错模型名，参 P3）被识别为 `failed`；`session-log-deepseek` 的实际开关在请求里核对过。**会消耗模型配额，跑前经用户同意** |
-| **M2b：分离运行与探活**（焦点） | 拆出 `arc-deck-run`；状态目录与 `status.json`；`--detach`；`status/wait/report/logs/cancel/ls`；读者侧健康判定；stalled 自救与有界续跑；进程树收尾（Windows Job Object、Unix 进程组） | 离线故障注入全部过：假内核挂住（→ stalled → 续跑）、杀监工（→ dead/unknown）、杀 runtime、取消、pid 复用、状态文件写到一半。阈值判定有时钟可注入的单测；**一行输出的字节数有测试上限** |
+| **M2b：分离运行与探活**（焦点） | 拆出 `arc-deck-run`；状态目录与 `status.json`；`--detach`；`status/wait/report/logs/cancel/ls`；读者侧健康判定；stalled 自救与有界续跑；进程树收尾（Windows Job Object、Unix 进程组） | 离线故障注入全部过：假内核挂住（→ stalled → 续跑）、杀监工（→ dead/unknown）、杀 runtime、取消、pid 复用、状态文件写到一半。阈值判定有时钟可注入的单测；**一行输出的字节数有测试上限**。**2026-10-14 补**：`pid` + `pid_started_at` 已实装（Linux 走 `/proc`，其余平台刻意降级为「不知道」），`kill -9` 监工后 `status` 1 秒内报 `dead` —— 真实运行时实测过 |
 | **M2c：接进 Ether**（焦点） | Markdown 任务书、`--accept`、`--worktree`、env 模板、`allow_commit`；**Arch 构建与运行**（2026-10-14 修订，原为 Debian）；`examples/ether/` 派工示例 | 一批真实 Ether 任务在 Windows 与 Arch 各派至少一件，调度者**只用 `status` 与 `report`** 完成跟踪与是否细看的判断；与旧 runner 的结果并排对照一次。**Ether 侧脚本改动在 Ether 仓做** |
 | M2d：对照门 | DSH_FINDINGS §5 的 E1–E3 | 有样本量、有数据地回答：官方路由 DSML 是否为 0；`sdk` vs `sdk-minimal` 谁做缺省；非 DS 是否需要第二内核（预期否） |
 | M3：Agent 与权限实装 | Echo/Build/Plan 组合矩阵在执行层生效；工具映射与 schema；Plan 写负例被拒 | §5 的契约有真实内核下的负例；提示词不代替权限 |
@@ -839,10 +861,12 @@ M1 交付的离线覆盖（每一项都有对应测试）：成功 / 内核失�
 | 真实事件投影（`data` 信封、`toolCallId`、`[exit code: N]` 只写非零） | ✅ 实测后修正，有回归测试 | 不修时，成功的验收命令全被判「无法判定」 |
 | 前台 run：真实任务 → completed，验收按执行记录 passed | ✅ 实测（smoke1，32 s，缓存命中 86400 / 88304） | `arcdeck report smoke1` |
 | `--detach` + `status` / `wait` / `report` | ✅ 实测（smoke2、smoke3） | 一行状态约 90 字；退出码按 §6.5.3 |
-| `--worktree`（建/复用分支、子模块、git 事实采集） | ✅ 实测 | `report` 里的提交与变更来自 git，不是模型自报 |
-| `workspace-write` 下 worktree 提交被拒 | ✅ 实测（预期内） | `index.lock` 在主仓 `.git/worktrees/` 下 → Ether 配置用 `danger-full-access`，见 `examples/ether/` |
+| `--worktree`（建/复用分支、子模块、git 事实采集） | ✅ 实测（Windows + **Arch**） | Arch 真实模型：真提交 `132627b`、验收 `git log --oneline -1` 通过、`report` 的 git 事实取自 git 不是模型自报 |
+| `workspace-write` 下 worktree 里的 git 全失败 | ✅ 实测（预期内） | worktree 的 `.git` 指向主仓、主仓在沙箱外 → 每条 git 命令退出 128。**现在派工时就会警告**（§6.6） |
 | 卡死 → 杀进程树 → 续跑 → 用尽判 `STALLED` | ✅ 离线故障注入测试 | `stalled_run_is_restarted_then_fails_with_stalled_when_attempts_run_out` |
-| 读者侧健康（dead / stalled / busy） | ✅ 单测 | 真实场景下「杀掉监工 → dead」**未实测** |
+| 读者侧健康（dead / stalled / busy） | ✅ 单测 + **真实运行实测** | `kill -9` 监工后 `status` 1 秒内报 `dead`（退出码 5），不再等 45 秒 |
+| 监工被杀后的**孤儿运行时** | ✅ 修复 + 实测 | 实测：`kill -9` 监工后 DSH 运行时仍活着、无人回收。现在 `arcdeck cancel` 在监工确认不在时按 `runtime_pid` 收整棵进程树（Unix 整组 SIGKILL + 有界确认） |
+| 正常取消（监工还活着） | ✅ 真实运行实测 | Arch 真人任务：`cancel` → `cancelled done CANCELLED: 主控请求取消`，退出码 3，无 node 残留 |
 | Debian → **Arch（本机）** | ⚠️ 部分验证 | 2026-10-14 修订：目标改为本机 Arch。已实测：发布构建通过、离线套件 166/166、夹具端到端 `completed` + 验收 `passed`、契约测试在 Arch 上全绿（改前因写死盘符路径挂 3 个）。**未做**：真实 DSH 运行（本机未装运行时、无密钥）。`cfg(unix)` 的进程组收尾由离线套件在 Linux 上真跑到，不再是「只做人工核对」 |
 | Ether 侧派工脚本 | ⚠️ 只有示例 `examples/ether/ad.sh` | 改 Ether 的 `tools/dispatch/` 与 DISPATCHER 在 Ether 仓做 |
 

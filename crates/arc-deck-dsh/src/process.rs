@@ -27,6 +27,59 @@ pub struct Termination {
     pub detail: String,
 }
 
+/// 按 pid 结束一棵进程树 —— **不是我们自己拉起的那些**。
+///
+/// 为什么需要它：监工被 `kill -9` 之后，它拉起的运行时（以及运行时拉起的工具）会变成
+/// 孤儿 —— `kill_on_drop` 与进程组都随监工一起没了，而监工已经死了、读不到取消文件。
+/// **实测**（Arch，2026-10-14）：`kill -9` 监工之后，DSH 运行时仍是活的，没有任何东西会
+/// 回收它。所以「取消」必须在监工已死时由调用方自己来收。
+///
+/// Unix：监工给运行时建过独立进程组（pgid = pid），整组发 SIGKILL，再**有界确认**
+/// 组真的空了才算数。Windows：`taskkill /T /F`（本机无法验证）。
+pub fn kill_tree_by_pid(pid: u32) -> Termination {
+    #[cfg(unix)]
+    {
+        let group = format!("-{pid}");
+        let signal = |sig: &str| {
+            std::process::Command::new("kill")
+                .args([sig, "--", &group])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+        signal("-KILL");
+        // 有界确认：进程组不在了才算「已结束」。信号发出去不等于没人活着。
+        for _ in 0..40 {
+            if !signal("-0") {
+                return Termination { exited: true, detail: "运行时进程组已全部退出".into() };
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        return Termination {
+            exited: false,
+            detail: format!("运行时进程组 {pid} 在 2 秒内没有全部退出"),
+        };
+    }
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        // 拿不到「组已空」的可比判据（taskkill 的退出码分不清「本来就没有」与「杀掉了」），
+        // 所以这里如实报「已请求」，不冒充已确认。**本机没有 Windows 目标，未实测。**
+        Termination { exited: false, detail: "已请求 taskkill /T /F（未确认）".into() }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        Termination { exited: false, detail: "这个平台不支持按 pid 收进程树".into() }
+    }
+}
+
 impl RuntimeProcess {
     /// 拉起子进程。
     ///
@@ -131,5 +184,52 @@ impl RuntimeProcess {
                 detail: format!("等待进程退出超时（{} ms）", grace.as_millis()),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 起一个自成一组的 `sleep`，并**立刻把它交给 init**。
+    ///
+    /// 为什么要绕这一道：如果测试进程自己持有这个子进程，杀掉它之后它会变成**我们**
+    /// 的僵尸，`/proc` 里照样在，于是收树的确认窗口每次都要白等满 2 秒 —— 那验的就不
+    /// 是真实情形了。真实的孤儿运行时正是「没有一个会 wait 它的父进程」。
+    #[cfg(target_os = "linux")]
+    fn spawn_detached_sleeper() -> u32 {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("setsid sleep 60 >/dev/null 2>&1 & echo $!")
+            .output()
+            .expect("起一个分离的 sleep");
+        let pid: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().expect("拿到 pid");
+        // 留一点时间让 `sh` 退干净、sleep 交出去。
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(std::path::Path::new(&format!("/proc/{pid}")).exists(), "sleep 该活着");
+        pid
+    }
+
+    /// 按 pid 收一棵**不是自己拉起的**进程树。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kill_tree_by_pid_reaps_a_process_group_we_do_not_own() {
+        let pid = spawn_detached_sleeper();
+        let termination = kill_tree_by_pid(pid);
+        assert!(termination.exited, "没收干净：{}", termination.detail);
+        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+    }
+
+    /// 对一个早就不存在的 pid 收树：应当是「已经没东西了」，而不是报错或卡住。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reaping_an_already_gone_pid_is_immediate_and_not_an_error() {
+        let pid = spawn_detached_sleeper();
+        assert!(kill_tree_by_pid(pid).exited);
+
+        let started = std::time::Instant::now();
+        let termination = kill_tree_by_pid(pid);
+        assert!(termination.exited, "{}", termination.detail);
+        assert!(started.elapsed() < Duration::from_secs(1), "不该等满确认窗口");
     }
 }

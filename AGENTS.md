@@ -14,7 +14,7 @@ DSH 对非 DS 模型是否适用的调查：[docs/DSH_FINDINGS.md](docs/DSH_FIND
 - 桌面版两块：Windows = C# + WinUI 2（不擅自换 WinUI 3 或 WebView），Linux = Rust + Kanesumi。都在后端本地服务（M5）之后经同一 IPC 接入。
 - 默认 Agent 是 Echo，具备完整工程角色、工具/权限、验证/交付纪律与用户提供的风格；Build/Plan 参考 OpenCode。提示词不能替代实际权限。
 - DSH 默认把会话日志随请求上传 DeepSeek（`session-log-deepseek`）。用户裁定前，Arc Deck 生成的 profile 关闭它；不吃 DSH 默认值。
-- headless 第一个可用版本已在 Windows 上实测（PRODUCT_PLAN §10.2b）；Linux 一侧的目标是**本机 Arch**（不是 Debian，2026-10-14 修订）：构建与离线套件已实测全过，真实 DSH 运行未做。DSH 不进仓、不进二进制：`arcdeck runtime install` 把钉住的版本装进用户数据目录。
+- headless 第一个可用版本已在 Windows 上实测（PRODUCT_PLAN §10.2b）；Linux 一侧的目标是**本机 Arch**（不是 Debian，2026-10-14 修订）。Arch 上已实测：构建、离线套件、夹具端到端，以及**真实 DSH 运行**（真派工、取消、杀监工→dead、孤儿回收、worktree 真提交）。DSH 不进仓、不进二进制：`arcdeck runtime install` 把钉住的版本装进用户数据目录。
 - workers 缺省路由 `opencode-go/deepseek-v4.1-flash`（用户 2026-10-14 指定）。密钥在 `%APPDATA%\arcdeck\auth.json`，**不得写进仓库或任务状态目录**。
 - 跑会消耗模型配额的测试前先问用户；用户已允许「少量用 4.1 flash 测试」。
 - `/REFS/` 只作本地参考，不入 Git，也不能成为生产构建依赖。复制 OpenCode 的实质部分保留 MIT notice；Claude Code 根许可证为商业条款，不默认复制源码或提示词。
@@ -886,6 +886,10 @@ arcdeck auth set opencode-go       # 密钥从 stdin 读
 arcdeck run task.md --worktree dsh/<id> --accept "cargo test -p x" --detach
 arcdeck status --all               # 每件一行；单件时退出码 0/1/2/3/4/5/10/11
 arcdeck report <id>
+
+# **真实验证前先重编 release。** 改了代码却拿旧的 `target/release/arcdeck` 去跑真实任务，
+# 看到的「没生效」其实测的是旧二进制 —— 与 U16「`--no-build` 跑旧 dll」同一类。
+# `cargo test` 走 debug，真实场景走 release，两者不会互相更新。（2026-10-14 为此白跑两轮。）
 
 # Arc Deck 产品 crate（core / dsh / cli）—— TUI 与 headless 的那一半
 # `--features arc-deck-cli/test-runtime` 是必需的：假 SDK 对端与隐藏子命令

@@ -366,6 +366,8 @@ async fn execute(prepared: Prepared) -> i32 {
             terminal: None,
             host: status::host_name(),
             pid: std::process::id(),
+            // 记下**自己**的启动时刻：读者据此把「同一个进程」与「被复用的 pid」分开。
+            pid_started_at: status::process_start_ms(std::process::id()),
             runtime_pid: None,
             workspace: prepared.plan.workspace.display().to_string(),
             model: prepared.config.model.as_ref().map(|m| format!("{}/{}", m.provider, m.model)),

@@ -89,6 +89,12 @@ pub struct StatusFile {
     pub terminal: Option<bool>,
     pub host: String,
     pub pid: u32,
+    /// 监工进程自己的**启动时刻**（毫秒）。用来把 pid 复用与「同一个人」分开。
+    ///
+    /// 缺席 = 这个平台查不到（或这条记录是代写的）—— 读者就退回到只看心跳。
+    /// 取法见 [`process_start_ms`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid_started_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_pid: Option<u32>,
     pub workspace: String,
@@ -263,6 +269,86 @@ impl StatusWriter {
     }
 }
 
+/// 监工进程还在不在。
+///
+/// **只在同一台机器上才可信** —— pid 只在它自己的机器上有意义，所以先比 `host`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Liveness {
+    Alive,
+    /// 确认不在了：pid 不存在，或存在但启动时刻对不上（pid 被复用）。
+    Gone,
+    /// 这个平台查不到，或记录与读者不在同一台机器。**不要把它当成 Gone。**
+    Unknown,
+}
+
+/// 查监工进程的状态。
+///
+/// 支持面：**Linux**（读 `/proc`，纯 `std::fs`，没有 FFI）。其余平台一律返回
+/// `Unknown` 并退回到心跳判据 —— 本仓目前在 Windows 上没有可编译验证的手段
+/// （本机没装 Windows target，写了连 `cargo check` 都过不去），所以**不写**。
+/// 这条降级是刻意的，不是遗漏。
+///
+/// 为什么值得有：心跳过期要等 `3 × heartbeat_s`（缺省 45 秒）才能判「死了」。
+/// 进程确认不在时，这里立刻就能判。
+pub fn supervisor_liveness(status: &StatusFile) -> Liveness {
+    // 代写的记录（`pid = 0`）本来就没有监工。
+    if status.pid == 0 {
+        return Liveness::Unknown;
+    }
+    if status.host != host_name() {
+        return Liveness::Unknown;
+    }
+    let Some(actual) = process_start_ms(status.pid) else {
+        // 查不到这个 pid 的启动时刻：在 Linux 上就是「进程不存在」。
+        return platform_liveness(status.pid);
+    };
+    match status.pid_started_at {
+        // 记录的启动时刻与现在这个 pid 的对不上 —— 这是被复用的 pid，不是同一个人。
+        // 容差取 2 秒：不同来源（jiffies 换算、时钟粒度）会有小差异。
+        Some(recorded) if actual.abs_diff(recorded) > 2000 => Liveness::Gone,
+        _ => Liveness::Alive,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn platform_liveness(pid: u32) -> Liveness {
+    if std::path::Path::new(&format!("/proc/{pid}")).exists() {
+        Liveness::Alive
+    } else {
+        Liveness::Gone
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn platform_liveness(_pid: u32) -> Liveness {
+    Liveness::Unknown
+}
+
+/// 某个进程的启动时刻（毫秒，自 Unix 纪元）。查不到返回 `None`。
+///
+/// Linux: `/proc/<pid>/stat` 的第 22 个字段 `starttime`（自开机起的时钟节拍）
+/// 加上 `/proc/stat` 的 `btime`。`USER_HZ` 在 Linux 上恒为 100。
+#[cfg(target_os = "linux")]
+pub fn process_start_ms(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // `comm` 里可以有空格和括号，所以从**最后一个** `)` 之后再切字段。
+    let rest = stat.rsplit_once(')')?.1;
+    let starttime: u64 = rest.split_whitespace().nth(19)?.parse().ok()?;
+    let btime = std::fs::read_to_string("/proc/stat")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("btime "))?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    Some(btime * 1000 + starttime * 10)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn process_start_ms(_pid: u32) -> Option<u64> {
+    None
+}
+
 /// 卡死判定（写者自救与读者显示共用一条规则）。返回卡死原因。
 pub fn stall_reason(status: &StatusFile, now: u64) -> Option<String> {
     let since_progress = now.saturating_sub(status.progress_at) / 1000;
@@ -287,6 +373,11 @@ pub fn stall_reason(status: &StatusFile, now: u64) -> Option<String> {
 pub fn health(status: &StatusFile, now: u64) -> &'static str {
     if status.terminal == Some(true) {
         return "done";
+    }
+    // 快路径：进程**确认**不在了就不必等心跳过期 —— 心跳那条要等 3 × heartbeat_s
+    // （缺省 45 秒）。判据同时看 pid 与它的启动时刻，所以 pid 复用骗不过去。
+    if supervisor_liveness(status) == Liveness::Gone {
+        return "dead";
     }
     let since_heartbeat = now.saturating_sub(status.heartbeat_at) / 1000;
     if since_heartbeat > 3 * status.limits.heartbeat_s.max(1) {
@@ -340,10 +431,15 @@ pub fn one_line(status: &StatusFile, health: &str, now: u64) -> String {
             Some(e) if status.state != "completed" => format!("{}: {}", e.code, clip(&e.message, 60)),
             _ => format!("详情：arcdeck report {}", status.task_id),
         },
-        "dead" => format!(
-            "心跳停了 {}（进程已不在，按 unknown 处理）",
-            human(now.saturating_sub(status.heartbeat_at) / 1000)
-        ),
+        "dead" => match supervisor_liveness(status) {
+            // 快路径：进程**确认**不在了。这条比「心跳过期」信息量更大，所以分开说 ——
+            // 它同时意味着需要有人去收运行时进程树（`arcdeck cancel` 会做）。
+            Liveness::Gone => "监工进程已不在（未写出终态，按 unknown 处理；`arcdeck cancel` 可收残余进程）".to_string(),
+            _ => format!(
+                "心跳停了 {}（监工没有回应，按 unknown 处理）",
+                human(now.saturating_sub(status.heartbeat_at) / 1000)
+            ),
+        },
         "stalled" => stall_reason(status, now).unwrap_or_default(),
         _ => {
             let a = &status.activity;
@@ -395,6 +491,7 @@ pub fn write_preflight_failure(run_dir: &Path, failure: PreflightFailure) -> boo
         host: host_name(),
         // 没有监工进程可言：这一条记录是**代写的**，不冒充一个活着的写者。
         pid: 0,
+        pid_started_at: None,
         runtime_pid: None,
         workspace: failure.workspace,
         model: failure.model,
@@ -469,6 +566,7 @@ mod tests {
             terminal: None,
             host: "h".into(),
             pid: 1,
+            pid_started_at: None,
             runtime_pid: None,
             workspace: "/w".into(),
             model: None,
@@ -545,6 +643,68 @@ mod tests {
         let bare = serde_json::to_string(&sample(NOW)).unwrap();
         assert!(!bare.contains("assigned_by"));
         assert!(!bare.contains("\"title\""));
+    }
+
+    /// 起一个子进程、杀掉它、再问它还在不在 —— 不靠假 pid，靠操作系统给答案。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_killed_process_is_confirmed_gone_without_waiting_for_the_heartbeat() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("起一个 sleep");
+        let pid = child.id();
+        assert!(process_start_ms(pid).is_some(), "活着的进程要能查到启动时刻");
+        child.kill().expect("杀");
+        child.wait().expect("收尸");
+
+        assert_eq!(platform_liveness(pid), Liveness::Gone);
+
+        // 关键那条：心跳**刚刚写过**，但进程已经确认不在 —— 立刻判 dead，
+        // 不必等 3 × heartbeat_s（缺省 45 秒）。
+        let mut s = sample(NOW);
+        s.host = host_name();
+        s.pid = pid;
+        s.pid_started_at = None;
+        assert_eq!(health(&s, NOW), "dead");
+        assert_eq!(exit_code(&s, "dead"), 5);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_reused_pid_is_not_the_same_supervisor() {
+        // 自己这个进程肯定活着，但记录里写的是另一个启动时刻 —— 那就是 pid 被复用了。
+        let me = std::process::id();
+        let actual = process_start_ms(me).expect("查自己");
+        let mut s = sample(NOW);
+        s.host = host_name();
+        s.pid = me;
+        s.pid_started_at = Some(actual.saturating_sub(60_000));
+        assert_eq!(supervisor_liveness(&s), Liveness::Gone);
+
+        // 对得上的时候才是 Alive。
+        s.pid_started_at = Some(actual);
+        assert_eq!(supervisor_liveness(&s), Liveness::Alive);
+    }
+
+    #[test]
+    fn another_machines_pid_is_never_trusted() {
+        // pid 只在它自己的机器上有意义：host 对不上就不下结论，退回心跳判据。
+        let mut s = sample(NOW);
+        s.host = "some-other-box".into();
+        s.pid = 1;
+        assert_eq!(supervisor_liveness(&s), Liveness::Unknown);
+        s.heartbeat_at = NOW - 5_000;
+        assert_eq!(health(&s, NOW), "ok");
+    }
+
+    #[test]
+    fn a_supervisor_written_record_has_no_pid_to_check() {
+        // 派工方代写的失败记录 `pid = 0`：本来就没有监工，别去查它。
+        let mut s = sample(NOW);
+        s.host = host_name();
+        s.pid = 0;
+        assert_eq!(supervisor_liveness(&s), Liveness::Unknown);
     }
 
     #[test]

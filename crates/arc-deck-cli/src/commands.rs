@@ -925,13 +925,23 @@ async fn cmd_cancel(argv: &[String]) -> CmdResult {
     };
     let dir = run_dir(&state_root(&flags), id);
     let cancel = dir.join("cancel.json");
+    // 先看监工还在不在。**不在的时候写取消文件是没用的 —— 没人读它**，而它拉起的
+    // 运行时（以及运行时拉起的工具）会一直活着。实测（Arch，2026-10-14）：`kill -9`
+    // 监工之后 DSH 运行时仍是活的孤儿，没有任何东西会回收它。
+    let status_path = dir.join(status::STATUS_FILE);
+    if let Some(st) = status::read(&status_path) {
+        if st.terminal != Some(true) && status::supervisor_liveness(&st) == status::Liveness::Gone {
+            return Ok(reap_orphan(id, &st));
+        }
+    }
+
     if !cancel.exists() {
         let body = serde_json::json!({ "schema_version": SCHEMA_VERSION, "task_id": id, "action": "cancel" });
         std::fs::write(&cancel, body.to_string()).map_err(io_err(&cancel))?;
     }
     // 有界等待收尾。
     for _ in 0..30 {
-        if let Some(st) = status::read(&dir.join(status::STATUS_FILE)) {
+        if let Some(st) = status::read(&status_path) {
             let h = status::health(&st, status::now_ms());
             if h == "done" || h == "dead" {
                 println!("{}", status::one_line(&st, h, status::now_ms()));
@@ -940,8 +950,31 @@ async fn cmd_cancel(argv: &[String]) -> CmdResult {
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+    // 30 秒都没收尾：再确认一次监工是不是这期间死了。是就自己收 —— 否则这个孤儿
+    // 会一直占着工作区与配额。
+    if let Some(st) = status::read(&status_path) {
+        if status::supervisor_liveness(&st) == status::Liveness::Gone {
+            return Ok(reap_orphan(id, &st));
+        }
+    }
     println!("{id}  已请求取消，30 秒内还没收尾；用 arcdeck status {id} 继续看");
     Ok(10)
+}
+
+/// 监工已经死了：取消文件没人读，只能按 `status.json` 里记的 `runtime_pid` 自己收树。
+fn reap_orphan(id: &str, st: &StatusFile) -> i32 {
+    let Some(pid) = st.runtime_pid else {
+        println!("{id}  监工已不在，状态里也没有运行时 pid —— 没有可收的东西");
+        return 5;
+    };
+    let termination = arc_deck_dsh::process::kill_tree_by_pid(pid);
+    if termination.exited {
+        println!("{id}  监工已不在（未写出终态，按 unknown 处理）；已收运行时进程树 pid {pid}");
+        5
+    } else {
+        println!("{id}  监工已不在；收运行时进程树 pid {pid} 未确认：{}", termination.detail);
+        10
+    }
 }
 
 // ── auth / runtime / config ────────────────────────────────────────────
