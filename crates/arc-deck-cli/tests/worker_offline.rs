@@ -392,6 +392,71 @@ fn failing_acceptance_carries_a_decidable_reason() {
     }
 }
 
+/// 中途失败但**自己起来了**，不是失败（用户 2026-10-14 点名的场景）。
+///
+/// 断网五分钟、被限流、provider 抖一下，DSH 的 llm-retry 会在步边界重试并继续。
+/// 这种任务不该报失败 —— 真正要报的是「从动到不动」。但重试这件事本身要如实记下来，
+/// 而且要在**还在跑的时候**就让监控程序看得见。
+#[test]
+fn a_recovered_retry_is_not_a_failure_but_is_visible_while_running() {
+    let case = Case::new("retry-then-succeed", no_acceptance(), json!({}));
+    let run = case.run();
+    assert_eq!(run.code, 0, "stderr={}", run.stderr);
+    let result = run.result();
+    assert_eq!(result["status"], "completed");
+    assert!(
+        result["blockers"].as_array().map(|b| b.is_empty()).unwrap_or(true),
+        "中途失败后自起了，不该有 blocker：{}",
+        result["blockers"]
+    );
+    // 但「这条路径被打断过」要留痕。
+    assert!(
+        result["unverified"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|u| u.as_str().unwrap_or("").contains("自行重试")),
+        "{result}"
+    );
+
+    let status: Value = serde_json::from_str(
+        &std::fs::read_to_string(case.dir.path().join("state/runs/t1/status.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(status["counters"]["model_retries"], 1);
+    // 中途的异常要**实时**可见，并且带「要不要担心」的判断。
+    assert_eq!(status["notice"]["code"], "MODEL_RATE_LIMITED");
+    assert_eq!(status["notice"]["retryable"], true);
+    assert!(
+        status["notice"]["message"].as_str().unwrap_or("").contains("tpm"),
+        "原文要留着：{}",
+        status["notice"]
+    );
+}
+
+/// 轮次以**结构化**错误收尾时，分类走 `reason.error.code`/`status` 而不是猜英文。
+/// 真实会话里额度用尽就是 `{message:"Insufficient Balance", code:"QUOTA", status:402}`。
+#[test]
+fn structured_error_fields_drive_the_classification() {
+    let case = Case::new("quota", no_acceptance(), json!({}));
+    let run = case.run();
+    assert_eq!(run.code, 1, "stderr={}", run.stderr);
+    let result = run.result();
+    assert_eq!(result["status"], "failed");
+    let blockers = result["blockers"].as_array().cloned().unwrap_or_default();
+    assert!(
+        blockers.iter().any(|b| b["code"] == "MODEL_QUOTA_EXHAUSTED"),
+        "没有用结构化字段分类：{blockers:?}"
+    );
+
+    let status: Value = serde_json::from_str(
+        &std::fs::read_to_string(case.dir.path().join("state/runs/t1/status.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(status["last_error"]["code"], "MODEL_QUOTA_EXHAUSTED");
+    assert_eq!(status["last_error"]["retryable"], false, "余额不足重派不会好");
+}
+
 #[test]
 fn blocked_turn_reports_blocked() {
     let case = Case::new("blocked", no_acceptance(), json!({}));

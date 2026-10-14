@@ -47,6 +47,12 @@ pub enum Scenario {
     /// 正常收工，但验收命令非零退出 —— 验证「验收失败」在状态面上是一条
     /// 可判定的原因，而不是只有一个 `failed`。
     FailingAcceptance,
+    /// 中途失败一次（限流），运行时自己重试后成功收工 —— 断网/限流之后的常态。
+    /// 用来钉住「报错但自起了不算失败」。
+    RetryThenSucceed,
+    /// 轮次以结构化错误收尾：`reason.error = {code:"QUOTA", status:402}`。
+    /// 真实会话就是这么写的（`Insufficient Balance`），分类要用结构化字段而不是猜英文。
+    Quota,
 }
 
 impl Scenario {
@@ -61,6 +67,8 @@ impl Scenario {
         "hang",
         "cancel",
         "failing-acceptance",
+        "retry-then-succeed",
+        "quota",
     ];
 
     pub fn parse(raw: &str) -> Option<Self> {
@@ -75,6 +83,8 @@ impl Scenario {
             "hang" => Scenario::Hang,
             "cancel" => Scenario::Cancel,
             "failing-acceptance" => Scenario::FailingAcceptance,
+            "retry-then-succeed" => Scenario::RetryThenSucceed,
+            "quota" => Scenario::Quota,
             _ => return None,
         })
     }
@@ -91,6 +101,8 @@ impl Scenario {
             Scenario::Hang => "hang",
             Scenario::Cancel => "cancel",
             Scenario::FailingAcceptance => "failing-acceptance",
+            Scenario::RetryThenSucceed => "retry-then-succeed",
+            Scenario::Quota => "quota",
         }
     }
 }
@@ -289,6 +301,25 @@ where
                 "message":{"content":[{"type":"text","text":"我以为做完了"}]},
                 "usage":{"promptTokens":11,"completionTokens":2,"totalTokens":13}}));
             send_event!(writer, seq, json!({"type":"turn/end","turn":1,"reason":{"kind":"completed"}}));
+        }
+        Scenario::RetryThenSucceed => {
+            send_event!(writer, seq, json!({"type":"turn/start","turn":1}));
+            send_event!(writer, seq, json!({"type":"assistant/attempt","turn":1,"step":1,
+                "stream":[{"chunk":{"finish":{"reason":{"failure":{"message":"429 Too Many Requests: exhausted tpm limit"}}}}}]}));
+            send_event!(writer, seq, json!({"type":"assistant/attempt","turn":1,"step":1,
+                "stream":[{"chunk":{"finish":{"reason":{"kind":"stop"}}}}]}));
+            send_event!(writer, seq, json!({"type":"assistant/message","turn":1,"step":1,
+                "message":{"content":[{"type":"text","text":"重试之后好了"}]},
+                "usage":{"promptTokens":11,"completionTokens":2,"totalTokens":13}}));
+            send_event!(writer, seq, json!({"type":"turn/end","turn":1,"reason":{"kind":"completed"}}));
+        }
+        Scenario::Quota => {
+            send_event!(writer, seq, json!({"type":"turn/start","turn":1}));
+            send_event!(writer, seq, json!({"type":"assistant/attempt","turn":1,"step":1,
+                "stream":[{"chunk":{"finish":{"reason":{"kind":"error",
+                    "failure":{"message":"Insufficient Balance"}}}}}]}));
+            send_event!(writer, seq, json!({"type":"turn/end","turn":1,
+                "reason":{"kind":"error","error":{"message":"Insufficient Balance","code":"QUOTA","status":402}}}));
         }
     }
 }

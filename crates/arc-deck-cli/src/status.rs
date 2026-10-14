@@ -37,6 +37,26 @@ pub struct Counters {
     /// 工具调用被当正文吐出（DSML 等）的次数 —— DSH_FINDINGS E1 的数据来源。
     #[serde(default)]
     pub tool_call_as_text: u64,
+    /// **中途**发生过的模型侧失败次数（DSH 的 llm-retry 在步边界重试）。
+    ///
+    /// 与 `last_error` 是两件事：这些不一定是失败 —— 只要最终自起了，任务就是成功的。
+    /// 但监控程序要**实时**看见它：限流与额度用尽就是这样开始变坏的，等到终态才知道
+    /// 就晚了（参 PRODUCT_PLAN §6.5.7）。
+    #[serde(default)]
+    pub model_retries: u64,
+}
+
+/// 最后一次值得调度者注意的**中途**异常。
+///
+/// 与 `last_error` 的区别：`last_error` 是终态原因；这个说的是「此刻正在出问题」——
+/// 任务可能还在跑、还可能自己好。监控程序靠它实时反应（例如正在被限流时先别再派活儿）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Notice {
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+    /// 毫秒时间戳。
+    pub at: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,6 +108,9 @@ pub struct StatusFile {
     pub heartbeat_at: u64,
     pub progress_at: u64,
     pub activity: Activity,
+    /// 此刻正在出问题的东西（可能自己好）。缺席 = 没有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<Notice>,
     pub counters: Counters,
     pub attempt: u32,
     pub max_attempts: u32,
@@ -184,7 +207,23 @@ impl StatusWriter {
                 self.status.counters.steps += 1;
                 self.set_activity("model", None, None);
             }
-            "assistant/message" | "assistant/attempt" | "assistant/delta" => self.progress(),
+            "assistant/message" | "assistant/delta" => self.progress(),
+            "assistant/attempt" => {
+                // 中途的模型失败要**立刻**可见。重试次数涨起来的时候任务还在跑 ——
+                // 监控程序据此决定「先别再派活儿」，而不是等一个终态。
+                for text in arc_deck_dsh::projection::failure_texts(event) {
+                    let class = arc_deck_core::failure::classify_model_failure(&text);
+                    self.status.counters.model_retries += 1;
+                    self.status.notice = Some(Notice {
+                        code: class.code.to_string(),
+                        message: clip(&text, 200),
+                        retryable: class.retryable,
+                        at: now_ms(),
+                    });
+                    self.dirty = true;
+                }
+                self.progress();
+            }
             "tool/call" => {
                 self.status.counters.tool_calls += 1;
                 let name = data.get("name").and_then(|n| n.as_str()).map(str::to_string);
@@ -359,6 +398,7 @@ pub fn write_preflight_failure(run_dir: &Path, failure: PreflightFailure) -> boo
         heartbeat_at: now,
         progress_at: now,
         activity: Activity { kind: "idle".into(), name: None, summary: None, since: now },
+        notice: None,
         counters: Counters::default(),
         // 0 次：一次都没真正跑起来。`report` 里的「运行 N 次」要如实反映这一点。
         attempt: 0,
@@ -432,7 +472,8 @@ mod tests {
             heartbeat_at: now - 5_000,
             progress_at: now - 10_000,
             activity: Activity { kind: "model".into(), name: None, summary: None, since: now - 10_000 },
-            counters: Counters { steps: 42, tool_calls: 118, tool_errors: 0, commits: Some(2), tool_call_as_text: 0 },
+            notice: None,
+            counters: Counters { steps: 42, tool_calls: 118, tool_errors: 0, commits: Some(2), tool_call_as_text: 0, model_retries: 0 },
             attempt: 1,
             max_attempts: 3,
             last_error: None,

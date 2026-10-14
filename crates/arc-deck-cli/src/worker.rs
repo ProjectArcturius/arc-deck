@@ -364,6 +364,7 @@ async fn execute(prepared: Prepared) -> i32 {
             heartbeat_at: started,
             progress_at: started,
             activity: status::Activity { kind: "starting".into(), name: None, summary: None, since: started },
+            notice: None,
             counters: Default::default(),
             attempt: 1,
             max_attempts: liveness.max_attempts,
@@ -770,12 +771,34 @@ fn conclude(
             &format!("有 {} 条工具结果没有对应的调用记录", projection.orphans),
         );
     }
+    // 模型侧的失败要分两种，混在一起会把「重试过但自起了」的任务判成失败：
+    // - **最终失败**：轮次以 `error` 收尾 —— 那才是失败原因。
+    // - **中途失败**：DSH 的 llm-retry 在步边界重试后自己好了 —— 只算「重试过」。
+    //   它已经由 `StatusWriter::observe` 实时记进 `counters.model_retries` 与 `notice`。
+    //
+    // 这条区别是用户 2026-10-14 点名的场景：断网五分钟、限流、provider 抖动之后
+    // 运行时自己起来了的任务**不该**报失败 —— 真正要报的是「从动到不动」。
+    let ended_in_error = projection.last_end().map(|e| e.kind.as_str()) == Some("error");
     if !projection.failures.is_empty() {
-        // 归成一个可判定的码：调度者要的回答是「要不要再派一次」，不是一段英文。
-        // 原文照旧带在 message 里 —— 标签可能认错，原文不会（参 core::failure）。
         let text = projection.failures.join(" / ");
-        let class = arc_deck_core::failure::classify_model_failure(&text);
-        result.blocker(class.code, text);
+        let class = arc_deck_core::failure::classify_with(
+            projection.last_end().and_then(|e| e.status),
+            projection.last_end().and_then(|e| e.code.as_deref()),
+            &text,
+        );
+        if ended_in_error {
+            // 归成一个可判定的码：调度者要的回答是「要不要再派一次」，不是一段英文。
+            // 结构化的 `code`/`status` 优先，猜英文只是兜底（参 core::failure）。
+            result.blocker(class.code, text);
+        } else {
+            // 不是失败，但要留痕：主控该知道这条路径被打断过。
+            result.unverified.push(format!(
+                "运行中发生过 {} 次模型侧失败（最近一次 {}），运行时自行重试后继续 —— 不是本次运行的结果：{}",
+                projection.failures.len(),
+                class.code,
+                status::clip(&text, 140)
+            ));
+        }
     }
     if prepared.plan.acceptance.is_empty() {
         result.unverified.push(

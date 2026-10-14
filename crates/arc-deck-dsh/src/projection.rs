@@ -75,6 +75,13 @@ pub struct TurnEnd {
     /// `completed` / `aborted` / `blocked` / `error` / `max-tokens` / `interrupted` / `forked`。
     pub kind: String,
     pub message: Option<String>,
+    /// 上游给的错误分类与 HTTP 状态码（如 `code: "QUOTA"`、`status: 402`）。
+    ///
+    /// **比猜英文原文硬得多**：真实会话里这条就是
+    /// `{"kind":"error","error":{"message":"Insufficient Balance","code":"QUOTA","status":402}}`。
+    /// 分类优先用它，认不出才退回子串匹配（参 `arc_deck_core::failure`）。
+    pub code: Option<String>,
+    pub status: Option<i64>,
 }
 
 /// 一轮。
@@ -198,10 +205,17 @@ impl Projection {
                     .and_then(|m| m.as_str())
                     .or_else(|| reason.get("message").and_then(|m| m.as_str()))
                     .map(str::to_string);
+                // 结构化错误字段：上游在 `reason.error` 里给了分类与状态码。
+                let error = reason.get("error");
+                let code = error
+                    .and_then(|e| e.get("code"))
+                    .and_then(|c| c.as_str())
+                    .map(str::to_string);
+                let status = error.and_then(|e| e.get("status")).and_then(|s| s.as_i64());
                 if let Some(turn) = turn_no {
                     let view = self.ensure_turn(turn);
                     let overwritten = view.end.is_some();
-                    view.end = Some(TurnEnd { kind, message });
+                    view.end = Some(TurnEnd { kind, message, code, status });
                     if overwritten {
                         self.ends_overwritten += 1;
                     }
@@ -397,6 +411,16 @@ fn collect_message_text(message: &Value) -> Option<String> {
         }
     }
     Some(out)
+}
+
+/// 一帧事件里带的模型失败原文（可能不止一条）。
+///
+/// 投影与 `StatusWriter::observe` 共用同一条扫描规则 —— 两处各写一遍的话，
+/// 「什么算模型失败」会在实时与重放两条路上慢慢漂开。
+pub fn failure_texts(event: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    scan_failures(event, &mut out);
+    out
 }
 
 /// 扫出模型失败的原文。
@@ -617,6 +641,9 @@ mod tests {
             {"type":"chunk","time":1,"chunk":{"type":"finish","reason":{"kind":"error","failure":{"message":"Insufficient Balance"}}}}]}}));
         p.apply(&json!({"type":"turn/end","seq":16,"time":2,"data":{"turn":1,"reason":{"kind":"error","error":{"message":"Insufficient Balance","code":"QUOTA","status":402}}}}));
         assert_eq!(p.last_end().unwrap().kind, "error");
+        // 结构化字段要留住：分类优先用它，而不是猜英文原文。
+        assert_eq!(p.last_end().unwrap().code.as_deref(), Some("QUOTA"));
+        assert_eq!(p.last_end().unwrap().status, Some(402));
         assert!(p.failures.iter().any(|f| f.contains("Insufficient Balance")));
         assert_eq!(p.attempts, 1);
     }

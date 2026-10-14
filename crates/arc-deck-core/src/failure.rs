@@ -27,6 +27,46 @@ const fn class(code: &'static str, retryable: bool) -> FailureClass {
     FailureClass { code, retryable }
 }
 
+/// 带上游结构化字段的分类。
+///
+/// `provider_code` 是 `turn/end` 的 `reason.error.code`，`status` 是 HTTP 状态码。
+/// **优先用结构化字段**：真实会话里额度用尽是 `{code:"QUOTA", status:402}` ——
+/// 比猜 `Insufficient Balance` 那串英文硬得多。认不出才退回子串匹配。
+pub fn classify_with(status: Option<i64>, provider_code: Option<&str>, text: &str) -> FailureClass {
+    if let Some(code) = provider_code {
+        let c = code.to_ascii_lowercase();
+        if c.contains("quota") || c.contains("balance") || c.contains("insufficient") {
+            return class("MODEL_QUOTA_EXHAUSTED", false);
+        }
+        if c.contains("rate") || c.contains("overload") || c.contains("throttl") {
+            return class("MODEL_RATE_LIMITED", true);
+        }
+        if c.contains("auth") || c.contains("unauthorized") || c.contains("forbidden") || c.contains("permission") {
+            return class("MODEL_AUTH", false);
+        }
+        if c.contains("network") || c.contains("timeout") || c.contains("unavailable") {
+            return class("MODEL_NETWORK", true);
+        }
+        if c.contains("context") {
+            return class("MODEL_CONTEXT_LENGTH", false);
+        }
+        if c.contains("model") && (c.contains("not_found") || c.contains("invalid") || c.contains("unknown")) {
+            return class("MODEL_ROUTE", false);
+        }
+    }
+    if let Some(status) = status {
+        match status {
+            401 | 403 => return class("MODEL_AUTH", false),
+            402 => return class("MODEL_QUOTA_EXHAUSTED", false),
+            429 | 529 => return class("MODEL_RATE_LIMITED", true),
+            // 5xx 是 provider 自己出问题，等一会儿再派有意义。
+            500..=599 => return class("MODEL_SERVER_ERROR", true),
+            _ => {}
+        }
+    }
+    classify_model_failure(text)
+}
+
 /// 把模型侧的失败原文归成 `MODEL_*` 里的一类。
 ///
 /// 判据全部是**大小写无关的子串**；状态码（`429`/`402`/`401`…）要求前后不是数字，
@@ -89,6 +129,8 @@ pub fn retryable(code: &str) -> bool {
         // 模型侧：限流与网络是典型的「等一会儿再派」。
         "MODEL_RATE_LIMITED"
             | "MODEL_NETWORK"
+            // provider 自己出问题（5xx），与网络同一类：等一会儿再派。
+            | "MODEL_SERVER_ERROR"
             // 模型偶发把工具调用当正文吐出来，重派一次通常就好。
             | "TOOL_CALL_AS_TEXT"
             // 运行时自己死了（OOM、崩溃）—— 不是配置错，重派有意义。
@@ -146,6 +188,25 @@ mod tests {
     fn auth_and_quota_are_not_retryable() {
         assert!(!classify_model_failure("401 Unauthorized: invalid api key").retryable);
         assert!(!classify_model_failure("402 Insufficient Balance").retryable);
+    }
+
+    #[test]
+    fn structured_fields_beat_substring_matching() {
+        // 真实会话原文：`{message:"Insufficient Balance", code:"QUOTA", status:402}`。
+        let c = classify_with(Some(402), Some("QUOTA"), "Insufficient Balance");
+        assert_eq!(c.code, "MODEL_QUOTA_EXHAUSTED");
+        assert!(!c.retryable);
+
+        // 只看状态码也能判 —— 上游没给 code 时。
+        assert_eq!(classify_with(Some(429), None, "").code, "MODEL_RATE_LIMITED");
+        assert!(classify_with(Some(529), None, "").retryable);
+        assert_eq!(classify_with(Some(402), None, "什么原文都没有").code, "MODEL_QUOTA_EXHAUSTED");
+        assert_eq!(classify_with(Some(503), None, "").code, "MODEL_SERVER_ERROR");
+        assert!(classify_with(Some(503), None, "").retryable);
+
+        // 认不出的 code 与状态码要落回子串匹配，而不是硬编一个。
+        assert_eq!(classify_with(Some(418), Some("TEAPOT"), "429 Too Many Requests").code, "MODEL_RATE_LIMITED");
+        assert_eq!(classify_with(Some(418), Some("TEAPOT"), "没人见过的话").code, "MODEL_FAILURE");
     }
 
     #[test]

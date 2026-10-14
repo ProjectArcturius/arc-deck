@@ -371,7 +371,8 @@ Ether 现在的 runner 脚本（`tools/dispatch/dsh-runner.sh`、`runner.sh`）�
 - `assigned_by`、`title`：派工的边与节点标签，给外部监控程序用；缺席不写。**判进程是否还在时应比对 `pid` 与启动时间** —— 只看 pid 存在会被 pid 复用骗过去（`pid_started_at` 待补，见 §10.2b）
 - `started_at`；`heartbeat_at`（监工还活着）；`progress_at`（最后一次来自 DSH 的**实质**事件：模型输出块、工具开始或结束）
 - `activity`：`{kind: model|tool|verify|idle, name, summary（≤80 字）, since}` —— 此刻在做什么
-- `counters`：`steps`、`tool_calls`、`tool_errors`、`commits`（worktree 上 `main..HEAD` 的提交数）
+- `counters`：`steps`、`tool_calls`、`tool_errors`、`commits`（worktree 上 `main..HEAD` 的提交数）、`model_retries`（中途的模型侧失败次数，见 §6.5.7）
+- `notice`：`{code, message, retryable, at}` —— 此刻正在出问题的东西（可能自己好）。**存在不等于失败**，见 §6.5.7
 - `attempt`、`max_attempts`、`last_error: {code, message（≤200 字）, retryable}` —— `retryable` 见 §6.5.6
 - `usage`：provider 实际报告的输入 / 缓存命中 / 输出 token；没有就不写
 - `limits`：`{heartbeat_s, model_idle_s, tool_grace_s}` —— 判定用的阈值跟着文件写出，读者不必去猜配置
@@ -442,6 +443,7 @@ fix-filter  failed   done     验收 filter-regression 退出 101 · commits 2 �
 | `MODEL_QUOTA_EXHAUSTED` | 额度/余额用尽 | false |
 | `MODEL_AUTH` | 401/403、密钥无效 | false |
 | `MODEL_RATE_LIMITED` | 429/529、限流 | **true** |
+| `MODEL_SERVER_ERROR` | provider 侧 5xx | **true** |
 | `MODEL_NETWORK` | 连接/代理/DNS 类 | **true** |
 | `MODEL_CONTEXT_LENGTH` | 上下文超限 | false |
 | `MODEL_FAILURE` | 认不出的兜底 | false |
@@ -461,6 +463,29 @@ fix-filter  failed   done     验收 filter-regression 退出 101 · commits 2 �
 它的输入目前只有 `finish.reason.failure` 这一条通道。其它失败形状（例如网络断在运行时
 自身、或网关在握手阶段就拒绝）**没有真实样本，尚未分类** —— 认得出的一律是子串匹配，
 认不出的一律落到兜底。要收紧这张表，得先攒真实原文。
+
+上游给了**结构化字段**时优先用它：`turn/end` 的 `reason.error.code` / `status`。
+真实会话里额度用尽就是 `{message:"Insufficient Balance", code:"QUOTA", status:402}` ——
+比猜那串英文硬得多。所以顺序是「结构化 code → 结构化 status → 子串匹配 → 兜底」。
+
+#### 6.5.7 中途：报错但**自起了**不算失败
+
+断网五分钟、被限流、provider 抖一下 —— DSH 的 `llm-retry` 会在步边界重试并继续。
+这种任务**不该**报失败。真正值得打扰调度者的是「从动到不动」这个跃迁，不是每一次报错。
+
+（用户 2026-10-14 的真实场景：手机热点 + 那台机器的热管理，会无征兆断网五分钟；
+旧 runner 下 worker 直接挂掉，而派工那一侧全程只看到 `running`。）
+
+两条分开处理：
+
+| | 落在哪 | 给谁看 |
+|---|---|---|
+| **最终失败**（轮次以 `error` 收尾） | `result.json.blockers` + `status.json.last_error` | 终态原因与「要不要再派」 |
+| **中途失败**（重试后继续） | `status.json.counters.model_retries` + `notice`；`result.json.unverified` 留一条痕 | 实时反应 |
+
+`notice` 是 `{code, message, retryable, at}`：说的是**此刻正在出问题**，任务可能还在跑、
+还可能自己好。监控程序靠它实时反应（例如正在被限流时先别再派活儿），而不是等终态。
+**`notice` 存在不等于任务失败** —— 这是它与 `last_error` 的全部区别。
 
 ### 6.6 Ether 接入
 
