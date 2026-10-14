@@ -11,15 +11,15 @@
 
 默认 Agent 为 Echo：不仅定义语言风格，也定义角色、工作纪律、工具与权限、验证及交付要求。Build / Plan 参考 OpenCode；角色与工具体验参考 Claude Code 公开扩展，执行内核继续使用 DSH。
 
-需求、架构与 roadmap：[产品需求与编码方向](docs/PRODUCT_PLAN.md)（先读 §0）。**M1（离线 worker 骨架）已实现并实测**，M2 起尚未开工。
+需求、架构与 roadmap：[产品需求与编码方向](docs/PRODUCT_PLAN.md)（先读 §0）。**M2a/M2b 与 M2c 的桌面部分已落地并实测**：离线套件、夹具端到端，以及**真实 DSH 运行**（派工 / 探活 / 取消 / 杀监工 / 孤儿回收 / worktree 真提交）在 Windows 与 Arch 上都跑过。逐项证据见 [PRODUCT_PLAN §10.2b](docs/PRODUCT_PLAN.md)。
 
 - `crates/arc-deck-core/` 产品模型（任务/配置/结果/事件/Agent/授权）
 - `crates/arc-deck-dsh/` DSH 适配（行式 JSON-RPC、事件投影、假 SDK 对端）
-- `crates/arc-deck-cli/` `arcdeck` 二进制：headless 命令面（run / status / wait / report / cancel / auth / runtime / config）
+- `crates/arc-deck-cli/` `arcdeck` 二进制：headless 命令面（run / status / wait / report / usage / logs / cancel / ls / auth / runtime / config）
 - `agents/`、`prompts/` 默认 Agent 与提示词；`schemas/` 契约示例
 
 ```bash
-# 全部离线测试（156 个）；test-runtime 是必需的，发布构建里没有夹具
+# 全部离线测试（186 个）；test-runtime 是必需的，发布构建里没有夹具
 cargo test -p arc-deck-core -p arc-deck-dsh -p arc-deck-cli \
     --features arc-deck-cli/test-runtime --offline
 
@@ -29,8 +29,8 @@ cargo run -p arc-deck-cli --bin arcdeck --features test-runtime -- worker run \
     --task tests/fixtures/worker-task.json --format jsonl --result result.json
 ```
 
-- **headless 已可用（Windows 实测）**：`arcdeck runtime install` → `arcdeck run task.md --detach` → `arcdeck status`。用法见 `arcdeck --help` 与 [PRODUCT_PLAN §10.2b](docs/PRODUCT_PLAN.md)；Ether 接入示例在 `examples/ether/`。
-- 尚未实现 / 未验证：Debian 运行、TUI、GUI 接线、Plan 的执行层限制。
+- **headless 已可用**（Windows 与 Arch 均实测）：`arcdeck runtime install` → `arcdeck run <任务书> --by <谁> --accept "<验收命令>" --detach` → `arcdeck status` / `report`。用法见 `arcdeck --help` 与 [PRODUCT_PLAN §10.2b](docs/PRODUCT_PLAN.md)；Ether 接入示例在 `examples/ether/`。
+- 尚未实现 / 未验证：macOS 运行、真实运行时下的卡死续跑、TUI、GUI 接线、Plan 的执行层限制。
 - `REFS/` 是被 Git 忽略的本地参考；构建和发布不能依赖它。OpenCode 为 MIT；Claude Code 参考仓的根许可证不是 MIT，不默认复制其实现或提示词。
 - 现有 `kanesumi/`、`uwp/` 与 C# `arc-deck-dsh/` 保留，不进行删除或真实数据迁移。
 
@@ -169,10 +169,15 @@ arc-deck/
 │       ├── SettingsPage.xaml      设置
 │       └── Models/                数据与模板选择器
 ├── docs/
-│   ├── ARCHITECTURE.md            Rust 侧架构与 winit 决策依据
+│   ├── PRODUCT_PLAN.md            产品需求与编码方向（**入口，先读 §0**）
+│   ├── STATE_2026-10-14.md        交接快照：此刻的状态、仓外的东西、换机器步骤
+│   ├── DSH_FINDINGS.md            DSH 对非 DS 模型是否适用
+│   ├── PERSONA_FINDINGS.md        人格与风格怎么装（Claude Code 的做法）
+│   ├── ARCHITECTURE.md            Rust 侧早期架构快照（历史）
 │   ├── DESIGN_SYSTEM.md           正典落地取值（**只与 kanesumi/ 相关**）
 │   └── PERF_FINDINGS.md           流式排版实测
-└── AGENTS.md                      协作约定：通用 + kanesumi 侧 K1–K9 + uwp 侧 U1–U7
+├── prompts/constitution.md        宪法草案（不可让渡层；**尚未接进装配**）
+└── AGENTS.md                      协作约定：通用 + kanesumi 侧 K1–K9 + uwp 侧 U1–U17
 ```
 
 ### 构建 Rust 版本

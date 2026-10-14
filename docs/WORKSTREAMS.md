@@ -2,12 +2,16 @@
 
 ## 当前恢复开发入口（2026-10-12）
 
-当前需求与里程碑以 [PRODUCT_PLAN.md](PRODUCT_PLAN.md) 为准。新的顺序为：M1 离线 worker → M2 DSH/Echo/Build/Plan 与权限 → M3 OpenCode 风格 TUI → M4 WinUI GUI 接线 → M5 跨平台与扩展。
+当前需求与里程碑以 [PRODUCT_PLAN.md](PRODUCT_PLAN.md) 为准。新的顺序为：M1 离线 worker → M2 真实 DSH / 分离运行与探活 / 接进 Ether → M3 Agent 与权限实装 → M4 TUI → M5 本地服务 → M6 桌面 GUI。
 
 | 阶段 | 当前状态 |
 |---|---|
-| M0 需求基线 | 文档已建立，待用户审阅；没有据此实现新模块 |
-| M1–M5 | 未开工；第一份编码任务见 PRODUCT_PLAN §10.2 |
+| M0 需求基线 | ✅ 完成 |
+| M1 离线 worker 骨架 | ✅ 已实测 |
+| M2a / M2b / M2c（桌面部分） | ✅ 已落地并实测 —— **逐项证据见 [PRODUCT_PLAN §10.2b](PRODUCT_PLAN.md)，本表不复制** |
+| M2c 的 Ether 侧、M2d、M3–M6 | ❌ 未开工 |
+
+（这张表刻意只给状态、不复述数字 —— 复述过一次就漂过一次。）
 
 下面保留旧 A1–A7 与当时分线环境的历史记录。A5 的「桌面宿主直接引用 C# 协议层」不再是当前方向；当时 Linux 分线不可用也不是否定新的跨平台目标。旧实测没有在本轮复跑，不作新 DSH 版本的兼容证据。
 
