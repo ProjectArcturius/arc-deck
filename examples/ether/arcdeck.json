@@ -1,0 +1,18 @@
+{
+  "model": "opencode-go/deepseek-v4.1-flash",
+  "provider": {},
+  "runtime": { "session_log_upload": false },
+  "worker": {
+    "sandbox": "danger-full-access",
+    "allow_commit": true,
+    "preamble": "C:/Users/mc158/Documents/Projects/.oc/PREAMBLE.md",
+    "timeout_seconds": 14400,
+    "max_attempts": 3,
+    "model_idle_seconds": 600,
+    "tool_stall_seconds": 1800
+  },
+  "worktree": { "dir": "{repo_parent}/.oc/wt/{task_id}", "base": "main" },
+  "env": {
+    "CARGO_TARGET_DIR": "{workspace}/../../target/{task_id}"
+  }
+}
