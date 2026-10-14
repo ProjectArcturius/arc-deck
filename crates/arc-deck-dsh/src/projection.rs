@@ -100,6 +100,9 @@ pub struct Projection {
     pub attempts: usize,
     pub session_id: Option<String>,
     pub usage: Option<Usage>,
+    /// 被后来的 `turn/end` 覆盖掉的结束原因个数。续跑开的新会话也从第 1 轮数起，
+    /// 会并进同一个轮次视图；调用方靠它判断「这一次运行结束了没有」。
+    pub ends_overwritten: usize,
 }
 
 impl Projection {
@@ -148,6 +151,8 @@ impl Projection {
     /// `recorded` 的写入统一在这里发生 —— 让两个入口各写一半，迟早会出现
     /// 「走通知进来有记录、直接调用没记录」这种只有测试看得见的不一致。
     pub fn apply(&mut self, event: &Value) {
+        let flat = flatten(event);
+        let event = &flat;
         let Some(kind) = event.get("type").and_then(|t| t.as_str()) else {
             self.recorded.push(event.clone());
             return;
@@ -195,7 +200,11 @@ impl Projection {
                     .map(str::to_string);
                 if let Some(turn) = turn_no {
                     let view = self.ensure_turn(turn);
+                    let overwritten = view.end.is_some();
                     view.end = Some(TurnEnd { kind, message });
+                    if overwritten {
+                        self.ends_overwritten += 1;
+                    }
                 }
             }
             "user/message" => {
@@ -209,7 +218,10 @@ impl Projection {
                     // 系统提示词、工作区指令、技能清单都走这条路，不进对话。
                     return;
                 }
-                if let Some(turn) = turn_no {
+                // 真实 DSH 的 `user/message` 不带 `turn`（它属于当前打开的那一轮，
+                // 0.2.1-alpha.2 实测）；夹具带。没有就记到最近一轮上。
+                let turn = turn_no.or_else(|| self.turns.last().map(|t| t.turn));
+                if let Some(turn) = turn {
                     let text = text.unwrap_or_default();
                     self.ensure_turn(turn).user_messages.push(text);
                 }
@@ -236,10 +248,21 @@ impl Projection {
                     view.assistant.authoritative = true;
                     view.assistant.authoritative_text = text;
                     if let Some(usage) = event.get("usage") {
+                        // 真实 DSH 每一步各带一份用量（`inputTokens`/`outputTokens`/`cacheReadTokens`），
+                        // 整个任务的用量是逐步相加；`promptTokens` 等是夹具的旧拼写，一并认。
+                        let field = |a: &str, b: &str| {
+                            usage.get(a).or_else(|| usage.get(b)).and_then(|v| v.as_u64())
+                        };
+                        let add = |acc: Option<u64>, v: Option<u64>| match (acc, v) {
+                            (None, None) => None,
+                            (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
+                        };
+                        let prev = self.usage.clone().unwrap_or_default();
                         self.usage = Some(Usage {
-                            prompt_tokens: usage.get("promptTokens").and_then(|v| v.as_u64()),
-                            completion_tokens: usage.get("completionTokens").and_then(|v| v.as_u64()),
-                            total_tokens: usage.get("totalTokens").and_then(|v| v.as_u64()),
+                            prompt_tokens: add(prev.prompt_tokens, field("inputTokens", "promptTokens")),
+                            completion_tokens: add(prev.completion_tokens, field("outputTokens", "completionTokens")),
+                            total_tokens: add(prev.total_tokens, field("totalTokens", "totalTokens")),
+                            cache_read_tokens: add(prev.cache_read_tokens, field("cacheReadTokens", "cacheReadTokens")),
                         });
                     }
                 }
@@ -269,14 +292,24 @@ impl Projection {
                 }
             }
             "tool/result" => {
-                let call_id = event.get("callId").and_then(|c| c.as_str()).unwrap_or_default();
                 let message = event.get("message").cloned().unwrap_or(Value::Null);
+                // 真实 DSH 把配对 id 放在 `message.toolCallId`；夹具放在顶层 `callId`。
+                let call_id = event
+                    .get("callId")
+                    .and_then(|c| c.as_str())
+                    .or_else(|| message.get("toolCallId").and_then(|c| c.as_str()))
+                    .unwrap_or_default()
+                    .to_string();
+                let call_id = call_id.as_str();
                 let text = collect_message_text(&message).unwrap_or_default();
+                // 退出码：`meta.exitCode` 优先；真实 DSH 的 shell 工具把它写成正文里的
+                // `[exit code: N]` 标记（0.2.1-alpha.2 实测，meta 里只有 cwd）。
                 let exit_code = event
                     .get("meta")
                     .and_then(|m| m.get("exitCode"))
                     .and_then(|c| c.as_i64())
-                    .map(|c| c as i32);
+                    .map(|c| c as i32)
+                    .or_else(|| exit_code_marker(&text));
                 let outcome = ToolOutcome {
                     is_error: message.get("isError").and_then(|e| e.as_bool()).unwrap_or(false),
                     exit_code,
@@ -285,7 +318,15 @@ impl Projection {
                 let mut paired = false;
                 for turn in self.turns.iter_mut().rev() {
                     if let Some(tool) = turn.tools.iter_mut().rev().find(|t| t.call_id == call_id) {
-                        tool.outcome = Some(outcome.clone());
+                        let mut outcome = outcome.clone();
+                        // DSH 的 shell 工具**只为非零退出**写 `[exit code: N]` 标记
+                        // （tool-pwsh / tool-bash 的提示词原文：「Non-zero exits are reported as
+                        // `[exit code: N]` markers」）。所以命令类调用没有标记、也没报错，就是 0。
+                        // 2026-10-14 实测：不这么读，每条成功的验收命令都被判成「无法判定」。
+                        if outcome.exit_code.is_none() && !outcome.is_error && tool.command().is_some() {
+                            outcome.exit_code = Some(0);
+                        }
+                        tool.outcome = Some(outcome);
                         paired = true;
                         break;
                     }
@@ -315,6 +356,32 @@ impl Projection {
     }
 }
 
+/// 真实 DSH 的事件形如 `{type, seq, time, data:{…}}`；夹具与 M1 测试用扁平形状。
+/// 统一摊平成扁平形状再读，免得每个分支各自判断两种拼法。
+fn flatten(event: &Value) -> Value {
+    match (event.get("data").and_then(|d| d.as_object()), event.as_object()) {
+        (Some(data), Some(outer)) => {
+            let mut merged = data.clone();
+            for key in ["type", "seq", "time"] {
+                if let Some(v) = outer.get(key) {
+                    merged.insert(key.to_string(), v.clone());
+                }
+            }
+            Value::Object(merged)
+        }
+        _ => event.clone(),
+    }
+}
+
+/// 取最后一个 `[exit code: N]` 标记。没有标记表示 0（DSH 只为非零退出写标记），
+/// 但「没有标记」也可能是这根本不是 shell 工具 —— 所以无标记返回 None，由调用方按工具名判断。
+pub fn exit_code_marker(text: &str) -> Option<i32> {
+    let idx = text.rfind("[exit code: ")?;
+    let rest = &text[idx + "[exit code: ".len()..];
+    let end = rest.find(']')?;
+    rest[..end].trim().parse().ok()
+}
+
 /// 从消息对象里取纯文本。`content` 是块数组，只拼接 `type == "text"` 的块。
 fn collect_message_text(message: &Value) -> Option<String> {
     if let Some(text) = message.get("text").and_then(|t| t.as_str()) {
@@ -340,10 +407,17 @@ fn collect_message_text(message: &Value) -> Option<String> {
 fn scan_failures(value: &Value, out: &mut Vec<String>) {
     if let Some(stream) = value.get("stream").and_then(|s| s.as_array()) {
         for entry in stream {
-            if let Some(message) = entry
-                .get("chunk")
-                .and_then(|c| c.get("finish"))
+            let Some(chunk) = entry.get("chunk") else { continue };
+            // 两种拼法：夹具是 `chunk.finish.reason`，真实 DSH 是 `chunk:{type:"finish", reason}`。
+            let reason = chunk
+                .get("finish")
                 .and_then(|f| f.get("reason"))
+                .or_else(|| {
+                    (chunk.get("type").and_then(|t| t.as_str()) == Some("finish"))
+                        .then(|| chunk.get("reason"))
+                        .flatten()
+                });
+            if let Some(message) = reason
                 .and_then(|r| r.get("failure"))
                 .and_then(|f| f.get("message"))
                 .and_then(|m| m.as_str())
@@ -496,5 +570,61 @@ mod tests {
         let usage = p.usage.unwrap();
         assert_eq!(usage.total_tokens, Some(14));
         assert_eq!(usage.prompt_tokens, Some(10));
+    }
+
+    /// 2026-10-14 真实 DSH 0.2.1-alpha.2（经 OpenCode Go 的 deepseek-v4.1-flash）发出的事件，
+    /// 去掉了 stream、路径与提示词。M1 的投影按扁平字段读，读这一组会什么都看不见 ——
+    /// 这条测试就是钉住「字段在 data 里、配对 id 在 message.toolCallId、退出码在正文标记里」。
+    #[test]
+    fn real_dsh_0_2_1_events_are_projected() {
+        let events = [
+            json!({"type":"turn/start","seq":4,"time":1,"data":{"turn":1}}),
+            json!({"type":"user/message","seq":8,"time":1,"data":{"content":[{"type":"text","text":"Run: cmd /c exit 3"}],"source":{"kind":"user"},"role":"user","id":"u1"}}),
+            json!({"type":"tool/call","seq":15,"time":2,"data":{"turn":1,"step":1,"callId":"call_00_S","name":"pwsh","arguments":"{\"description\":\"Run cmd exit 3\",\"command\":\"cmd /c exit 3\"}"}}),
+            json!({"type":"tool/result","seq":16,"time":3,"data":{"turn":1,"step":1,"message":{"role":"tool","source":{"kind":"tool","callId":"call_00_S"},"toolCallId":"call_00_S","content":[{"type":"text","text":"(no output)\n[exit code: 1]"}],"isError":false,"id":"r1"},"meta":{"cwd":"C:/ws"}}}),
+            json!({"type":"assistant/message","seq":19,"time":4,"data":{"turn":1,"step":2,"message":{"role":"assistant","content":[{"type":"reasoning","text":"…"},{"type":"text","text":"done"}]},"stream":[],"usage":{"inputTokens":229,"outputTokens":113,"totalTokens":6742,"cacheReadTokens":6400}}}),
+            json!({"type":"turn/end","seq":21,"time":5,"data":{"turn":1,"reason":{"kind":"completed"}}}),
+        ];
+        let mut p = Projection::new();
+        for e in &events {
+            p.apply(e);
+        }
+        let turn = &p.turns()[0];
+        assert_eq!(turn.user_messages, vec!["Run: cmd /c exit 3".to_string()]);
+        assert_eq!(turn.tools.len(), 1);
+        assert_eq!(turn.tools[0].command(), Some("cmd /c exit 3"));
+        let outcome = turn.tools[0].outcome.as_ref().expect("结果必须配对上");
+        assert_eq!(outcome.exit_code, Some(1));
+
+        // 成功的命令没有标记：读成 0，而不是「没有退出码」。
+        let mut q = Projection::new();
+        q.apply(&json!({"type":"turn/start","seq":1,"time":1,"data":{"turn":1}}));
+        q.apply(&json!({"type":"tool/call","seq":2,"time":1,"data":{"turn":1,"step":1,"callId":"c2","name":"pwsh","arguments":"{\"command\":\"git log --oneline -1\"}"}}));
+        q.apply(&json!({"type":"tool/result","seq":3,"time":1,"data":{"turn":1,"step":1,"message":{"role":"tool","toolCallId":"c2","content":[{"type":"text","text":"abc123 test"}],"isError":false}}}));
+        assert_eq!(q.turns()[0].tools[0].outcome.as_ref().unwrap().exit_code, Some(0));
+        assert_eq!(p.orphans, 0);
+        assert_eq!(p.assistant_text(), "done");
+        assert_eq!(p.last_end().unwrap().kind, "completed");
+        let usage = p.usage.unwrap();
+        assert_eq!(usage.cache_read_tokens, Some(6400));
+        assert_eq!(usage.completion_tokens, Some(113));
+    }
+
+    #[test]
+    fn real_quota_failure_reaches_failures() {
+        let mut p = Projection::new();
+        p.apply(&json!({"type":"assistant/attempt","seq":14,"time":1,"data":{"turn":1,"step":1,"stream":[
+            {"type":"chunk","time":1,"chunk":{"type":"finish","reason":{"kind":"error","failure":{"message":"Insufficient Balance"}}}}]}}));
+        p.apply(&json!({"type":"turn/end","seq":16,"time":2,"data":{"turn":1,"reason":{"kind":"error","error":{"message":"Insufficient Balance","code":"QUOTA","status":402}}}}));
+        assert_eq!(p.last_end().unwrap().kind, "error");
+        assert!(p.failures.iter().any(|f| f.contains("Insufficient Balance")));
+        assert_eq!(p.attempts, 1);
+    }
+
+    #[test]
+    fn exit_code_marker_parses_the_last_marker() {
+        assert_eq!(exit_code_marker("x\n[exit code: 101]"), Some(101));
+        assert_eq!(exit_code_marker("ok"), None);
+        assert_eq!(exit_code_marker("[exit code: 2] then [exit code: 3]"), Some(3));
     }
 }

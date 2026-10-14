@@ -8,6 +8,7 @@
 pub mod process;
 pub mod projection;
 pub mod protocol;
+pub mod runtime;
 pub mod transport;
 
 /// 假 SDK 对端。只在 `test-runtime` feature 下存在。

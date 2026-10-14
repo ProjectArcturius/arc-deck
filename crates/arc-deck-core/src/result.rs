@@ -120,7 +120,7 @@ pub struct ArtifactRef {
 }
 
 /// provider 实际报告的用量。缺数据就整个字段缺席，不留一个假的 0。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_tokens: Option<u64>,
@@ -128,6 +128,9 @@ pub struct Usage {
     pub completion_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u64>,
+    /// provider 报告的缓存命中输入 token。省钱与否看这个数，不看估算。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
 }
 
 /// 最终结果。
@@ -144,6 +147,10 @@ pub struct TaskResult {
     pub runtime_version: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changes: Vec<ChangeRecord>,
+    /// Arc Deck 自己从 git 采集的提交（`<sha> <标题>`），相对启动配置的 `git_base`。
+    /// 不是模型自报。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commits: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub verification: Vec<VerificationRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -169,6 +176,7 @@ impl TaskResult {
             session_id: None,
             runtime_version: None,
             changes: Vec::new(),
+            commits: Vec::new(),
             verification: Vec::new(),
             unverified: Vec::new(),
             blockers: Vec::new(),

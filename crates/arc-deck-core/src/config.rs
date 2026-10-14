@@ -30,8 +30,113 @@ pub enum RuntimeSpec {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scenario: Option<String>,
     },
-    /// 真实 DSH SDK stdio。M1 未实现。
-    DshSdk { entry: PathBuf, version: String, profile: String },
+    /// 真实 DSH SDK stdio（PRODUCT_PLAN §9.2a）：`node <entry> --profile <profile> --patch <生成的 patch>`。
+    ///
+    /// 这里只记**密钥在哪**（`route.key_source`），从不记密钥本身 —— 本结构会被物化进
+    /// 任务状态目录，而那个目录不该成为凭据的第二个存放处。
+    DshSdk {
+        /// `node` 可执行文件；写 `node` 时按 PATH 查找。
+        #[serde(default = "default_node")]
+        node: PathBuf,
+        /// `@deepseek-ai/dsh/lib/bin.js`。
+        entry: PathBuf,
+        version: String,
+        profile: String,
+        /// 路由。缺了它就不知道该往 patch 里写哪个适配器。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        route: Option<RouteSpec>,
+        /// DSH 沙箱档：`read-only` / `workspace-write` / `danger-full-access`。
+        #[serde(default = "default_sandbox")]
+        sandbox: String,
+        /// DSH 默认把会话日志随官方请求上传；不显式打开就关掉。
+        #[serde(default)]
+        session_log_upload: bool,
+        /// 工人守则文件，进 system prompt（persona 后缀）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preamble: Option<PathBuf>,
+    },
+}
+
+fn default_node() -> PathBuf {
+    PathBuf::from("node")
+}
+
+fn default_sandbox() -> String {
+    "workspace-write".to_string()
+}
+
+/// 物化后的模型路由（由 [`crate::provider::resolve`] 产出）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouteSpec {
+    pub provider_id: String,
+    /// `deepseek-official` 或 `pi-ai`。
+    pub adapter: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<RouteModel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// 运行时子进程里承载密钥的环境变量名。
+    pub key_env: String,
+    /// `auth`（arcdeck auth.json）、`env:<变量>`、`file:<路径>`。
+    pub key_source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouteModel {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+}
+
+/// 探活与自救的阈值（PRODUCT_PLAN §6.5）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Liveness {
+    #[serde(default = "liveness_defaults::heartbeat")]
+    pub heartbeat_seconds: u64,
+    #[serde(default = "liveness_defaults::model_idle")]
+    pub model_idle_seconds: u64,
+    #[serde(default = "liveness_defaults::tool_stall")]
+    pub tool_stall_seconds: u64,
+    /// 卡死后最多跑几次（含第一次）。夹具与 M1 语义是 1：不续跑。
+    #[serde(default = "liveness_defaults::max_attempts")]
+    pub max_attempts: u32,
+}
+
+impl Default for Liveness {
+    fn default() -> Self {
+        Self {
+            heartbeat_seconds: liveness_defaults::heartbeat(),
+            model_idle_seconds: liveness_defaults::model_idle(),
+            tool_stall_seconds: liveness_defaults::tool_stall(),
+            max_attempts: liveness_defaults::max_attempts(),
+        }
+    }
+}
+
+mod liveness_defaults {
+    pub fn heartbeat() -> u64 {
+        15
+    }
+    pub fn model_idle() -> u64 {
+        600
+    }
+    pub fn tool_stall() -> u64 {
+        1800
+    }
+    pub fn max_attempts() -> u32 {
+        1
+    }
 }
 
 /// Agent 定义与提示词的来源目录。显式给出，不做自动发现。
@@ -143,6 +248,12 @@ pub struct WorkerConfig {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub timeouts: Timeouts,
+    #[serde(default)]
+    pub liveness: Liveness,
+    /// workspace 是 git 仓时，结果里的提交与变更相对哪个基线采集（如 `main`）。
+    /// 省略就不采集 —— 不猜基线。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_base: Option<String>,
 }
 
 impl WorkerConfig {
@@ -179,10 +290,23 @@ impl WorkerConfig {
         self.authorization.workspace = paths::resolve_against(origin, &self.authorization.workspace);
         self.agents.dir = paths::resolve_against(origin, &self.agents.dir);
         self.agents.prompts_dir = paths::resolve_against(origin, &self.agents.prompts_dir);
-        if let RuntimeSpec::FixtureSdk { entry: Some(entry), .. } = &mut self.runtime {
-            if !entry.is_absolute() {
-                *entry = paths::resolve_against(origin, entry);
+        match &mut self.runtime {
+            RuntimeSpec::FixtureSdk { entry: Some(entry), .. } => {
+                if !entry.is_absolute() {
+                    *entry = paths::resolve_against(origin, entry);
+                }
             }
+            RuntimeSpec::DshSdk { entry, preamble, .. } => {
+                if !entry.is_absolute() {
+                    *entry = paths::resolve_against(origin, entry);
+                }
+                if let Some(p) = preamble {
+                    if !p.is_absolute() {
+                        *p = paths::resolve_against(origin, p);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -218,6 +342,9 @@ impl WorkerConfig {
                 crate::mode::AgentId::parse(raw)?;
             }
         }
+        if self.liveness.max_attempts == 0 || self.liveness.heartbeat_seconds == 0 {
+            return Err(SpecError::new(code::CONFIG_INVALID, "liveness.max_attempts 与 heartbeat_seconds 必须大于 0"));
+        }
         if self.timeouts.initialize_seconds == 0
             || self.timeouts.prompt_seconds == 0
             || self.timeouts.wait_seconds == 0
@@ -227,7 +354,13 @@ impl WorkerConfig {
         }
         match &self.runtime {
             RuntimeSpec::FixtureSdk { .. } => Ok(()),
-            RuntimeSpec::DshSdk { version, profile, .. } => {
+            RuntimeSpec::DshSdk { version, profile, sandbox, .. } => {
+                if !crate::userconfig::SANDBOX_MODES.contains(&sandbox.as_str()) {
+                    return Err(SpecError::new(
+                        code::CONFIG_INVALID,
+                        format!("runtime.sandbox = `{sandbox}` 不是已知的 DSH 沙箱档"),
+                    ));
+                }
                 if version.trim().is_empty() || profile.trim().is_empty() {
                     return Err(SpecError::new(
                         code::CONFIG_INVALID,
@@ -308,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn dsh_sdk_still_parses_but_is_a_later_milestone() {
+    fn dsh_sdk_requires_an_explicit_model_route() {
         let raw = MINIMAL.replace(
             r#"{ "kind": "fixture-sdk", "scenario": "success" }"#,
             r#"{ "kind": "dsh-sdk", "entry": "dsh.js", "version": "0.2.1-alpha.2", "profile": "sdk" }"#,

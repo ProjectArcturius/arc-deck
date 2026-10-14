@@ -41,6 +41,7 @@ use tokio::sync::{mpsc, Mutex};
 use crate::args::{TaskSource, WorkerArgs};
 use crate::cancel::{CancelSignal, CancelWatcher};
 use crate::report::{write_result_file, EventSink, WriteOutcome};
+use crate::status::{self, StatusFile, StatusWriter};
 
 /// 取消文件的轮询间隔。
 const CANCEL_POLL: Duration = Duration::from_millis(100);
@@ -70,7 +71,11 @@ struct Prepared {
 struct RuntimeCommand {
     program: PathBuf,
     args: Vec<String>,
+    /// 含密钥（真实 DSH）。只在内存里，从不落盘。
     env: BTreeMap<String, String>,
+    inherit_env: bool,
+    /// 状态目录建好之后才写的文件（DSH patch）。
+    pending_files: Vec<(PathBuf, String)>,
 }
 
 /// 入口：返回进程退出码。
@@ -101,13 +106,13 @@ fn prepare(args: &WorkerArgs) -> Result<Prepared, SpecError> {
     // 工作区指令由 DSH 的既有机制装载（PRODUCT_PLAN §5.3），M1 不重复注入。
     let system_prompt = registry.compose_system_prompt(plan.policy.agent, plan.policy.mode, None)?;
 
+    let run_dir = config.state_root.join("runs").join(&plan.task_id);
     // 运行时能力在建立任何状态之前就查清。
-    let command = runtime_command(&config, &plan)?;
+    let command = runtime_command(&config, &plan, &system_prompt, &run_dir)?;
 
     let watcher = CancelWatcher::new(args.cancel_file.clone(), &plan.task_id);
     watcher.preflight()?;
 
-    let run_dir = config.state_root.join("runs").join(&plan.task_id);
     let settled = run_dir.join("result.json");
     if settled.is_file() {
         return Err(SpecError::new(
@@ -125,6 +130,11 @@ fn prepare(args: &WorkerArgs) -> Result<Prepared, SpecError> {
     std::fs::write(run_dir.join("system-prompt.md"), system_prompt.text()).map_err(|e| {
         SpecError::new(code::CONFIG_INVALID, format!("写入 system-prompt.md 失败：{e}"))
     })?;
+    for (path, text) in &command.pending_files {
+        std::fs::write(path, text).map_err(|e| {
+            SpecError::new(code::CONFIG_INVALID, format!("写入 {} 失败：{e}", path.display()))
+        })?;
+    }
 
     Ok(Prepared {
         config,
@@ -153,16 +163,102 @@ fn load_task(source: &TaskSource) -> Result<(TaskSpec, String), SpecError> {
     }
 }
 
-fn runtime_command(config: &WorkerConfig, plan: &ExecutionPlan) -> Result<RuntimeCommand, SpecError> {
+fn runtime_command(
+    config: &WorkerConfig,
+    plan: &ExecutionPlan,
+    system_prompt: &SystemPrompt,
+    run_dir: &Path,
+) -> Result<RuntimeCommand, SpecError> {
     match &config.runtime {
-        RuntimeSpec::DshSdk { .. } => Err(SpecError::new(
-            code::RUNTIME_NOT_SUPPORTED,
-            "M1 尚未接入真实 DSH 运行时（PRODUCT_PLAN §10.1 的 M2）；当前只支持 fixture-sdk",
-        )),
+        RuntimeSpec::DshSdk { node, entry, profile, route, sandbox, session_log_upload, preamble, .. } => {
+            dsh_runtime_command(DshCommandInput {
+                config,
+                node,
+                entry,
+                profile,
+                route: route.as_ref(),
+                sandbox,
+                session_log_upload: *session_log_upload,
+                preamble: preamble.as_deref(),
+                system_prompt,
+                run_dir,
+            })
+        }
         RuntimeSpec::FixtureSdk { entry, scenario } => {
             fixture_runtime_command(entry, scenario, &config.env, plan)
         }
     }
+}
+
+struct DshCommandInput<'a> {
+    config: &'a WorkerConfig,
+    node: &'a Path,
+    entry: &'a Path,
+    profile: &'a str,
+    route: Option<&'a arc_deck_core::config::RouteSpec>,
+    sandbox: &'a str,
+    session_log_upload: bool,
+    preamble: Option<&'a Path>,
+    system_prompt: &'a SystemPrompt,
+    run_dir: &'a Path,
+}
+
+/// 真实 DSH（PRODUCT_PLAN §9.2a）：`node <bin.js> --profile sdk --patch <run_dir>/dsh-patch.json`，
+/// `DSH_HOME` 是本任务独占的 `<run_dir>/dsh-home` —— 不碰 Desktop 的真实 home（参 AGENTS.md P15）。
+fn dsh_runtime_command(input: DshCommandInput<'_>) -> Result<RuntimeCommand, SpecError> {
+    if !input.entry.is_file() {
+        return Err(SpecError::new(
+            code::RUNTIME_ENTRY_MISSING,
+            format!(
+                "DSH 入口不存在：{}。先运行 `arcdeck runtime install`",
+                input.entry.display()
+            ),
+        ));
+    }
+    let route = input.route.ok_or_else(|| {
+        SpecError::new(code::CONFIG_INVALID, "runtime.dsh-sdk 缺 route：不知道该往 patch 里写哪个适配器")
+    })?;
+    // 密钥在这里取，取不到就以 64 退出 —— 不要等到模型请求时才发现。
+    let key = arc_deck_core::provider::read_key_from_spec(route, &arc_deck_core::userconfig::auth_path())?;
+
+    let mut persona = input.system_prompt.text();
+    if let Some(path) = input.preamble {
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            SpecError::new(code::CONFIG_INVALID, format!("读工人守则 {} 失败：{e}", path.display()))
+        })?;
+        persona.push_str("
+
+---
+
+");
+        persona.push_str(&text);
+    }
+    let patch_path = input.run_dir.join("dsh-patch.json");
+    let patch = arc_deck_dsh::runtime::render_patch(&arc_deck_dsh::runtime::PatchInput {
+        route,
+        persona_suffix: &persona,
+        session_log_upload: input.session_log_upload,
+    });
+
+    let mut env = input.config.env.clone();
+    for (k, v) in arc_deck_dsh::runtime::runtime_env(&input.run_dir.join("dsh-home"), input.sandbox) {
+        env.insert(k, v);
+    }
+    env.insert(route.key_env.clone(), key);
+
+    Ok(RuntimeCommand {
+        program: input.node.to_path_buf(),
+        args: vec![
+            input.entry.display().to_string(),
+            "--profile".into(),
+            input.profile.to_string(),
+            "--patch".into(),
+            patch_path.display().to_string(),
+        ],
+        env,
+        inherit_env: true,
+        pending_files: vec![(patch_path, patch)],
+    })
 }
 
 /// 假 SDK 对端的启动参数。
@@ -206,6 +302,8 @@ fn fixture_runtime_command(
         program,
         args: vec!["__fixture-sdk".to_string(), "--scenario".to_string(), scenario],
         env,
+        inherit_env: false,
+        pending_files: Vec::new(),
     })
 }
 
@@ -238,6 +336,36 @@ async fn execute(prepared: Prepared) -> i32 {
     let mut sink = EventSink::new(&task_id, Some(run_dir.join("events.jsonl")));
     let mut projection = Projection::new();
     let mut watcher = CancelWatcher::new(prepared.cancel_file.clone(), &task_id);
+    let liveness = prepared.config.liveness.clone();
+    let started = status::now_ms();
+    let mut status = StatusWriter::new(
+        &run_dir,
+        StatusFile {
+            schema_version: arc_deck_core::SCHEMA_VERSION,
+            task_id: task_id.clone(),
+            state: "accepted".into(),
+            terminal: None,
+            host: status::host_name(),
+            pid: std::process::id(),
+            runtime_pid: None,
+            workspace: prepared.plan.workspace.display().to_string(),
+            model: prepared.config.model.as_ref().map(|m| format!("{}/{}", m.provider, m.model)),
+            started_at: started,
+            heartbeat_at: started,
+            progress_at: started,
+            activity: status::Activity { kind: "starting".into(), name: None, summary: None, since: started },
+            counters: Default::default(),
+            attempt: 1,
+            max_attempts: liveness.max_attempts,
+            last_error: None,
+            usage: None,
+            limits: status::Limits {
+                heartbeat_s: liveness.heartbeat_seconds,
+                model_idle_s: liveness.model_idle_seconds,
+                tool_stall_s: liveness.tool_stall_seconds,
+            },
+        },
+    );
 
     let _ = sink.state(WorkerState::Accepted, "任务书与启动配置已通过校验");
     let _ = sink.diagnostic(
@@ -262,14 +390,95 @@ async fn execute(prepared: Prepared) -> i32 {
         );
     }
 
+    // 整个任务一个墙钟预算，续跑不重置它。
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(prepared.plan.timeout_seconds);
+    let mut attempt: u32 = 1;
+    let mut prompt = prepared.plan.instruction.clone();
+    loop {
+        status.status.attempt = attempt;
+        status.flush(true);
+        let ended = run_attempt(
+            &prepared,
+            &mut sink,
+            &mut projection,
+            &mut watcher,
+            &mut status,
+            &prompt,
+            attempt,
+            deadline,
+        )
+        .await;
+        let retry_reason = match &ended {
+            AttemptEnd::Ran { outcome: RunOutcome::Stalled(reason), .. } => Some(("STALLED", reason.clone())),
+            AttemptEnd::Ran { outcome: RunOutcome::TurnEnded, .. } if tool_call_as_text(&projection) => {
+                status.status.counters.tool_call_as_text += 1;
+                Some(("TOOL_CALL_AS_TEXT", "模型把工具调用当成正文吐出后收工".to_string()))
+            }
+            _ => None,
+        };
+        match retry_reason {
+            Some((code, reason)) if attempt < liveness.max_attempts => {
+                status.error(code, &reason);
+                let _ = sink.diagnostic(
+                    "warn",
+                    Some(code),
+                    &format!("第 {attempt} 次运行：{reason}；开第 {} 次（共 {} 次）", attempt + 1, liveness.max_attempts),
+                );
+                attempt += 1;
+                prompt = format!(
+                    "{}\n\n---\n\n# 续跑说明（第 {attempt} 次）\n\n上一次运行被终止：{reason}。\
+                     工作区里可能已有上一次的成果：先 `git status` 与 `git log --oneline -10` 看已完成的部分，\
+                     接着做剩下的，不要重做已提交的功能块。",
+                    prepared.plan.instruction
+                );
+                continue;
+            }
+            Some((code, reason)) => {
+                status.error(code, &reason);
+                return conclude(&prepared, sink, projection, status, ended, Some(code));
+            }
+            None => return conclude(&prepared, sink, projection, status, ended, None),
+        }
+    }
+}
+
+/// 一次运行（attempt）的结局。
+enum AttemptEnd {
+    /// 还没进入主循环就失败了：结果已经写好。
+    Early { result: TaskResult, termination: ProcessTermination },
+    Ran {
+        outcome: RunOutcome,
+        termination: ProcessTermination,
+        runtime_version: Option<String>,
+        session_id: String,
+        wait_error: Option<String>,
+    },
+}
+
+/// 拉起运行时 → 握手 → 提交 → 消费到终态 → 收尾。卡死时返回 `Stalled`，由调用方决定是否续跑。
+#[allow(clippy::too_many_arguments)]
+async fn run_attempt(
+    prepared: &Prepared,
+    sink: &mut EventSink,
+    projection: &mut Projection,
+    watcher: &mut CancelWatcher,
+    status: &mut StatusWriter,
+    prompt: &str,
+    attempt: u32,
+    deadline: tokio::time::Instant,
+) -> AttemptEnd {
+    let task_id = prepared.plan.task_id.clone();
     let command = &prepared.command;
 
-    let _ = sink.state(WorkerState::Starting, "拉起运行时");
+    let _ = sink.state(WorkerState::Starting, &format!("拉起运行时（第 {attempt} 次）"));
+    status.set_state("starting");
+    status.set_activity("starting", None, None);
     let mut process = match RuntimeProcess::spawn(
         &command.program,
         &command.args,
         &command.env,
         Some(&prepared.plan.workspace),
+        command.inherit_env,
     ) {
         Ok(process) => process,
         Err(e) => {
@@ -279,10 +488,11 @@ async fn execute(prepared: Prepared) -> i32 {
                 format!("{} 启动失败：{e}", command.program.display()),
             );
             result.policy = Some(prepared.plan.policy.clone());
-            return finish(&mut sink, &prepared, result, process_termination_note(false, "未启动"));
+            return AttemptEnd::Early { result, termination: process_termination_note(false, "未启动") };
         }
     };
     let pid = process.pid();
+    status.status.runtime_pid = pid;
     let _ = sink.diagnostic(
         "info",
         None,
@@ -291,7 +501,7 @@ async fn execute(prepared: Prepared) -> i32 {
 
     let (stdout, stdin, stderr) = process.take_stdio();
     let (transport, mut inbound) = transport::spawn(stdout, stdin);
-    let stderr_tail = spawn_stderr_drain(stderr);
+    let stderr_tail = spawn_stderr_drain(stderr, prepared.run_dir.join("runtime.log"));
     let mut announced = AnnounceState::default();
     if let Some(path) = watcher.path() {
         let _ = sink.diagnostic(
@@ -302,17 +512,19 @@ async fn execute(prepared: Prepared) -> i32 {
     }
 
     let _ = sink.state(WorkerState::Running, "握手");
+    status.set_state("running");
     let session_id = format!("arc-deck-{task_id}-{}", now_nanos());
     let route = prepared.config.model.clone();
-    let (provider, model) = match &route {
-        Some(route) => (route.provider.clone(), route.model.clone()),
+    let (provider, model, reasoning_effort) = match &route {
+        Some(route) => (route.provider.clone(), route.model.clone(), route.reasoning_effort.clone()),
         // 夹具不会真的调用模型，所以这里给的是显式占位而不是「一个编造的默认路由」。
-        None => ("fixture".to_string(), "fixture".to_string()),
+        None => ("fixture".to_string(), "fixture".to_string(), None),
     };
     let init_params = serde_json::to_value(InitializeParams {
         cwd: prepared.plan.workspace.display().to_string(),
         provider,
         model,
+        reasoning_effort,
     })
     .unwrap_or(Value::Null);
 
@@ -320,10 +532,11 @@ async fn execute(prepared: Prepared) -> i32 {
     match call_watched(
         &transport,
         &mut inbound,
-        &mut sink,
-        &mut projection,
-        &mut watcher,
+        sink,
+        projection,
+        watcher,
         &mut announced,
+        status,
         method::INITIALIZE,
         init_params,
         Duration::from_secs(prepared.config.timeouts.initialize_seconds),
@@ -334,6 +547,10 @@ async fn execute(prepared: Prepared) -> i32 {
             runtime_version = serde_json::from_value::<protocol::InitializeResult>(value)
                 .ok()
                 .map(|r| format!("{}/{}", r.server_info.name, r.server_info.version));
+            if let RuntimeSpec::DshSdk { version, .. } = &prepared.config.runtime {
+                // 握手里的版本恒为 0.0.1、不能当判据（参 AGENTS.md P2）；真正钉住的是安装版本。
+                runtime_version = Some(format!("dsh {version} ({})", runtime_version.unwrap_or_default()));
+            }
             let _ = sink.diagnostic(
                 "info",
                 None,
@@ -347,25 +564,26 @@ async fn execute(prepared: Prepared) -> i32 {
             result.policy = Some(prepared.plan.policy.clone());
             apply_call_failure(&mut result, "initialize", outcome);
             let termination = shutdown_and_terminate(&transport, &mut process).await;
-            let _ = append_stderr(&mut result, &stderr_tail, &mut sink);
-            return finish(&mut sink, &prepared, result, termination);
+            let _ = append_stderr(&mut result, &stderr_tail, sink).await;
+            return AttemptEnd::Early { result, termination };
         }
     }
 
     let _ = sink.state(WorkerState::Running, "提交任务");
     let prompt_params = serde_json::to_value(SessionPromptParams {
         session_id: session_id.clone(),
-        content_blocks: protocol::text_content_block(&prepared.plan.instruction),
+        content_blocks: protocol::text_content_block(prompt),
     })
     .unwrap_or(Value::Null);
 
     match call_watched(
         &transport,
         &mut inbound,
-        &mut sink,
-        &mut projection,
-        &mut watcher,
+        sink,
+        projection,
+        watcher,
         &mut announced,
+        status,
         method::SESSION_PROMPT,
         prompt_params,
         Duration::from_secs(prepared.config.timeouts.prompt_seconds),
@@ -375,6 +593,7 @@ async fn execute(prepared: Prepared) -> i32 {
         CallOutcome::Value(_receipt) => {
             // 回执只是「已入队」。这里刻意不把它记成任何形式的完成。
             let _ = sink.diagnostic("info", None, "prompt 已入队（回执不代表模型已回答）");
+            status.set_activity("model", None, None);
         }
         outcome => {
             let mut result = TaskResult::new(&task_id, TaskStatus::Unknown, String::new());
@@ -383,33 +602,38 @@ async fn execute(prepared: Prepared) -> i32 {
             result.policy = Some(prepared.plan.policy.clone());
             apply_call_failure(&mut result, "session/prompt", outcome);
             let termination = shutdown_and_terminate(&transport, &mut process).await;
-            let _ = append_stderr(&mut result, &stderr_tail, &mut sink);
-            return finish(&mut sink, &prepared, result, termination);
+            let _ = append_stderr(&mut result, &stderr_tail, sink).await;
+            return AttemptEnd::Early { result, termination };
         }
     }
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(prepared.plan.timeout_seconds);
+    // `session/wait` 自己的上限只是保险；真正的上限是任务墙钟预算与卡死判定。
     let wait_fut = transport.call(
         method::SESSION_WAIT,
         json!({ "sessionId": session_id }),
-        Duration::from_secs(prepared.config.timeouts.wait_seconds),
+        Duration::from_secs(prepared.config.timeouts.wait_seconds.max(prepared.plan.timeout_seconds)),
     );
     tokio::pin!(wait_fut);
     let mut wait_done = false;
     let mut wait_error: Option<String> = None;
     let mut grace: Option<tokio::time::Instant> = None;
+    // 本次运行开始前已有的结束原因：续跑时投影里还留着上一次的，判「这一次结束了没有」要排除它。
+    let ends_before = count_ends(projection);
     // 轮询定时器必须**建在循环外面**：在 select 里 `sleep()` 每次迭代都会重建，
     // 而事件密集时每 25 ms 就来一条，那个 100 ms 的 sleep 永远走不完 ——
     // 取消文件于是永远读不到。踩过一次，症状是「取消请求发出去了，任务照跑」。
     let mut cancel_poll = tokio::time::interval(CANCEL_POLL);
     cancel_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(prepared.config.liveness.heartbeat_seconds));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let outcome = loop {
-        if wait_done && projection.last_end().is_some() {
+        let ended_now = count_ends(projection) > ends_before;
+        if wait_done && ended_now {
             break RunOutcome::TurnEnded;
         }
         if let Some(limit) = grace {
-            if tokio::time::Instant::now() >= limit && projection.last_end().is_none() {
+            if tokio::time::Instant::now() >= limit && !ended_now {
                 break RunOutcome::NoTerminal;
             }
         }
@@ -422,24 +646,35 @@ async fn execute(prepared: Prepared) -> i32 {
                 if let Err(e) = result {
                     wait_error = Some(e.to_string());
                 }
-                if projection.last_end().is_none() {
+                if count_ends(projection) <= ends_before {
                     grace = Some(tokio::time::Instant::now() + TERMINAL_GRACE);
                 }
             }
             item = inbound.recv() => {
-                match absorb(item, &mut sink, &mut projection, &mut announced) {
+                match absorb(item, sink, projection, &mut announced, status) {
                     Absorbed::Ok => {}
                     Absorbed::Closed => break RunOutcome::RuntimeExited(
                         "运行时输出已关闭，但没有收到 turn/end".to_string()
                     ),
                     Absorbed::Fatal(reason) => break RunOutcome::Violation(reason),
                 }
+                status.flush(false);
                 if !sink.stdout_alive() {
                     break RunOutcome::Cancelled("stdout 消费端已断开".to_string());
                 }
             }
             _ = tokio::time::sleep_until(deadline) => {
                 break RunOutcome::TimedOut;
+            }
+            _ = heartbeat.tick() => {
+                status.status.usage = projection.usage.clone();
+                if let Some(base) = &prepared.config.git_base {
+                    status.status.counters.commits = git_commit_count(&prepared.plan.workspace, base);
+                }
+                status.flush(true);
+                if let Some(reason) = status::stall_reason(&status.status, status::now_ms()) {
+                    break RunOutcome::Stalled(reason);
+                }
             }
             _ = cancel_poll.tick() => {
                 match watcher.poll() {
@@ -453,24 +688,70 @@ async fn execute(prepared: Prepared) -> i32 {
         }
     };
 
+    let termination = shutdown_and_terminate(&transport, &mut process).await;
+    let stderr_text = stderr_tail.lock().await.clone();
+    if !stderr_text.trim().is_empty() {
+        let _ = sink.diagnostic(
+            "warn",
+            Some("RUNTIME_STDERR"),
+            &format!("运行时 stderr（截断到 32 KiB，全文见 runtime.log）：{}", stderr_text.trim()),
+        );
+    }
+    AttemptEnd::Ran { outcome, termination, runtime_version, session_id, wait_error }
+}
+
+/// 已结束的轮次数。续跑的新会话同样从第 1 轮开始，投影会把它并进同一个轮次视图
+/// 并覆盖上一次的结束原因 —— 所以这里另外加上被覆盖的次数，保证计数只增不减。
+fn count_ends(projection: &Projection) -> usize {
+    projection.turns().iter().filter(|t| t.end.is_some()).count() + projection.ends_overwritten
+}
+
+/// 把最后一次运行的结局折成结果。
+fn conclude(
+    prepared: &Prepared,
+    mut sink: EventSink,
+    projection: Projection,
+    mut status: StatusWriter,
+    ended: AttemptEnd,
+    exhausted: Option<&str>,
+) -> i32 {
+    let task_id = prepared.plan.task_id.clone();
+    let run_dir = prepared.run_dir.clone();
+    let (outcome, termination, runtime_version, session_id, wait_error) = match ended {
+        AttemptEnd::Early { mut result, termination } => {
+            collect_git_facts(prepared, &mut result);
+            return finish(&mut sink, prepared, result, termination, &mut status);
+        }
+        AttemptEnd::Ran { outcome, termination, runtime_version, session_id, wait_error } => {
+            (outcome, termination, runtime_version, session_id, wait_error)
+        }
+    };
+
     if let Some(error) = &wait_error {
         let _ = sink.diagnostic("warn", Some("RUNTIME_WAIT_ERROR"), error);
     }
-
     let _ = sink.state(WorkerState::Verifying, "收尾并采集证据");
-    let termination = shutdown_and_terminate(&transport, &mut process).await;
+    status.set_state("verifying");
 
     let mut result = TaskResult::new(&task_id, TaskStatus::Unknown, String::new());
-    result.session_id = Some(session_id.clone());
-    result.runtime_version = runtime_version.clone();
+    result.session_id = Some(session_id);
+    result.runtime_version = runtime_version;
     result.policy = Some(prepared.plan.policy.clone());
     result.usage = projection.usage.clone();
     result.summary = summary_text(&projection);
     result.verification = build_verification(&prepared.plan, &projection, &run_dir);
-    result.artifacts = vec![arc_deck_core::result::ArtifactRef {
-        kind: "events".to_string(),
-        path: run_dir.join("events.jsonl").display().to_string(),
-    }];
+    let final_message = run_dir.join("final-message.md");
+    let _ = std::fs::write(&final_message, projection.assistant_text());
+    result.artifacts = vec![
+        arc_deck_core::result::ArtifactRef {
+            kind: "events".to_string(),
+            path: run_dir.join("events.jsonl").display().to_string(),
+        },
+        arc_deck_core::result::ArtifactRef {
+            kind: "final-message".to_string(),
+            path: final_message.display().to_string(),
+        },
+    ];
     if projection.orphans > 0 {
         // 真实日志里稳定存在少量没有结果的调用，所以只报数字，不判失败。
         let _ = sink.diagnostic(
@@ -487,12 +768,22 @@ async fn execute(prepared: Prepared) -> i32 {
             "任务书没有声明验收项：completed 只表示内核正常终止，不代表行为已验证".to_string(),
         );
     }
-    append_stderr(&mut result, &stderr_tail, &mut sink).await.ok();
+    if status.status.attempt > 1 {
+        result.unverified.push(format!(
+            "本任务续跑过（共 {} 次运行）：续跑不是 exactly-once，前一次未提交的改动由后一次接手",
+            status.status.attempt
+        ));
+    }
+    collect_git_facts(prepared, &mut result);
 
     // 先记下来：下面的 match 会把 outcome 里的字符串移出去。
     let was_cancelled = matches!(outcome, RunOutcome::Cancelled(_));
 
     result.status = match outcome {
+        RunOutcome::TurnEnded if exhausted == Some("TOOL_CALL_AS_TEXT") => {
+            result.blocker("TOOL_CALL_AS_TEXT", "模型把工具调用当成正文吐出后收工，续跑次数已用尽");
+            TaskStatus::Failed
+        }
         RunOutcome::TurnEnded => match projection.last_end() {
             None => {
                 result.blocker("NO_TERMINAL", "运行时已空闲，但没有收到 turn/end");
@@ -516,6 +807,10 @@ async fn execute(prepared: Prepared) -> i32 {
                     }
                     TaskStatus::Failed
                 }
+                "max-tokens" => {
+                    result.blocker("MAX_TOKENS", "至少一步撞到了输出上限，结果可能不完整");
+                    TaskStatus::Blocked
+                }
                 "aborted" | "interrupted" => {
                     result.blocker(
                         "TURN_INTERRUPTED",
@@ -529,6 +824,10 @@ async fn execute(prepared: Prepared) -> i32 {
                 }
             },
         },
+        RunOutcome::Stalled(reason) => {
+            result.blocker("STALLED", format!("{reason}；续跑次数已用尽"));
+            TaskStatus::Failed
+        }
         RunOutcome::Cancelled(reason) => {
             result.blocker("CANCELLED", reason);
             TaskStatus::Cancelled
@@ -558,12 +857,92 @@ async fn execute(prepared: Prepared) -> i32 {
         result.blocker("CANCEL_NOT_CONFIRMED", termination.detail.clone());
     }
 
-    finish(&mut sink, &prepared, result, termination)
+    finish(&mut sink, prepared, result, termination, &mut status)
+}
+
+/// 工具调用被当正文吐出（Ether 实测：`<｜DSML｜tool_calls>` 没被解析，运行时把它当最终回复收工）。
+/// 只看最后一轮正文的末尾：中途出现过但最终正常收尾的不算（Ether runner 同款判据）。
+fn tool_call_as_text(projection: &Projection) -> bool {
+    let Some(turn) = projection.turns().last() else { return false };
+    if turn.end.as_ref().map(|e| e.kind.as_str()) != Some("completed") {
+        return false;
+    }
+    let text = turn.assistant.text();
+    let chars: Vec<char> = text.chars().collect();
+    let tail: String = chars[chars.len().saturating_sub(4000)..].iter().collect();
+    tail.contains("DSML｜tool_calls") || tail.contains("<｜tool▁calls▁begin｜>")
+}
+
+/// `git rev-list --count <base>..HEAD`。不是 git 仓或基线不存在时返回 None。
+fn git_commit_count(workspace: &Path, base: &str) -> Option<u64> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["rev-list", "--count", &format!("{base}..HEAD")])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+fn git_lines(workspace: &Path, args: &[&str]) -> Option<Vec<String>> {
+    let out = std::process::Command::new("git").arg("-C").arg(workspace).args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// 回报里「Arc Deck 采集的事实」：提交、相对基线的变更、未提交文件。不信模型自报。
+fn collect_git_facts(prepared: &Prepared, result: &mut TaskResult) {
+    let Some(base) = &prepared.config.git_base else { return };
+    let ws = &prepared.plan.workspace;
+    if let Some(commits) = git_lines(ws, &["log", "--format=%h %s", &format!("{base}..HEAD")]) {
+        result.commits = commits;
+    }
+    let mut changes = Vec::new();
+    if let Some(lines) = git_lines(ws, &["diff", "--name-status", &format!("{base}...HEAD")]) {
+        for line in lines {
+            let mut parts = line.split('\t');
+            let code = parts.next().unwrap_or("");
+            let path = parts.last().unwrap_or("").to_string();
+            let kind = match code.chars().next() {
+                Some('A') => "added",
+                Some('D') => "deleted",
+                Some('M') | Some('R') | Some('C') => "modified",
+                _ => "unknown",
+            };
+            changes.push(arc_deck_core::result::ChangeRecord {
+                path,
+                kind: kind.to_string(),
+                evidence: Some(format!("git diff --name-status {base}...HEAD")),
+            });
+        }
+    }
+    if let Some(lines) = git_lines(ws, &["status", "--porcelain"]) {
+        for line in lines {
+            changes.push(arc_deck_core::result::ChangeRecord {
+                path: line.get(3..).unwrap_or("").to_string(),
+                kind: "uncommitted".to_string(),
+                evidence: Some(format!("git status --porcelain：{}", line.get(..2).unwrap_or(""))),
+            });
+        }
+    }
+    result.changes = changes;
 }
 
 /// 收尾阶段的结论。
 enum RunOutcome {
     TurnEnded,
+    Stalled(String),
     Cancelled(String),
     TimedOut,
     Violation(String),
@@ -583,6 +962,7 @@ fn absorb(
     sink: &mut EventSink,
     projection: &mut Projection,
     announced: &mut AnnounceState,
+    status: &mut StatusWriter,
 ) -> Absorbed {
     match item {
         None | Some(Inbound::Eof) => Absorbed::Closed,
@@ -605,6 +985,7 @@ fn absorb(
             if name == protocol::notification::SESSION_EVENT {
                 match serde_json::from_value::<SessionEventParams>(params) {
                     Ok(parsed) => {
+                        status.observe(&parsed.event);
                         projection.apply_notification(&parsed);
                         mirror_tools(sink, projection, announced);
                     }
@@ -685,6 +1066,7 @@ async fn call_watched(
     projection: &mut Projection,
     watcher: &mut CancelWatcher,
     announced: &mut AnnounceState,
+    status: &mut StatusWriter,
     method_name: &str,
     params: Value,
     timeout: Duration,
@@ -720,7 +1102,7 @@ async fn call_watched(
                 };
             }
             item = inbound.recv() => {
-                match absorb(item, sink, projection, announced) {
+                match absorb(item, sink, projection, announced, status) {
                     Absorbed::Ok => {}
                     Absorbed::Closed => return CallOutcome::Failed(
                         "RUNTIME_EXITED".to_string(),
@@ -794,17 +1176,22 @@ fn process_termination_note(exited: bool, detail: &str) -> ProcessTermination {
     ProcessTermination { exited, detail: detail.to_string() }
 }
 
-fn spawn_stderr_drain(stderr: ChildStderr) -> Arc<Mutex<String>> {
+fn spawn_stderr_drain(stderr: ChildStderr, log_path: PathBuf) -> Arc<Mutex<String>> {
     let buffer = Arc::new(Mutex::new(String::new()));
     let sink = Arc::clone(&buffer);
     tokio::spawn(async move {
         let mut reader = BufReader::new(stderr);
         let mut line = String::new();
+        // 全文另存 runtime.log（追加：续跑的几次运行写在同一个文件里）。
+        let mut log = std::fs::OpenOptions::new().create(true).append(true).open(&log_path).ok();
         loop {
             line.clear();
             match reader.read_line(&mut line).await {
                 Ok(0) => break,
                 Ok(_) => {
+                    if let Some(file) = log.as_mut() {
+                        let _ = file.write_all(line.as_bytes());
+                    }
                     let mut guard = sink.lock().await;
                     // 上界：崩溃时的堆栈可能很长，但结果文件不该被它撑爆。
                     if guard.len() < 32 * 1024 {
@@ -967,6 +1354,7 @@ fn finish(
     prepared: &Prepared,
     mut result: TaskResult,
     termination: ProcessTermination,
+    status: &mut StatusWriter,
 ) -> i32 {
     let _ = sink.diagnostic(
         if termination.exited { "info" } else { "warn" },
@@ -1003,6 +1391,19 @@ fn finish(
 
     let _ = sink.state(WorkerState::Terminal, &format!("终态 {}", result.status.as_str()));
     let _ = sink.result(&result);
+    // 状态文件最后一个写：读者看到 terminal 时，result.json 一定已经在了。
+    if result.status != TaskStatus::Completed {
+        if let Some(b) = result.blockers.first() {
+            status.error(&b.code, &b.message);
+        }
+    }
+    status.status.usage = result.usage.clone();
+    if prepared.config.git_base.is_some() {
+        status.status.counters.commits = Some(result.commits.len() as u64);
+    }
+    status.status.terminal = Some(true);
+    status.set_activity("idle", None, None);
+    status.set_state(result.status.as_str());
     result.status.exit_code()
 }
 

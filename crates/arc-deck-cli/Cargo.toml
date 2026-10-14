@@ -8,7 +8,7 @@ repository.workspace = true
 description = "Arc Deck headless worker 命令"
 
 [[bin]]
-name = "arc-deck"
+name = "arcdeck"
 path = "src/main.rs"
 
 [features]

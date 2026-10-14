@@ -13,7 +13,9 @@
 
 mod args;
 mod cancel;
+mod commands;
 mod report;
+mod status;
 mod worker;
 
 use std::process::ExitCode;
@@ -37,9 +39,15 @@ async fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         args::Command::Version => {
-            println!("arc-deck {}", env!("CARGO_PKG_VERSION"));
+            println!("arcdeck {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
+        args::Command::Tui => {
+            eprintln!("arcdeck：TUI 尚未实现（PRODUCT_PLAN M4）。当前可用的是 headless，见 `arcdeck --help`。");
+            ExitCode::from(EXIT_SPEC_ERROR as u8)
+        }
+        // 退出码都在 u8 范围内（0..=5、10、11 与 64）。
+        args::Command::Ops(argv) => ExitCode::from(commands::dispatch(&argv).await as u8),
         args::Command::FixtureSdk { scenario } => fixture_entry(&scenario).await,
         args::Command::WorkerRun(worker_args) => {
             let code = worker::run(worker_args).await;

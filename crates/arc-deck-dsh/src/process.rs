@@ -30,13 +30,19 @@ pub struct Termination {
 impl RuntimeProcess {
     /// 拉起子进程。
     ///
-    /// 只传显式给出的环境变量（`env_clear` 之后逐个设置）：默认继承会把
-    /// 父进程的凭据、代理与 `DSH_*` 变量悄悄带给一个本该隔离的运行时。
+    /// `inherit_env = false`（夹具）时只传显式给出的环境变量：默认继承会把父进程的
+    /// 凭据、代理与 `DSH_*` 变量悄悄带给一个本该隔离的运行时。
+    ///
+    /// 真实 DSH 用 `inherit_env = true`：它要执行的是工人的 shell 工具（cargo、git、
+    /// 代理变量、`CARGO_TARGET_DIR` 都得在），而 Ether 的 runner 脚本本来也是整份继承。
+    /// 继承时仍会去掉父进程里的 `DSH_*` 与 `ARCDECK_KEY_*`，由调用方显式重设 ——
+    /// 免得调度者 shell 里残留的 `DSH_HOME` 把任务指到 Desktop 的真实 home 上。
     pub fn spawn(
         program: &Path,
         args: &[String],
         env: &BTreeMap<String, String>,
         cwd: Option<&Path>,
+        inherit_env: bool,
     ) -> std::io::Result<Self> {
         let mut command = Command::new(program);
         command
@@ -44,12 +50,24 @@ impl RuntimeProcess {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .env_clear()
             .kill_on_drop(true);
-        // PATH 与系统根目录不是秘密，但缺了它们连子进程都起不来。
-        for key in ["PATH", "SystemRoot", "windir", "TEMP", "TMP", "HOME", "USERPROFILE"] {
-            if let Ok(value) = std::env::var(key) {
-                command.env(key, value);
+        // 自成一个进程组，收尾时才能连子孙一起结束（Windows 用 taskkill /T）。
+        #[cfg(unix)]
+        command.process_group(0);
+        if inherit_env {
+            for (key, _) in std::env::vars_os() {
+                let k = key.to_string_lossy();
+                if k.starts_with("DSH_") || k.starts_with("ARCDECK_KEY_") {
+                    command.env_remove(&key);
+                }
+            }
+        } else {
+            command.env_clear();
+            // PATH 与系统根目录不是秘密，但缺了它们连子进程都起不来。
+            for key in ["PATH", "SystemRoot", "windir", "TEMP", "TMP", "HOME", "USERPROFILE"] {
+                if let Ok(value) = std::env::var(key) {
+                    command.env(key, value);
+                }
             }
         }
         for (key, value) in env {
@@ -82,14 +100,23 @@ impl RuntimeProcess {
     /// 结束进程树并**确认**退出。
     ///
     /// Windows 上用 `taskkill /T /F` 连子孙一起结束 —— 只 `kill` 父进程会留下
-    /// 仍在写日志或仍持有文件锁的孤儿。Unix 侧的进程组终止**尚未实现**
-    /// （见 PRODUCT_PLAN §6.4 与 §11：平台矩阵归 M5），这里只结束父进程，
-    /// 所以 Unix 上不得据此声称「取消已完成」。
+    /// 仍在写日志或仍持有文件锁的孤儿。Unix 上对 spawn 时建立的进程组整组发
+    /// SIGKILL；**Debian 上尚未实测**，自己 `setsid` 出去的孙进程不在组里。
     pub async fn terminate_tree(&mut self, grace: Duration) -> Termination {
         #[cfg(windows)]
         if let Some(pid) = self.child.id() {
             let _ = std::process::Command::new("taskkill")
                 .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+
+        // Unix：spawn 时已自成进程组（pgid = pid），对整组发 SIGKILL。
+        #[cfg(unix)]
+        if let Some(pid) = self.child.id() {
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", "--", &format!("-{pid}")])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();

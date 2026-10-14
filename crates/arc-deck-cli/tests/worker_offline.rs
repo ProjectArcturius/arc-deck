@@ -22,7 +22,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn binary() -> &'static str {
-    env!("CARGO_BIN_EXE_arc-deck")
+    env!("CARGO_BIN_EXE_arcdeck")
 }
 
 struct Case {
@@ -426,6 +426,53 @@ fn wall_clock_timeout_is_reported_as_timed_out() {
     );
 }
 
+/// 卡死 → 杀掉运行时 → 续跑 → 再卡死 → 次数用尽判 failed（PRODUCT_PLAN §6.5.4）。
+/// 阈值调到秒级，让「卡死」在测试里两三秒就出现；墙钟预算给得远大于它，
+/// 证明结论来自卡死判定而不是超时。
+#[test]
+fn stalled_run_is_restarted_then_fails_with_stalled_when_attempts_run_out() {
+    let case = Case::new_full(
+        "hang",
+        no_acceptance(),
+        json!({ "timeout_seconds": 60 }),
+        json!({ "liveness": { "heartbeat_seconds": 1, "model_idle_seconds": 1, "tool_stall_seconds": 60, "max_attempts": 2 } }),
+    );
+    let run = case.run();
+    assert_eq!(run.code, 1, "stderr={}", run.stderr);
+    let blockers = run.result()["blockers"].as_array().cloned().unwrap_or_default();
+    assert!(blockers.iter().any(|b| b["code"] == "STALLED"), "没有报出卡死：{blockers:?}");
+    // 续跑真的发生过：事件流里有一条 STALLED 诊断（第一次卡死后开第二次）。
+    assert!(
+        run.stdout.lines().any(|l| l.contains("\"STALLED\"") && l.contains("diagnostic")),
+        "第一次卡死后没有续跑：{}",
+        run.stdout
+    );
+    // 状态文件：终态、两次运行、最后的错误码。读者只看这个文件就能知道发生了什么。
+    let status: Value = serde_json::from_str(
+        &std::fs::read_to_string(case.dir.path().join("state/runs/t1/status.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(status["terminal"], true);
+    assert_eq!(status["state"], "failed");
+    assert_eq!(status["attempt"], 2);
+    assert_eq!(status["last_error"]["code"], "STALLED");
+}
+
+#[test]
+fn status_file_tracks_a_successful_run_to_its_terminal_state() {
+    let case = Case::new("success", no_acceptance(), json!({}));
+    let run = case.run();
+    assert_eq!(run.code, 0, "stderr={}", run.stderr);
+    let status: Value = serde_json::from_str(
+        &std::fs::read_to_string(case.dir.path().join("state/runs/t1/status.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(status["terminal"], true);
+    assert_eq!(status["state"], "completed");
+    assert_eq!(status["attempt"], 1);
+    assert!(status["heartbeat_at"].as_u64().unwrap() >= status["started_at"].as_u64().unwrap());
+}
+
 #[test]
 fn cancel_file_stops_the_run_and_confirms_the_process_exit() {
     let case = Case::new("cancel", no_acceptance(), json!({ "timeout_seconds": 30 }));
@@ -525,29 +572,30 @@ fn unauthorized_agent_is_refused_before_starting_the_runtime() {
 }
 
 #[test]
-fn an_unsupported_runtime_is_refused_before_any_state_is_created() {
-    // M1 不接真实 DSH：这条必须在**建立任何状态之前**失败，否则 stdout 上会先
+fn a_missing_dsh_runtime_is_refused_before_any_state_is_created() {
+    // 真实 DSH 没装（入口文件不存在）：必须在**建立任何状态之前**失败，否则 stdout 上会先
     // 出现半条事件流、再以 64 退出，而状态目录里还会留下一条「跑过」的记录。
     let case = Case::with_runtime(
         json!({
             "kind": "dsh-sdk",
-            "entry": "dsh.js",
+            "entry": "not-installed/bin.js",
             "version": "0.2.1-alpha.2",
             "profile": "sdk"
         }),
         no_acceptance(),
         json!({}),
         // dsh-sdk 需要显式模型路由，否则会先在配置层被拒 —— 那样测的就不是
-        // 「运行时不受支持」了。
+        // 「运行时没装」了。
         json!({ "model": { "provider": "deepseek-official", "model": "deepseek-flash" } }),
     );
     let run = case.run();
     assert_eq!(run.code, 64, "stderr={}", run.stderr);
-    assert!(run.stderr.contains("RUNTIME_NOT_SUPPORTED"), "stderr={}", run.stderr);
+    assert!(run.stderr.contains("RUNTIME_ENTRY_MISSING"), "stderr={}", run.stderr);
+    assert!(run.stderr.contains("arcdeck runtime install"), "要告诉用户怎么修：{}", run.stderr);
     assert!(run.stdout.trim().is_empty(), "被拒绝的配置不该产生事件流：{}", run.stdout);
     assert!(
-        !case.dir.path().join("state/runs/t1/result.json").exists(),
-        "被拒绝的配置不该留下运行记录"
+        !case.dir.path().join("state/runs/t1").exists(),
+        "被拒绝的配置不该留下运行目录"
     );
 }
 

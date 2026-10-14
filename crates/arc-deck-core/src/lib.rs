@@ -16,8 +16,10 @@ pub mod error;
 pub mod event;
 pub mod mode;
 pub mod paths;
+pub mod provider;
 pub mod result;
 pub mod task;
+pub mod userconfig;
 
 /// 当前 schema 版本。任务书、启动配置、事件信封、结果全部共用一个版本号。
 ///

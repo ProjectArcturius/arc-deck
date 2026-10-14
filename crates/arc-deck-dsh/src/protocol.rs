@@ -33,6 +33,9 @@ pub struct InitializeParams {
     pub cwd: String,
     pub provider: String,
     pub model: String,
+    /// 路由自己的推理强度标识；省略时用该模型的缺省值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 /// `initialize` 的返回。

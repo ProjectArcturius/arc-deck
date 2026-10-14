@@ -19,6 +19,11 @@ pub enum TaskSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     WorkerRun(WorkerArgs),
+    /// 高层命令（run / status / wait / report / logs / cancel / ls / auth / runtime / config），
+    /// 原样转给 `commands.rs` 自己解析。
+    Ops(Vec<String>),
+    /// 无参数：交互界面。TUI 落地前只打印提示（PRODUCT_PLAN §6.0）。
+    Tui,
     /// 隐藏子命令：把自己作为假 SDK 对端启动。只在 `test-runtime` 下可达。
     FixtureSdk { scenario: String },
     Help,
@@ -36,10 +41,34 @@ pub struct WorkerArgs {
 }
 
 pub const USAGE: &str = "\
-arc-deck —— Arc Deck 的 headless worker
+arcdeck —— Arc Deck（DSH 之上的编码 Agent）
 
-用法：
-  arc-deck worker run --config <配置文件> --task <任务书|-> [选项]
+  arcdeck                               当前目录进 TUI（尚未实现）
+  arcdeck run <任务书.md|.json|-> [选项] 执行一件任务（前台：stdout 是 JSONL，退出码 = 终态）
+      --detach                          分离运行，立即返回任务 ID
+      --id <ID>                         任务 ID（缺省取任务书文件名）
+      --workspace <目录>                缺省为当前目录
+      --worktree <分支>                 在 workspace 仓上建/复用 git worktree 再跑
+      --accept <命令>                   验收命令，可重复；按实际执行记录判定
+      --preamble <文件>                 工人守则，进 system prompt
+      --model <provider/model>          覆盖配置里的模型
+      --timeout <90|30m|2h>             墙钟预算
+      --rerun                           同 ID 已有结论时重跑（旧记录改名保留）
+  arcdeck status [<id>…|--all] [--json] 每件任务一行；单件时退出码编码状态
+  arcdeck wait <id> [--timeout 30m]     等到终态，打印一行
+  arcdeck report <id> [--json]          紧凑回报（事实与模型陈述分开）
+  arcdeck logs <id> [--tail N] [--runtime|--console]
+  arcdeck cancel <id>                   请求取消并等待收尾
+  arcdeck ls                            同 status --all
+  arcdeck auth set|ls|rm|import-opencode         凭据（与 OpenCode auth.json 同形）
+  arcdeck runtime install|status [--version V]   私有、钉版本的 DSH 运行时
+  arcdeck config init|path              用户配置 arcdeck.json
+
+status / wait 的退出码：
+  0 完成 · 1 失败 · 2 受阻 · 3 已取消 · 4 超时 · 5 未知（含进程已死）· 10 运行中 · 11 卡住 · 64 用法错
+
+底层入口（M1 契约，参数不变）：
+  arcdeck worker run --config <配置文件> --task <任务书|-> [选项]
 
 选项：
   --config <路径>       必需的启动配置（授权上限、运行时、状态目录）
@@ -55,9 +84,12 @@ arc-deck —— Arc Deck 的 headless worker
 /// 解析参数（不含程序名）。
 pub fn parse(argv: &[String]) -> SpecResult<Command> {
     let Some(first) = argv.first() else {
-        return Ok(Command::Help);
+        return Ok(Command::Tui);
     };
     match first.as_str() {
+        "run" | "status" | "wait" | "report" | "logs" | "cancel" | "ls" | "auth" | "runtime" | "config" => {
+            Ok(Command::Ops(argv.to_vec()))
+        }
         "--help" | "-h" | "help" => Ok(Command::Help),
         "--version" | "-V" => Ok(Command::Version),
         "__fixture-sdk" => parse_fixture(&argv[1..]),

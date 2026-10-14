@@ -2,27 +2,53 @@
   "schema_version": 1,
   "runtime": {
     "kind": "dsh-sdk",
-    "entry": "C:/dsh/lib/bin.js",
+    "node": "node",
+    "entry": "C:/arcdeck/runtime/dsh-0.2.1-alpha.2/node_modules/@deepseek-ai/dsh/lib/bin.js",
     "version": "0.2.1-alpha.2",
-    "profile": "sdk"
+    "profile": "sdk",
+    "route": {
+      "provider_id": "opencode-go",
+      "adapter": "pi-ai",
+      "api": "anthropic-messages",
+      "base_url": "https://opencode.ai/zen/go",
+      "headers": {
+        "x-opencode-session": "fix-session-filter"
+      },
+      "models": [
+        {
+          "id": "deepseek-v4.1-flash"
+        }
+      ],
+      "display_name": "OpenCode Go",
+      "key_env": "ARCDECK_KEY_OPENCODE_GO",
+      "key_source": "auth"
+    },
+    "sandbox": "workspace-write",
+    "session_log_upload": false
   },
   "state_root": "C:/arc-deck-state",
   "authorization": {
     "workspace": "C:/work/project",
     "profile": "workspace-readonly",
-    "read_paths": ["."],
+    "read_paths": [
+      "."
+    ],
     "network": false,
     "allow_commit": false,
     "allow_push": false,
-    "allowed_agents": ["echo", "build", "plan"]
+    "allowed_agents": [
+      "echo",
+      "build",
+      "plan"
+    ]
   },
   "agents": {
     "dir": "C:/arc-deck/agents",
     "prompts_dir": "C:/arc-deck/prompts"
   },
   "model": {
-    "provider": "deepseek-official",
-    "model": "deepseek-flash"
+    "provider": "opencode-go",
+    "model": "deepseek-v4.1-flash"
   },
   "env": {
     "ARC_DECK_LOG": "info"
@@ -32,5 +58,11 @@
     "prompt_seconds": 30,
     "wait_seconds": 600,
     "default_task_seconds": 900
+  },
+  "liveness": {
+    "heartbeat_seconds": 15,
+    "model_idle_seconds": 600,
+    "tool_stall_seconds": 1800,
+    "max_attempts": 3
   }
 }

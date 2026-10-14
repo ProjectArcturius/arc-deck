@@ -83,7 +83,8 @@ fn config_example_matches_the_worker_config() {
 
     assert_eq!(config.authorization.profile, "workspace-readonly");
     assert_eq!(config.authorization.allowed_agents.len(), 3);
-    assert_eq!(config.model.as_ref().unwrap().model, "deepseek-flash");
+    assert_eq!(config.model.as_ref().unwrap().model, "deepseek-v4.1-flash");
+    assert_eq!(config.liveness.max_attempts, 3);
     assert_eq!(config.timeouts.initialize_seconds, 120);
 
     let mut expected = original.clone();
