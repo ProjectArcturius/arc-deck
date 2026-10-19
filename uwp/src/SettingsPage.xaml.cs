@@ -1,4 +1,7 @@
 using System;
+using System.Text;
+using System.Threading.Tasks;
+using ArcDeck.Services;
 using Windows.UI.Xaml;
 using Windows.UI.Xaml.Controls;
 
@@ -38,6 +41,49 @@ namespace ArcDeck
             }
 
             _loading = false;
+        }
+
+        /// <summary>
+        /// 拉起伴随进程并跑一遍最小检查：ping / env / probe。
+        ///
+        /// 这不是装饰：`probe` 会真的起一个 `dsh --version` 子进程，而「在 AppContainer
+        /// 里做不到」正是整条通道存在的理由。检查结果里既有 `env` 的 %APPDATA% 路径，
+        /// 也有子进程的真实退出码 —— 任何一半坏了这里都看得见。
+        /// </summary>
+        private async void OnHostCheck(object sender, RoutedEventArgs e)
+        {
+            HostCheckButton.IsEnabled = false;
+            HostResultText.Text = "";
+            try
+            {
+                HostStateText.Text = await HostBridge.LaunchAsync();
+                var connected = await HostBridge.WaitForConnectionAsync(TimeSpan.FromSeconds(8));
+                HostStateText.Text = HostBridge.State;
+                if (!connected)
+                {
+                    HostResultText.Text =
+                        "伴随进程没有连上来。\n" +
+                        "UWP 侧日志：" + HostBridge.LogPath + "\n" +
+                        "进程侧日志：%TEMP%\\arcdeck-host.log";
+                    return;
+                }
+
+                var builder = new StringBuilder();
+                foreach (var op in new[] { "ping", "env", "probe" })
+                {
+                    var reply = await HostBridge.RequestAsync(op);
+                    builder.AppendLine(op + " → " + reply.Display);
+                }
+                HostResultText.Text = builder.ToString();
+            }
+            catch (Exception ex)
+            {
+                HostResultText.Text = "检查失败：" + ex.GetType().Name + " " + ex.Message;
+            }
+            finally
+            {
+                HostCheckButton.IsEnabled = true;
+            }
         }
 
         /// <summary>

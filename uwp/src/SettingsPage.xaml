@@ -38,6 +38,31 @@
             </StackPanel>
 
             <StackPanel Spacing="8">
+                <TextBlock Text="伴随进程" Style="{StaticResource SectionHeaderStyle}" />
+                <TextBlock
+                    Style="{StaticResource CaptionTextBlockStyle}"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    TextWrapping="Wrap"
+                    Text="UWP 跑在 AppContainer 里：起不了 dsh 子进程，也读不到包外路径。这是沙箱的结构限制，不是缺功能。执行与文件访问交给包内一个完整信任的伴随进程，界面只通过 AppService 向它发请求。" />
+
+                <StackPanel Orientation="Horizontal" Spacing="12">
+                    <Button x:Name="HostCheckButton" Content="拉起并检查" Click="OnHostCheck" />
+                    <TextBlock
+                        x:Name="HostStateText"
+                        VerticalAlignment="Center"
+                        Style="{StaticResource CaptionTextBlockStyle}"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+
+                <TextBlock
+                    x:Name="HostResultText"
+                    Style="{StaticResource CaptionTextBlockStyle}"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    TextWrapping="Wrap"
+                    IsTextSelectionEnabled="True" />
+            </StackPanel>
+
+            <StackPanel Spacing="8">
                 <TextBlock Text="关于" Style="{StaticResource SectionHeaderStyle}" />
                 <StackPanel Spacing="4">
                     <TextBlock x:Name="VersionText" Style="{StaticResource BodyTextBlockStyle}" />

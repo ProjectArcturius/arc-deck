@@ -58,6 +58,36 @@ namespace ArcDeck
             }
         }
 
+        /// <summary>
+        /// 伴随进程连上来时 Windows 从这里把 AppService 连接交给我们。in-proc app service
+        /// 的激活会落到正在运行的实例上，所以界面与这个连接在同一个进程里。
+        ///
+        /// deferral 要一直握着：它是一个长连接，不是一次性的后台任务。挂起时在
+        /// <see cref="OnSuspending"/> 里完成它。
+        /// </summary>
+        protected override void OnBackgroundActivated(BackgroundActivatedEventArgs args)
+        {
+            if (args.TaskInstance.TriggerDetails is Windows.ApplicationModel.AppService.AppServiceTriggerDetails details)
+            {
+                // App Service 不是「只有本包能连」的：任何知道包族名与服务名的应用都能尝试。
+                // 这个服务能起子进程、读包外路径，必须先确认调用方就是本包。
+                var caller = details.CallerPackageFamilyName;
+                var self = Package.Current.Id.FamilyName;
+                if (!string.Equals(caller, self, StringComparison.OrdinalIgnoreCase))
+                {
+                    WriteCrashLog(new Exception($"拒绝 AppService 连接：调用方 {caller} 不是 {self}"));
+                    base.OnBackgroundActivated(args);
+                    return;
+                }
+
+                _serviceDeferral = args.TaskInstance.GetDeferral();
+                Services.HostBridge.Attach(details.AppServiceConnection);
+            }
+            base.OnBackgroundActivated(args);
+        }
+
+        Windows.ApplicationModel.Background.BackgroundTaskDeferral _serviceDeferral;
+
         protected override void OnLaunched(LaunchActivatedEventArgs e)
         {
             var rootFrame = Window.Current.Content as Frame;
@@ -90,6 +120,8 @@ namespace ArcDeck
         private void OnSuspending(object sender, SuspendingEventArgs e)
         {
             var deferral = e.SuspendingOperation.GetDeferral();
+            _serviceDeferral?.Complete();
+            _serviceDeferral = null;
             deferral.Complete();
         }
     }

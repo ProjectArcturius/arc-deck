@@ -71,3 +71,6 @@ desktop.ini
 
 # 提交信息临时文件
 /.commitmsg*.tmp
+
+# 完整信任伴随进程的发布产物（uwp/host/publish.ps1 生成，属于构建产物）
+/uwp/src/Host/

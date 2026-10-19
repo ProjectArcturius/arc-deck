@@ -63,6 +63,54 @@ ShellPage          NavigationView 外壳（含响应式窗格模式 + 搜索框�
 
 数据在 `Models/`，当前是示例数据 —— 接 DSH 协议是后续的事。
 
+## 完整信任伴随进程（`uwp/host/`）
+
+UWP 跑在 AppContainer 里，**起不了 `dsh` 子进程、读不到 `%APPDATA%`**（AGENTS P1 的三条限制，
+改代码绕不过去）。所以执行与文件访问交给包内一个完整信任的伴随进程 `ArcDeck.Host.exe`，
+界面只通过 AppService 向它发请求。
+
+```
+UWP 界面（AppContainer）── AppService `arcdeck.host` ──▶ ArcDeck.Host.exe（完整信任）
+```
+
+方向容易写反：**完整信任进程不能当 AppService 的 provider**。UWP 是 provider（服务必须由包声明），
+伴随进程用自己的包身份 `OpenAsync` 连回来，界面再 `SendMessageAsync` 发请求、它 `SendResponseAsync` 应答。
+进程由 `FullTrustProcessLauncher` 拉起。
+
+### 构建
+
+**先发布伴随进程，再构建 UWP 包** —— 顺序反了的话包能装上，但 `FullTrustProcessLauncher`
+会报找不到可执行文件：
+
+```powershell
+powershell -File uwp\host\publish.ps1        # 产物进 uwp/src/Host/（.gitignore 排除）
+& $msbuild uwp\src\ArcDeck.csproj /p:Configuration=Release /p:Platform=x64
+```
+
+### 三个非显然的坑
+
+| 坑 | 现象 | 处置 |
+|---|---|---|
+| 没引用 `Windows.ApplicationModel.FullTrustAppContract` | `CS0103: 当前上下文中不存在名称 FullTrustProcessLauncher`，看起来像类名写错 | csproj 里显式 `<Reference>` 那个 winmd（UWP 的 NuGet 引用集停在 15138，此 API 是 1809 的） |
+| AppService 不校验调用方 | 任何知道包族名与服务名的应用都能连上来 | `OnBackgroundActivated` 里比对 `CallerPackageFamilyName`，不是本包就拒绝并记日志 |
+| 连接关闭后进程不退出 | 下一次装包被它锁住文件，部署报 `0x80073D02`「资源正在使用中」 | `ServiceClosed` 里 `Environment.Exit(0)`；实测关掉 UWP 后伴随进程收到 `服务关闭：Completed` 并退出 |
+
+### 验收
+
+设置页 →「伴随进程」→「拉起并检查」。正常时界面自己显示：
+
+```
+已连接
+ping → {"packaged":true,"packageFamilyName":"ProjectArcturius.ArcDeck_…", …}
+env  → {"appData":"C:\\Users\\<user>\\AppData\\Roaming", …}
+probe → {"found":true,"command":"dsh --version","exitCode":0,"stdout":"…"}
+```
+
+`probe` 会真的起一个 `dsh --version` 子进程；`env` 读的是包外的真实路径。
+两半的日志：`%TEMP%\arcdeck-host.log`（进程侧）与 `LocalState\host.log`（UWP 侧）。
+
+**还没做**：界面上的会话/对话仍是示例数据。通道只到「拉起、探活、执行」这一步。
+
 ## 构建
 
 **必须用 MSBuild**（UWP 不支持 `dotnet build`），**用 Release 配置**

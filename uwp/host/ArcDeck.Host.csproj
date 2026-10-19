@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Arc Deck · 完整信任伴随进程。
+
+    它存在的原因只有一条：UWP 的 AppContainer 起不了子进程、读不到 %APPDATA%
+    （AGENTS P1 的三条结构性限制）。这个进程由 UWP 用 FullTrustProcessLauncher 拉起，
+    通过 AppService 与界面说话 —— 界面只负责显示，执行与文件访问都在这里。
+
+    OutputType=WinExe：它是被拉起的后台进程，不该弹控制台窗口。
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows10.0.22621.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>ArcDeck.Host</AssemblyName>
+    <RootNamespace>ArcDeck.Host</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+</Project>

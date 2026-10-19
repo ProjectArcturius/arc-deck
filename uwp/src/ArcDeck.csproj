@@ -79,6 +79,7 @@
     <Compile Include="Controls\Markdown.cs" />
     <Compile Include="Models\ToolInfo.cs" />
     <Compile Include="Models\Settings.cs" />
+    <Compile Include="Services\HostBridge.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
 
@@ -129,6 +130,21 @@
     <Content Include="Assets\Wide310x150Logo.png" />
     <Content Include="Assets\SplashScreen.png" />
     <Content Include="Assets\StoreLogo.png" />
+    <!-- 完整信任伴随进程的发布产物。先跑 uwp/host/publish.ps1，目录由 .gitignore 排除。 -->
+    <Content Include="Host\**\*.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      FullTrustProcessLauncher 在 1809（17763）才加入，而 UWP 引用集
+      （Microsoft.NETCore.UniversalWindowsPlatform 6.2.14）停在 15138 —— 不显式引用
+      这个契约会报 CS0103「当前上下文中不存在名称 FullTrustProcessLauncher」。
+      报错位置在 HostBridge.cs，看起来像写错了类名。
+    -->
+    <Reference Include="Windows.ApplicationModel.FullTrustAppContract">
+      <HintPath>$(ProgramFiles)\Windows Kits\10\References\$(TargetPlatformVersion)\Windows.ApplicationModel.FullTrustAppContract\2.0.0.0\Windows.ApplicationModel.FullTrustAppContract.winmd</HintPath>
+      <IsWinMDFile>true</IsWinMDFile>
+    </Reference>
   </ItemGroup>
 
   <ItemGroup>

@@ -3,7 +3,9 @@
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:mp="http://schemas.microsoft.com/appx/2014/phone/manifest"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
-  IgnorableNamespaces="uap mp">
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap mp desktop rescap">
 
   <!--
     版本号在开发期要随每次改动递增。
@@ -15,7 +17,7 @@
   <Identity
     Name="ProjectArcturius.ArcDeck"
     Publisher="CN=ProjectArcturius"
-    Version="0.1.15.0" />
+    Version="0.1.18.0" />
 
   <!-- PhoneIdentity 在桌面清单里也是必需元素 —— 缺它报 APPX1673。 -->
   <mp:PhoneIdentity PhoneProductId="7c4e1a92-5d38-4f61-b0a7-2e9c8d5f3b14"
@@ -52,10 +54,26 @@
         <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" />
         <uap:SplashScreen Image="Assets\SplashScreen.png" BackgroundColor="transparent" />
       </uap:VisualElements>
+      <!--
+        完整信任伴随进程（AGENTS P1）：UWP 自己起不了 dsh、读不到 %APPDATA%，
+        执行与文件访问交给 Host\ArcDeck.Host.exe。
+
+        AppService 的 provider 必须是**包自己**，所以这里声明服务；
+        伴随进程是 client，它用自己的包身份 OpenAsync 连回来。
+      -->
+      <Extensions>
+        <uap:Extension Category="windows.appService">
+          <uap:AppService Name="arcdeck.host" />
+        </uap:Extension>
+        <desktop:Extension Category="windows.fullTrustProcess"
+                           Executable="Host\ArcDeck.Host.exe" />
+      </Extensions>
     </Application>
   </Applications>
 
   <Capabilities>
     <Capability Name="internetClient" />
+    <!-- 拉起包内完整信任进程需要的能力（受限制能力，侧载可安装）。 -->
+    <rescap:Capability Name="runFullTrust" />
   </Capabilities>
 </Package>
