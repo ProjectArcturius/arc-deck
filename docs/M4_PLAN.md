@@ -34,18 +34,37 @@ PRODUCT_PLAN §7.3 的八个组件、§7.4 的键位与命令、§7.5 的视觉�
 | 0 | w1-markdown | 助手正文 Markdown（pulldown-cmark） | ✅ 6cf64bd |
 | 0 | w1-theme | 2.0.27 语义 token、v1→v2 迁移、内置主题、主题对话框 | ✅ e16e13d（合入时整合了取色接口） |
 | 0 | w1-model-dialog | 模型 / provider / effort 对话框，F2 循环，偏好落盘 | ✅ f82555f |
-| 0 | w2-remote-transport | Remote host / rpc / mux；0.2.1 协议核对文档 | ⏸ 用户叫停时取消；半成品在分支 `dsh/w2-remote-transport`（两个 wip 提交，未审阅），一条 lib 测试会挂住。续做：同 id + `--rerun` + `w2-remote-transport-resume.md` |
+| 0 | w2-remote-transport | Remote host / rpc / mux；0.2.1 协议核对文档 | ✅ 0774e85（收下工人的两个 wip 提交，修了挂死：假服务端继承非阻塞 + 客户端握手无超时；`docs/REMOTE_0.2.1.md`） |
 | 0 | w4-m3-guard | EffectivePolicy → DSH 配置行，映射表 + `--dump-config` 验证 | ✅ f545990（合入后真实冒烟一次通过） |
 | 1 | w3-commands | 命令系统：action 注册表、键位与上下文、slash 补全、面板、帮助 | ✅ 工作区（未提交）：`commands.rs` / `keymap.rs` / `autocomplete.rs`，160 个 TUI 测试 |
-| 1 | w2-remote-session | 会话操作、事件投影、审批数据、模型目录 | 待 w2-remote-transport |
+| 1 | w2-remote-session | 会话操作、事件投影、审批数据、模型目录 | ✅ 0774e85（`SessionClient` + `fold` + `core::conversation`；真实抓帧当夹具）。**审批数据未做** |
 | 1 | w4-m3b-negative | 脚本化假模型端点驱动真实 DSH，证明越权被拒（零配额） | ✅ fb4d482（17 条负例 live 全过；复跑时修了一条用例） |
 | 2 | w3-tui-input | `@` 文件、历史、粘贴摘要、Shift+Enter、外部编辑器、metadata | ✅ 工作区（未提交）：`files.rs` + 编辑器原子片段；177 个 TUI 测试。**stash 未做**；Shift+Enter 只在代码里启用了 kitty 协议，**真终端未实测**（见下） |
-| 2 | w3-session-core | TUI 改走 Remote：多轮、流式、思考、取消；`/runs` 保留看工人 | 待 w3-commands · w2-remote-session |
-| 3 | w3-session-list | 会话列表 / 恢复 / 改名 / 时间线；真实模型目录 | 待 w3-session-core |
+| 2 | w3-session-core | TUI 改走 Remote：多轮、流式、思考、取消；`/runs` 保留看工人 | ✅ 358425a（经 `core::service` 消息与 `remote::service` 说话 —— GUI 将来用同一份） |
+| 3 | w3-session-list | 会话列表 / 恢复 / 改名 / 时间线；真实模型目录 | 🟡 358425a：列表（本工作区）/ 恢复（跨进程实测）/ `/rename` / 内核目录已做；**时间线、搜索会话内容未做** |
 | 3 | w3-tool-views | diff、shell 输出、折叠、完整输出查看器 | 待 w3-session-core |
 | 3 | w4-tui-modes | Agent / Plan / Build / 授权级别 / confirm 审批界面 | 待 w3-session-core · w4-m3b-negative |
 | 4 | w5-polish | 信息栏真实数据、首次运行与故障提示、终端恢复、toast、复制、长会话性能 | 待顺序 3 全部 |
 | — | 人工 | Arch 真终端、与 OpenCode v1.19.0 同终端对照（§7.5）；满意与否由用户判断 | 队列做完后 |
+
+## TUI 真终端证据（2026-10-20，会话模式）
+
+`console-probe.ps1` 改为会话模式后的实测（release 二进制）：
+
+| 检查 | 结果 |
+|---|---|
+| 交互内核就绪（后台起，界面不等） | ✅ |
+| `/sessions`（会话列表）· `/runs`（工人运行） | ✅ |
+| **同一会话两轮**：问 7×6 → `42`；只说「再加 1」→ `43` | ✅ 答案不在题面里，只能来自上一轮 |
+| 长输出中 Esc → 「已取消」，输入区仍可用 | ✅ |
+| **新进程里** `/sessions` 打开上次会话 → 历史与「已取消」都回来 | ✅ |
+| Ctrl+C 退出后无残留 `--profile web` 的 node 进程 | ✅ |
+
+`-Submit` 两次、`-Cancel` 一次极小调用；`-Resume` 不耗配额。探针自身修过一处：`KEY_EVENT_RECORD` 没声明 CharSet，
+中文按键按 ANSI 封送报 0x8007007A（之前只打过 ASCII）。
+
+**交互面还没有的**（日常可用判据里对应的几条）：confirm 审批界面（判据 3）、diff 与完整工具视图（判据 6）、
+会话时间线与内容搜索（判据 2 的一部分）、个性化 persona 注入交互面、子 agent 会话的打开、`session/control` 的实时用量。
 
 ## TUI 真终端证据（2026-10-15）
 

@@ -8,7 +8,8 @@ DSH 对非 DS 模型是否适用的调查：[docs/DSH_FINDINGS.md](docs/DSH_FIND
 人格与风格怎么装（Claude Code 的做法）：[docs/PERSONA_FINDINGS.md](docs/PERSONA_FINDINGS.md)。
 不可让渡的规则与「什么算个性化」：[prompts/constitution.md](prompts/constitution.md)（草案）。
 TUI 派工计划与状态（**队列 2026-10-14 起暂停**）：[docs/M4_PLAN.md](docs/M4_PLAN.md)；派工手册：[tasks/m4/README.md](tasks/m4/README.md)。
-授权 → DSH 执行层的映射与缺口：[docs/M3_GUARD.md](docs/M3_GUARD.md)。用 arcdeck 工人替代 OpenCode 工人的复盘：[docs/ARCDECK_WORKERS_REVIEW_2026-10-14.md](docs/ARCDECK_WORKERS_REVIEW_2026-10-14.md)。
+授权 → DSH 执行层的映射与缺口：[docs/M3_GUARD.md](docs/M3_GUARD.md)。DSH 0.2.1 Remote 层的协议核对：[docs/REMOTE_0.2.1.md](docs/REMOTE_0.2.1.md)。
+GUI 怎么热插拔地研发与发布（Windows + Linux）：[docs/GUI_PLUGGABLE.md](docs/GUI_PLUGGABLE.md)。用 arcdeck 工人替代 OpenCode 工人的复盘：[docs/ARCDECK_WORKERS_REVIEW_2026-10-14.md](docs/ARCDECK_WORKERS_REVIEW_2026-10-14.md)。
 
 - **2026-10-14 补记**：用户随后要求用 arcdeck 工人把 TUI 做到日常可用，W1（Markdown / 主题 / 模型对话框）与 M3 第一段已合入；同日暂停派工，下一步重心转 GUI，剩余 TUI 队列可由替班按手册继续。**本机 C 盘已满：worktree、TEMP、构建输出都在 D 盘**（见 tasks/m4/README.md）。
 - **当前焦点只有一件事：Rust 后端的 headless 在 Ether 上可用**（PRODUCT_PLAN M2a–M2c）。TUI 排在其后（M4）；两个桌面 GUI 冻结。
@@ -848,7 +849,9 @@ SDK 里 152 处引用、0 处定义。
 | `kanesumi/` GDI 参考渲染器 | ⚠️ 缺 `Arc`/`Triangle`/`Image`，裁剪为空 |
 | `kanesumi/` 文本排版 | ⚠️ `HeuristicTextEngine` 是占位，不得用于最终排版决策 |
 | `kanesumi/` 无障碍 | ❌ 完全没有（`Scene` 是纯绘制命令，没有无障碍树） |
-| **TUI 真终端可用性** | ✅ **已实测**（`crates/arc-deck-tui/tools/console-probe.ps1`，隐藏控制台 + 写按键 + 读屏幕）：Home / `@` / 帮助 / `/sessions` / 真提交（正文 `OK`）/ 取消（`status.json`=`cancelled`）/ 退出（无残留进程）；177 个 TUI 测试 |
+| **TUI 真终端可用性** | ✅ **已实测**（`crates/arc-deck-tui/tools/console-probe.ps1`，隐藏控制台 + 写按键 + 读屏幕）：交互内核就绪 / `@` / 帮助 / `/sessions` / `/runs` / **同一会话两轮（42 → 43）** / Esc 取消这一轮 / **跨进程恢复会话** / 退出后无残留内核；184 个 TUI 测试 |
+| **交互会话层**（Rust Remote：`arc-deck-dsh::remote`） | ✅ **已实测**：web 内核启停、换票、mux、会话操作（live 不耗配额）；真实一轮流式 → 权威全文替换（quota）。见 [REMOTE_0.2.1](docs/REMOTE_0.2.1.md) |
+| **GUI 后端接口** `arcdeck serve --stdio` | ✅ **已实测**（握手 / 坏行不断开 / 未知命令被容忍 / EOF 收内核放锁）；共享 socket 模式**未实现**。见 [GUI_PLUGGABLE](docs/GUI_PLUGGABLE.md) |
 | `uwp/` 编译与打包 | ✅ 从零 Rebuild 无错误无警告，产出 MSIX（0.1.13.0） |
 | `uwp/` 启动运行 | ✅ **已实测**（签名 → 覆盖安装 → 启动，无 crash.log） |
 | `uwp/` 对话页块渲染（段落/代码/工具卡） | ✅ **已实测**，逐块截图核对 |

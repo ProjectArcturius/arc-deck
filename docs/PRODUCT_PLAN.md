@@ -756,6 +756,9 @@ DSH 协议里的 `reasoningEffort` 是上游字段名，映射在适配器里做
 ## 8. 桌面 GUI 需求（冻结，不在当前焦点）
 
 > **2026-10-15 先决验证结果**：[HOST_VALIDATION_2026-10-15.md](HOST_VALIDATION_2026-10-15.md)。
+> **2026-10-20 接线方案**：[GUI_PLUGGABLE.md](GUI_PLUGGABLE.md) —— GUI 不链接后端，只说 `arc_deck_core::service` 这份带版本的消息；
+> 第一档 `arcdeck serve --stdio` 已实现并实测，共享 socket（多前端同连）是设计。本节「版本化本地 IPC」即指它。
+>
 > 完整信任宿主与**系统 XAML**（`Windows.UI.Xaml`）island 均实测成立（起子进程、读 `%APPDATA%`、UIA 可见）；
 > **WinUI 2 控件在未打包的完整信任宿主里不成立**：现代 .NET 编译期 `NETSDK1149`，`net48` 下
 > `XamlApplication` 激活时报 `0x8007007E`。原方案因此**未通过**；用户裁定走备选 A（UWP 界面 +
