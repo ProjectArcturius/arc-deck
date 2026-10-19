@@ -36,16 +36,40 @@ PRODUCT_PLAN §7.3 的八个组件、§7.4 的键位与命令、§7.5 的视觉�
 | 0 | w1-model-dialog | 模型 / provider / effort 对话框，F2 循环，偏好落盘 | ✅ f82555f |
 | 0 | w2-remote-transport | Remote host / rpc / mux；0.2.1 协议核对文档 | ⏸ 用户叫停时取消；半成品在分支 `dsh/w2-remote-transport`（两个 wip 提交，未审阅），一条 lib 测试会挂住。续做：同 id + `--rerun` + `w2-remote-transport-resume.md` |
 | 0 | w4-m3-guard | EffectivePolicy → DSH 配置行，映射表 + `--dump-config` 验证 | ✅ f545990（合入后真实冒烟一次通过） |
-| 1 | w3-commands | 命令系统：action 注册表、键位与上下文、slash 补全、面板、帮助 | 待 w1 全部合入 |
+| 1 | w3-commands | 命令系统：action 注册表、键位与上下文、slash 补全、面板、帮助 | ✅ 工作区（未提交）：`commands.rs` / `keymap.rs` / `autocomplete.rs`，160 个 TUI 测试 |
 | 1 | w2-remote-session | 会话操作、事件投影、审批数据、模型目录 | 待 w2-remote-transport |
 | 1 | w4-m3b-negative | 脚本化假模型端点驱动真实 DSH，证明越权被拒（零配额） | ✅ fb4d482（17 条负例 live 全过；复跑时修了一条用例） |
-| 2 | w3-tui-input | `@` 文件、历史、粘贴摘要、Shift+Enter、外部编辑器、metadata | 待 w3-commands |
+| 2 | w3-tui-input | `@` 文件、历史、粘贴摘要、Shift+Enter、外部编辑器、metadata | ✅ 工作区（未提交）：`files.rs` + 编辑器原子片段；177 个 TUI 测试。**stash 未做**；Shift+Enter 只在代码里启用了 kitty 协议，**真终端未实测**（见下） |
 | 2 | w3-session-core | TUI 改走 Remote：多轮、流式、思考、取消；`/runs` 保留看工人 | 待 w3-commands · w2-remote-session |
 | 3 | w3-session-list | 会话列表 / 恢复 / 改名 / 时间线；真实模型目录 | 待 w3-session-core |
 | 3 | w3-tool-views | diff、shell 输出、折叠、完整输出查看器 | 待 w3-session-core |
 | 3 | w4-tui-modes | Agent / Plan / Build / 授权级别 / confirm 审批界面 | 待 w3-session-core · w4-m3b-negative |
 | 4 | w5-polish | 信息栏真实数据、首次运行与故障提示、终端恢复、toast、复制、长会话性能 | 待顺序 3 全部 |
 | — | 人工 | Arch 真终端、与 OpenCode v1.19.0 同终端对照（§7.5）；满意与否由用户判断 | 队列做完后 |
+
+## TUI 真终端证据（2026-10-15）
+
+`crates/arc-deck-tui/tools/console-probe.ps1` 起一个**隐藏控制台**、把按键写进它的输入缓冲区、
+再读回屏幕缓冲区 —— 把「在真终端里可用」做成几条可复现的断言。实测（release 二进制）：
+
+| 检查 | 结果 |
+|---|---|
+| Home 渲染 | ✅ `Arc Deck` |
+| `@` 文件补全 | ✅ `@ 文件引用` 列真实仓文件 |
+| `F1` 帮助 | ✅ |
+| 输入可见 | ✅ |
+| `/sessions` 面板 | ✅ 打开「运行历史」 |
+| **真提交一轮**（`-Submit`，发 `say OK`） | ✅ `运行已结束`，正文 `OK`，无错误提示 |
+| **取消**（启动中 `Esc`） | ✅ 界面显示取消，`status.json` → `cancelled`；退出后无残留 `arcdeck` 进程 |
+| `Ctrl+C` 退出（含收尾） | ✅ 进程退出 |
+
+`-Submit` 会消耗一次小配额，默认关闭；不加它只跑界面检查。
+
+**同轮发现（尚未修，属运行时而不是 TUI）**：DSH `0.2.1-alpha.2` 在**写出结果之后**以
+`0xc0000409`（libuv 断言 `!(handle->flags & UV_HANDLE_CLOSING)`）退出，而 `status.json`
+仍是 `completed`、`exit_code` 为空。结果与正文可用，但退出是崩溃；诊断事件里有
+「进程已退出（exit code: 0xc0000409）」（info 级）。TUI 现在把长诊断折叠成首行 + 「另有 N 行」，
+不再让整段 Node 栈占满正文。
 
 ## 派工中发现并已修的产品问题
 

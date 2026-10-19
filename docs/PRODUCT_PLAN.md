@@ -755,6 +755,12 @@ DSH 协议里的 `reasoningEffort` 是上游字段名，映射在适配器里做
 
 ## 8. 桌面 GUI 需求（冻结，不在当前焦点）
 
+> **2026-10-15 先决验证结果**：[HOST_VALIDATION_2026-10-15.md](HOST_VALIDATION_2026-10-15.md)。
+> 完整信任宿主与**系统 XAML**（`Windows.UI.Xaml`）island 均实测成立（起子进程、读 `%APPDATA%`、UIA 可见）；
+> **WinUI 2 控件在未打包的完整信任宿主里不成立**：现代 .NET 编译期 `NETSDK1149`，`net48` 下
+> `XamlApplication` 激活时报 `0x8007007E`。原方案因此**未通过**；用户裁定走备选 A（UWP 界面 +
+> 完整信任伴随进程），AppService 通道已实现并装机实测（同文档第七节）。界面接真实数据仍未做。
+
 桌面版分两块（D6），**都等后端的本地服务接口（M5）稳定后再接**，现在不并行开发：
 
 | | Windows | Linux |

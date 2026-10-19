@@ -760,6 +760,25 @@ $(if ($inside) { "在窗口内 ✓" } else { … })
 **对照实验与断言之间要确认「读的是同一个东西」。** 这两个都表现为
 「功能坏了」，而功能是好的 —— 与 U13 同类，只是错在元素层次而不是坐标空间。
 
+### U18 · 完整信任伴随进程：方向、拉起顺序与生命周期
+
+UWP 的 AppContainer 起不了 `dsh`、读不到包外路径（P1）。现在由包内
+`Host\ArcDeck.Host.exe`（完整信任）承担执行与文件访问，界面经 AppService 与它说话。
+
+1. **provider 必须是 UWP**（服务只能由包声明）；伴随进程是 client，用自己的包身份
+   `OpenAsync` 连回来 —— 完整信任进程**不能**当 provider。
+2. **先 `uwp\host\publish.ps1` 再 MSBuild**；顺序反了包能装上，但
+   `FullTrustProcessLauncher` 找不到 exe。
+3. **`ServiceClosed` 里退出进程**；不退的话下次装包被它锁文件，部署报
+   `0x80073D02`（实测踩过）。
+
+另两条：`FullTrustProcessLauncher` 要显式引用 `Windows.ApplicationModel.FullTrustAppContract`
+的 winmd（UWP 引用集停在 15138，不引用报 `CS0103`，像拼错类名）；AppService
+**不保证调用方是本包**，`OnBackgroundActivated` 里比对 `CallerPackageFamilyName`。
+线协议用 `ValueSet` 扁平键 + `Windows.Data.Json`，不要用 `System.Text.Json`
+（.NET Native 没有）。证据与验收见 [HOST_VALIDATION §七](docs/HOST_VALIDATION_2026-10-15.md)
+与设置页「拉起并检查」。
+
 ### U14 · 资源键写错不会报错，只会静默回退
 
 `{ThemeResource KEY}` / `{StaticResource KEY}` 指向**未定义**的键时，UWP **不报错** ——
@@ -829,6 +848,7 @@ SDK 里 152 处引用、0 处定义。
 | `kanesumi/` GDI 参考渲染器 | ⚠️ 缺 `Arc`/`Triangle`/`Image`，裁剪为空 |
 | `kanesumi/` 文本排版 | ⚠️ `HeuristicTextEngine` 是占位，不得用于最终排版决策 |
 | `kanesumi/` 无障碍 | ❌ 完全没有（`Scene` 是纯绘制命令，没有无障碍树） |
+| **TUI 真终端可用性** | ✅ **已实测**（`crates/arc-deck-tui/tools/console-probe.ps1`，隐藏控制台 + 写按键 + 读屏幕）：Home / `@` / 帮助 / `/sessions` / 真提交（正文 `OK`）/ 取消（`status.json`=`cancelled`）/ 退出（无残留进程）；177 个 TUI 测试 |
 | `uwp/` 编译与打包 | ✅ 从零 Rebuild 无错误无警告，产出 MSIX（0.1.13.0） |
 | `uwp/` 启动运行 | ✅ **已实测**（签名 → 覆盖安装 → 启动，无 crash.log） |
 | `uwp/` 对话页块渲染（段落/代码/工具卡） | ✅ **已实测**，逐块截图核对 |
@@ -850,7 +870,8 @@ SDK 里 152 处引用、0 处定义。
 | `uwp/` 外观 | ⚠️ 只做到圆角归零。图标字形与控件模板形状改不动，见 U3 |
 | 无障碍 | `kanesumi/` ❌ 没有（自绘路线最大缺口）· `uwp/` ✅ 平台提供，图标按钮已补 `AutomationProperties.Name` |
 | `arc-deck-dsh`（协议客户端） | ✅ **已实测**：找到内核 → 起 `dsh --profile sdk` → 握手 → `session/prompt` → 流式事件 → 投影出助手正文（`dsh-cli`，见下） |
-| `arc-deck-dsh` 接进界面 | ❌ **未做**，卡在 P1：UWP 是 AppContainer，起不了内核也读不到包外路径 |
+| `arc-deck-dsh` 接进界面 | ❌ **未做**：协议层仍没有被任一界面引用。P1 的结构性障碍已由伴随进程绕开（见下一行），但「界面接真实数据」是另一件事 |
+| `uwp/` **完整信任伴随进程 + AppService 通道** | ✅ **已实测**（0.1.18）：设置页「拉起并检查」→ `FullTrustProcessLauncher` → 伴随进程 `OpenAsync Success` → `ping` 报告 `packaged:true`、`env` 读到包外 `%APPDATA%`、`probe` 真起 `dsh --version`（exit 0）；关掉 UWP 后伴随进程收到「服务关闭」并退出。设计与坑见 [HOST_VALIDATION §七](docs/HOST_VALIDATION_2026-10-15.md) 与 [uwp/README](uwp/README.md) |
 | `arc-deck-dsh` 会话重载（读回已存会话） | ✅ **已实测**：真实日志全部通过重放不变式（**现有 71 份里有 1 份失败** —— 那份日志确实坏了，两份独立读数都指向它，见 P14）；`dsh-cli --verify-reload` **同一条会话**实时 vs 重放逐块一致（参 P7/P9） |
 | `arc-deck-dsh` 会话列表（列磁盘上的会话） | ✅ **已实测**：`--list` 列出会话并标出属于当前工作区的那些。只读会话头、**不解压全文**；**这条路**上拿不到标题（真标题要重载才知道，见 `DshSessionReader.Enumerate` 的注释）—— 内核那条路能拿到，见下面一行 |
 | `arc-deck-dsh` 工具卡 / 思考块 | ✅ 已实现（工具卡带标题与结果、思考块默认折叠）。界面侧未接，所以「折叠」这个交互本身**没实测** |
@@ -871,13 +892,10 @@ SDK 里 152 处引用、0 处定义。
 
 标 ❌ 的项是**没做**，不是没测 —— 别把两者混起来。
 
-原先挂着的「对话页**发送消息**后列表摘要与轮数是否更新」也**已经测过**：
-当初判定它「卡在 U13」是因为相信了那条错误的量测 —— 输入框一直在窗口内，
-发送通路本来就能走。这条记在这里是为了提醒：一个错误的诊断会连带冻住
-别的验证项（参 U13）。
+原先挂着的「对话页**发送消息**后摘要是否更新」也测过：当初判它「卡在 U13」
+是相信了那条错误的量测 —— 输入框一直在窗口内（参 U13）。
 
-「协议层代码在、一次没跑过」的项现在**清零了** —— `--harness-prompt-live`
-（A3）把它跑掉了，而且是当场抓出两个 bug（见 P16）。
+
 
 ## 构建
 
@@ -975,6 +993,9 @@ $ps5 = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 & $ps5 -File uwp\tools\shot\Print.ps1 -Out shot.png     # 首选：不看焦点不看 Z 序
 & $ps5 -File uwp\tools\shot\Uia.ps1 -List               # 元素树
 & $ps5 -File uwp\tools\shot\Uia.ps1 -Invoke "会话" -Out shot.png
+
+# TUI 真终端探针（隐藏控制台 + 写按键 + 读屏幕；-Submit 会花一次小配额）
+& $ps5 -File crates\arc-deck-tui\tools\console-probe.ps1 -Exe D:\arcdeck\target-main\release\arcdeck.exe
 ```
 
 **别用肉眼判断界面改没改。** `uwp/tools/shot/` 下的脚本是为了把这类判断做成
