@@ -13,14 +13,12 @@ use std::time::Duration;
 
 use arc_deck_core::{
     authz::Permission,
-    conversation::ModelChoice,
     event::EventEnvelope,
     paths,
     result::TaskResult,
     service::{BackendState, Command as SessionCommand, Event as SessionEvent},
     userconfig::{self, UserConfig},
 };
-use arc_deck_dsh::remote::{launch, service};
 use arc_deck_tui::{Boot, Request, RunDetail, RunRecord, StartRequest, Update, catalog};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
@@ -214,34 +212,14 @@ fn start_backend(
     let Some(cfg) = cfg else {
         return fail("没有可用的用户配置；先运行 `arcdeck config init`".into());
     };
-    let home = launch::default_dsh_home();
     let kernel_id = format!("tui-{}", std::process::id());
-    let launch = match launch::interactive(launch::InteractiveInput {
-        config: cfg,
-        workspace,
-        permission,
-        dsh_home: &home,
-        // 个性化（§5.3.1）还没接进交互面：关着时本来就一段都不注入，开着时这里**尚未**注入 ——
-        // 如实记在 docs/M4_PLAN.md，不假装生效。
-        persona_suffix: "",
-        kernel_id: &kernel_id,
-    }) {
-        Ok(launch) => launch,
-        Err(error) => return fail(error.message),
+    let (handle, notes) = match crate::serve::spawn_service(cfg, workspace, permission, &kernel_id) {
+        Ok(started) => started,
+        Err(reason) => return fail(reason),
     };
-    for note in &launch.guard_notes {
+    for note in &notes {
         let _ = updates.send(Update::Notice(format!("授权缺口（已留档）：{note}")));
     }
-    let handle = service::spawn(service::ServiceInput {
-        options: launch.options,
-        default_model: Some(ModelChoice {
-            provider: launch.provider,
-            model: launch.model,
-            effort: launch.effort,
-        }),
-        workspace: workspace.to_path_buf(),
-        lock: Some(launch.lock),
-    });
     let mut events = handle.events;
     let tx = updates.clone();
     let current = Arc::clone(current);

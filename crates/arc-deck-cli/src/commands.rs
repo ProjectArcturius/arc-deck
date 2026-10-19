@@ -57,6 +57,7 @@ pub async fn dispatch(argv: &[String]) -> i32 {
         "auth" => cmd_auth(&argv[1..]),
         "runtime" => cmd_runtime(&argv[1..]),
         "config" => cmd_config(&argv[1..]),
+        "serve" => crate::serve::cmd_serve(&argv[1..]).await,
         other => Err(SpecError::new(code::CONFIG_INVALID, format!("未知命令 `{other}`"))),
     };
     match outcome {

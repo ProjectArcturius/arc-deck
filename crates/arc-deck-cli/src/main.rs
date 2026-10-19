@@ -15,6 +15,7 @@ mod args;
 mod cancel;
 mod commands;
 mod report;
+mod serve;
 mod status;
 mod tui;
 mod worker;
