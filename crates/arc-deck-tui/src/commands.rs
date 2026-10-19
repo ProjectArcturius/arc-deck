@@ -15,6 +15,8 @@
 pub(crate) enum Action {
     Palette,
     New,
+    Sessions,
+    Rename,
     Runs,
     Cancel,
     Latest,
@@ -98,15 +100,19 @@ pub(crate) struct Entry {
 pub(crate) const PLAN_REASON: &str =
     "Plan 需要只读执行限制与确认应答者，本版只有 workspace / full，提示词不能保证只读";
 
-/// Why `readonly` cannot be selected yet. Kept next to the registry because both `/permission`
-/// and the picker row print it — one string, two surfaces.
-pub(crate) const READONLY_REASON: &str =
-    "只读授权需要 DSH 只读工具集与确认应答者，本版尚未接通；请用 workspace 或 full";
+/// Why `confirm` cannot be selected yet: it needs an approval UI (M4 w4-tui-modes), and quietly
+/// running it as `workspace` would widen "ask me first" into "just do it".
+pub(crate) const CONFIRM_REASON: &str =
+    "confirm 需要审批界面，本版尚未接通；请用 readonly / workspace / full";
 
 /// The authorization levels (§5.6), with the picker's description and, for the level the
 /// execution layer cannot honour yet, the reason. Order is the order the picker shows.
+///
+/// `readonly` became selectable once the M3 live negatives proved the execution layer refuses
+/// writes and commands under it (docs/M3_GUARD.md); its known gap — reads are not confined to
+/// the workspace — is in the description rather than hidden.
 pub(crate) const PERMISSIONS: [(&str, &str, Option<&str>); 3] = [
-    ("readonly", "只读：不写文件、不执行命令", Some(READONLY_REASON)),
+    ("readonly", "只读：执行层拒绝写文件（读不限于工作区，见 M3_GUARD）", None),
     ("workspace", "工作区：可读写当前工作区", None),
     ("full", "完全：不受沙箱限制（--worktree 必需）", None),
 ];
@@ -115,7 +121,7 @@ pub(crate) const ENTRIES: &[Entry] = &[
     Entry {
         action: Action::New,
         id: "session.new",
-        title: "新的独立请求",
+        title: "新会话",
         category: Category::Session,
         slash: Some("/new"),
         arg: None,
@@ -124,14 +130,40 @@ pub(crate) const ENTRIES: &[Entry] = &[
         unavailable: None,
         palette: true,
     },
+    // `session.list` 这个 id 留给会话列表：用户的 keybinds.json 里绑的是「列表」这个意思，
+    // 而 M4a 那时还没有会话，只能先拿工人运行顶着。工人运行改用新 id。
     Entry {
-        action: Action::Runs,
+        action: Action::Sessions,
         id: "session.list",
-        title: "运行历史（当前工作区）",
+        title: "会话列表（当前工作区）",
         category: Category::Session,
         slash: Some("/sessions"),
         arg: None,
         keys: &["<leader>l"],
+        context: Context::Composer,
+        unavailable: None,
+        palette: true,
+    },
+    Entry {
+        action: Action::Rename,
+        id: "session.rename",
+        title: "改名当前会话",
+        category: Category::Session,
+        slash: Some("/rename"),
+        arg: Some("<标题>"),
+        keys: &[],
+        context: Context::Composer,
+        unavailable: None,
+        palette: true,
+    },
+    Entry {
+        action: Action::Runs,
+        id: "runs.list",
+        title: "工人运行（当前工作区）",
+        category: Category::Session,
+        slash: Some("/runs"),
+        arg: None,
+        keys: &[],
         context: Context::Composer,
         unavailable: None,
         palette: true,
@@ -493,6 +525,8 @@ mod tests {
         for action in [
             Action::Palette,
             Action::New,
+            Action::Sessions,
+            Action::Rename,
             Action::Runs,
             Action::Cancel,
             Action::Latest,
@@ -530,6 +564,8 @@ mod tests {
         for slap in [
             "/new",
             "/sessions",
+            "/rename",
+            "/runs",
             "/agents",
             "/models",
             "/effort",

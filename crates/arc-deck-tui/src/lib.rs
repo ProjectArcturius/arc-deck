@@ -89,10 +89,17 @@ pub struct StartRequest {
 
 #[derive(Debug)]
 pub enum Request {
+    /// 独立运行（headless 那条路）。交互内核不可用时的退路，以及 `/runs` 里看工人。
     Start(StartRequest),
     Open(Option<String>),
     Cancel(String),
     Refresh,
+    /// 交互会话。消息形状就是 GUI 将来经 IPC 用的那一份（`arc_deck_core::service`）——
+    /// TUI 在进程内先用它，等于每天都在给那份契约做验收。
+    Session(arc_deck_core::service::Command),
+    /// 授权级别是交互内核**启动时**定的（它决定沙箱档与 patch 里的预设表），改了就要重启内核。
+    /// 会话存在独立的 DSH home 里，重启之后能重新打开，所以这不丢对话。
+    RestartBackend { permission: String },
     Quit,
 }
 
@@ -102,6 +109,7 @@ pub enum Update {
     Detail(Box<RunDetail>),
     Finished(String),
     Notice(String),
+    Session(arc_deck_core::service::Event),
 }
 
 /// UI preferences, persisted to `tui-preferences.json`. `serde(default)` is load-bearing: the

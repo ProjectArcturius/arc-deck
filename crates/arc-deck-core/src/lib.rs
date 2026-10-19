@@ -20,6 +20,7 @@ pub mod mode;
 pub mod paths;
 pub mod provider;
 pub mod result;
+pub mod service;
 pub mod task;
 pub mod userconfig;
 

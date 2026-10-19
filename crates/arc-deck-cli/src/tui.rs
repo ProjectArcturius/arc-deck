@@ -1,18 +1,26 @@
-//! M4a bridge: the UI consumes the same facts as `arcdeck status`.
-//! Headless remains the sole execution path; no provider loop lives in the renderer.
+//! TUI 的后端桥。两条路，都不在渲染器里跑任何 provider 循环：
+//!
+//! - **交互会话**：后台起 `arc_deck_dsh::remote::service`（独占一个 web 内核），
+//!   `Request::Session` / `Update::Session` 原样转发 —— 那组消息就是 GUI 将来经 IPC 用的那一份。
+//! - **独立运行**：内核起不来时的退路，以及 `/runs` 里看工人（与 `arcdeck status` 同一份事实）。
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arc_deck_core::{
+    authz::Permission,
+    conversation::ModelChoice,
     event::EventEnvelope,
     paths,
     result::TaskResult,
+    service::{BackendState, Command as SessionCommand, Event as SessionEvent},
     userconfig::{self, UserConfig},
 };
+use arc_deck_dsh::remote::{launch, service};
 use arc_deck_tui::{Boot, Request, RunDetail, RunRecord, StartRequest, Update, catalog};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
@@ -31,6 +39,7 @@ struct Loaded {
     root: PathBuf,
     config_path: Option<PathBuf>,
     catalog: Vec<catalog::Provider>,
+    config: Option<UserConfig>,
 }
 
 /// 模型目录的**临时**来源：用户配置的 `provider` 块（OpenCode 形状）。
@@ -121,6 +130,7 @@ pub async fn run() -> i32 {
             root: paths::absolutize(&cfg.state_root()),
             config_path: Some(paths::absolutize(&path)),
             catalog: catalog_from_config(&cfg),
+            config: Some(cfg),
         },
         Err(error) => Loaded {
             model: None,
@@ -129,6 +139,7 @@ pub async fn run() -> i32 {
             root: userconfig::default_state_root(),
             config_path: None,
             catalog: Vec::new(),
+            config: None,
         },
     };
     let boot = Boot {
@@ -148,6 +159,7 @@ pub async fn run() -> i32 {
         loaded.root,
         workspace,
         loaded.config_path,
+        loaded.config,
         request_rx,
         update_tx,
     ));
@@ -177,20 +189,114 @@ struct OwnedRun {
     task: JoinHandle<Result<(i32, String), String>>,
 }
 
+/// 一个在跑的会话服务。
+struct Backend {
+    commands: tokio::sync::mpsc::UnboundedSender<SessionCommand>,
+    task: JoinHandle<()>,
+    forward: JoinHandle<()>,
+}
+
+/// 起会话服务。起不来（运行时没装、密钥缺失、另一个 arcdeck 占着会话目录）就把原因
+/// 作为 `Backend{Failed}` 发给界面 —— 界面据此退回独立请求，而不是对着一个死通道发消息。
+fn start_backend(
+    cfg: Option<&UserConfig>,
+    workspace: &Path,
+    permission: Permission,
+    updates: &Sender<Update>,
+    current: &Arc<Mutex<Option<String>>>,
+) -> Option<Backend> {
+    let fail = |reason: String| {
+        let _ = updates.send(Update::Session(SessionEvent::Backend {
+            state: BackendState::Failed { reason },
+        }));
+        None
+    };
+    let Some(cfg) = cfg else {
+        return fail("没有可用的用户配置；先运行 `arcdeck config init`".into());
+    };
+    let home = launch::default_dsh_home();
+    let kernel_id = format!("tui-{}", std::process::id());
+    let launch = match launch::interactive(launch::InteractiveInput {
+        config: cfg,
+        workspace,
+        permission,
+        dsh_home: &home,
+        // 个性化（§5.3.1）还没接进交互面：关着时本来就一段都不注入，开着时这里**尚未**注入 ——
+        // 如实记在 docs/M4_PLAN.md，不假装生效。
+        persona_suffix: "",
+        kernel_id: &kernel_id,
+    }) {
+        Ok(launch) => launch,
+        Err(error) => return fail(error.message),
+    };
+    for note in &launch.guard_notes {
+        let _ = updates.send(Update::Notice(format!("授权缺口（已留档）：{note}")));
+    }
+    let handle = service::spawn(service::ServiceInput {
+        options: launch.options,
+        default_model: Some(ModelChoice {
+            provider: launch.provider,
+            model: launch.model,
+            effort: launch.effort,
+        }),
+        workspace: workspace.to_path_buf(),
+        lock: Some(launch.lock),
+    });
+    let mut events = handle.events;
+    let tx = updates.clone();
+    let current = Arc::clone(current);
+    let forward = tokio::spawn(async move {
+        while let Some(event) = events.recv().await {
+            if let SessionEvent::SessionStarted { session_id } = &event
+                && let Ok(mut current) = current.lock()
+            {
+                *current = Some(session_id.clone());
+            }
+            if tx.send(Update::Session(event)).is_err() {
+                break;
+            }
+        }
+    });
+    Some(Backend { commands: handle.commands, task: handle.task, forward })
+}
+
+/// 收掉会话服务：它会先关掉所有 follow、再收内核进程树、最后放锁。
+async fn stop_backend(backend: Backend) {
+    let _ = backend.commands.send(SessionCommand::Shutdown);
+    if tokio::time::timeout(Duration::from_secs(20), backend.task).await.is_err() {
+        eprintln!("交互内核 20 秒内没有收尾；如有残留 node 进程请手动结束");
+    }
+    let _ = tokio::time::timeout(Duration::from_secs(2), backend.forward).await;
+}
+
 async fn serve(
     root: PathBuf,
     workspace: PathBuf,
     config: Option<PathBuf>,
+    user_config: Option<UserConfig>,
     requests: Receiver<Request>,
     updates: Sender<Update>,
 ) {
+    // 当前会话：重启内核（改授权级别）之后要把它重新打开。会话在独立的 DSH home 里，所以这是「恢复」
+    // 而不是「丢掉重来」。
+    let current_session: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let mut backend = start_backend(
+        user_config.as_ref(),
+        &workspace,
+        Permission::Workspace,
+        &updates,
+        &current_session,
+    );
     let mut selected: Option<String> = None;
     let mut owned: Option<OwnedRun> = None;
     let mut previous_runs = Vec::new();
     let mut previous_detail: Option<RunDetail> = None;
     let mut cancel_tasks = Vec::<JoinHandle<()>>::new();
     let mut refresh = true;
-    let mut tick = tokio::time::interval(Duration::from_millis(500));
+    // 请求每 50 ms 收一次（发消息、取消要跟手），读运行目录的刷新仍是 500 ms 一次 ——
+    // 后者要列目录、读文件，频繁做没有意义。
+    let mut tick = tokio::time::interval(Duration::from_millis(50));
+    let mut ticks: u32 = 0;
     loop {
         if owned.as_ref().is_some_and(|r| r.task.is_finished()) {
             let run = owned.take().unwrap();
@@ -266,6 +372,48 @@ async fn serve(
                     }));
                 }
                 Ok(Request::Refresh) => refresh = true,
+                Ok(Request::Session(command)) => {
+                    if let Ok(mut current) = current_session.lock() {
+                        match &command {
+                            SessionCommand::OpenSession { session_id } => *current = Some(session_id.clone()),
+                            SessionCommand::Prompt { session_id: Some(id), .. } => *current = Some(id.clone()),
+                            SessionCommand::CloseSession { session_id }
+                                if current.as_deref() == Some(session_id.as_str()) =>
+                            {
+                                *current = None
+                            }
+                            _ => {}
+                        }
+                    }
+                    match &backend {
+                        Some(running) => {
+                            if running.commands.send(command).is_err() {
+                                let _ = updates.send(Update::Notice("交互内核已经退出".into()));
+                            }
+                        }
+                        None => {
+                            let _ = updates.send(Update::Notice("交互会话不可用；提交会改为独立请求".into()));
+                        }
+                    }
+                }
+                Ok(Request::RestartBackend { permission }) => {
+                    let level = match Permission::parse(&permission) {
+                        Ok(level) => level,
+                        Err(error) => {
+                            let _ = updates.send(Update::Notice(error.message));
+                            continue;
+                        }
+                    };
+                    if let Some(old) = backend.take() {
+                        stop_backend(old).await;
+                    }
+                    backend = start_backend(user_config.as_ref(), &workspace, level, &updates, &current_session);
+                    let reopen = current_session.lock().ok().and_then(|c| c.clone());
+                    if let (Some(running), Some(session_id)) = (&backend, reopen) {
+                        // 命令在服务的队列里等内核就绪，所以现在发就行。
+                        let _ = running.commands.send(SessionCommand::OpenSession { session_id });
+                    }
+                }
                 Ok(Request::Quit) | Err(TryRecvError::Disconnected) => {
                     quit = true;
                     break;
@@ -294,6 +442,9 @@ async fn serve(
             for task in cancel_tasks {
                 let _ = task.await;
             }
+            if let Some(running) = backend.take() {
+                stop_backend(running).await;
+            }
             return;
         }
         if refresh {
@@ -312,7 +463,8 @@ async fn serve(
         }
         cancel_tasks.retain(|t| !t.is_finished());
         tick.tick().await;
-        refresh = true;
+        ticks = ticks.wrapping_add(1);
+        refresh = ticks.is_multiple_of(10);
     }
 }
 

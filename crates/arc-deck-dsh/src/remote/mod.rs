@@ -39,6 +39,7 @@ pub mod host;
 pub mod launch;
 pub mod mux;
 pub mod rpc;
+pub mod service;
 pub mod session;
 pub mod wire;
 

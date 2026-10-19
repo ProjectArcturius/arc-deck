@@ -16,6 +16,10 @@ use std::collections::HashMap;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use arc_deck_core::conversation::{
+    AssistantTurn, Block as ViewBlock, Message, ToolCall, ToolStatus, TurnState,
+};
+
 use crate::{
     app::{App, Dialog, token},
     commands::{self, Action, Category},
@@ -142,7 +146,7 @@ pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
         footer,
     );
     let content = Rect::new(area.x, area.y, area.width, area.height - 2);
-    let composer_area = if app.selected.is_none() {
+    let composer_area = if app.selected.is_none() && !app.in_conversation() {
         home(frame, app, content, t)
     } else {
         session(frame, app, content, t)
@@ -150,7 +154,7 @@ pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
     if app.sidebar_overlay
         && app.preferences.sidebar
         && content.width <= 120
-        && app.selected.is_some()
+        && (app.selected.is_some() || app.in_conversation())
     {
         let w = 42.min(content.width - 2);
         sidebar(
@@ -185,7 +189,7 @@ fn home(frame: &mut Frame, app: &App, area: Rect, t: &Theme) -> Rect {
         Rect::new(x, y, width, 1),
     );
     frame.render_widget(
-        Paragraph::new("从当前项目开始一次独立请求").style(Style::default().fg(muted(t))),
+        Paragraph::new(home_subtitle(app)).style(Style::default().fg(muted(t))),
         Rect::new(x, y + 2, width, 1),
     );
     let composer_area = Rect::new(x, y + 3, width, height.saturating_sub(3));
@@ -215,11 +219,17 @@ fn session(frame: &mut Frame, app: &mut App, area: Rect, t: &Theme) -> Rect {
             t,
         );
     }
-    let label = app
-        .detail
-        .as_ref()
-        .map(|d| d.record.title.as_str())
-        .unwrap_or("正在接入运行记录…");
+    let label = if app.in_conversation() {
+        app.conversation
+            .as_ref()
+            .and_then(|c| c.title.as_deref())
+            .unwrap_or("新会话")
+    } else {
+        app.detail
+            .as_ref()
+            .map(|d| d.record.title.as_str())
+            .unwrap_or("正在接入运行记录…")
+    };
     frame.render_widget(
         Paragraph::new(clean(&format!(" Arc Deck  /  {label}")))
             .style(Style::default().fg(t.text.to_ratatui()).bg(panel_deep(t))),
@@ -234,7 +244,11 @@ fn session(frame: &mut Frame, app: &mut App, area: Rect, t: &Theme) -> Rect {
         width,
         main.height.saturating_sub(composer_height + 3),
     );
-    let lines = body_lines(app, t, body.width);
+    let lines = if app.in_conversation() {
+        conversation_lines(app, t, body.width)
+    } else {
+        body_lines(app, t, body.width)
+    };
     let lines = fit_width(lines, body.width as usize);
     app.scroll_max = lines.len().saturating_sub(body.height as usize);
     let top = app.scroll.unwrap_or(app.scroll_max).min(app.scroll_max);
@@ -279,7 +293,7 @@ fn composer(frame: &mut Frame, app: &App, area: Rect, t: &Theme) {
     let (rows, (cx, cy)) = app.editor.wrapped(inner.width as usize);
     let start = cy.saturating_sub(inner.height.saturating_sub(1) as usize);
     let visible = if app.editor.text.is_empty() {
-        vec!["输入指令…每次提交创建独立运行".into()]
+        vec![composer_placeholder(app).into()]
     } else {
         rows.into_iter()
             .skip(start)
@@ -338,7 +352,7 @@ fn composer(frame: &mut Frame, app: &App, area: Rect, t: &Theme) {
     let overlay = app.sidebar_overlay
         && app.preferences.sidebar
         && frame.area().width <= 120
-        && app.selected.is_some();
+        && (app.selected.is_some() || app.in_conversation());
     if app.dialog.is_none() && !overlay && inner.height > 0 {
         frame.set_cursor_position((
             inner.x + (cx as u16).min(inner.width - 1),
@@ -367,7 +381,9 @@ fn sidebar(frame: &mut Frame, app: &App, area: Rect, t: &Theme) {
         Line::raw(clean(&app.boot.workspace.display().to_string())),
         Line::raw(""),
     ];
-    if let Some(d) = &app.detail {
+    if app.in_conversation() {
+        lines.extend(conversation_sidebar(app, t));
+    } else if let Some(d) = &app.detail {
         for (name, value) in [
             ("运行", d.record.id.as_str()),
             ("状态", d.record.state.as_str()),
@@ -680,11 +696,12 @@ fn popup(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, t: &Theme) {
             return;
         }
         // 主题选择器在函数开头就交给 theme_dialog 画了。
-        Dialog::Runs | Dialog::Agents | Dialog::Permissions | Dialog::Theme => {}
+        Dialog::Sessions | Dialog::Runs | Dialog::Agents | Dialog::Permissions | Dialog::Theme => {}
     }
     let rect = dialog_rect(area);
     let title = match dialog {
-        Dialog::Runs => "运行历史",
+        Dialog::Sessions => "会话（当前工作区）",
+        Dialog::Runs => "工人运行（当前工作区）",
         Dialog::Agents => "Agent",
         Dialog::Permissions => "授权级别",
         Dialog::Theme => return,
@@ -698,6 +715,22 @@ fn popup(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, t: &Theme) {
     let inner = dialog_frame(frame, rect, title, t);
     // 走到这里的只有 Runs / Agents / Permissions 三个。
     let mut rows: Vec<(String, bool)> = match dialog {
+        Dialog::Sessions => {
+            let now = now_ms();
+            app.filtered_sessions()
+                .iter()
+                .map(|s| {
+                    let title = s.title.clone().unwrap_or_else(|| "（无标题）".into());
+                    let running = if s.running { " · 进行中" } else { "" };
+                    let current = if app.session_id.as_deref() == Some(s.session_id.as_str()) {
+                        "（当前）"
+                    } else {
+                        ""
+                    };
+                    (format!("{title}{current} · {}{running}", ago(now, s.updated_at)), true)
+                })
+                .collect()
+        }
         Dialog::Runs => app
             .filtered_runs()
             .iter()
@@ -731,7 +764,7 @@ fn popup(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, t: &Theme) {
     if rows.is_empty() {
         rows.push(("没有匹配项".into(), false));
     }
-    let search = if matches!(dialog, Dialog::Runs) {
+    let search = if matches!(dialog, Dialog::Runs | Dialog::Sessions) {
         format!("搜索：{}", app.filter)
     } else {
         "↑↓ 选择 · Enter 确定 · Esc 返回".into()
@@ -1087,6 +1120,260 @@ fn wrap(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
         result.push(row);
     }
     result
+}
+
+fn home_subtitle(app: &App) -> &'static str {
+    use arc_deck_core::service::BackendState;
+    match app.backend {
+        BackendState::Ready { .. } => "从当前项目开始一个会话",
+        BackendState::Starting => "从当前项目开始一个会话（交互内核启动中）",
+        _ => "交互会话不可用：每次提交是一次独立请求",
+    }
+}
+
+fn composer_placeholder(app: &App) -> &'static str {
+    use arc_deck_core::service::BackendState;
+    if !matches!(app.backend, BackendState::Ready { .. } | BackendState::Starting) {
+        "输入指令…每次提交创建独立运行"
+    } else if app.conversation.as_ref().is_some_and(|c| c.running) {
+        "输入下一条…这一轮结束后发送"
+    } else if app.session_id.is_some() {
+        "继续这个会话…"
+    } else {
+        "输入消息开始新会话…"
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 相对时间。会话列表里人要的是「哪一个是我昨天那个」，不是精确时刻。
+fn ago(now: u64, then: u64) -> String {
+    if then == 0 || then > now {
+        return "时间未知".into();
+    }
+    let minutes = (now - then) / 60_000;
+    match minutes {
+        0 => "刚刚".into(),
+        1..=59 => format!("{minutes} 分钟前"),
+        60..=1439 => format!("{} 小时前", minutes / 60),
+        _ => format!("{} 天前", minutes / 1440),
+    }
+}
+
+fn conversation_sidebar(app: &App, t: &Theme) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let Some(c) = &app.conversation else {
+        lines.push(Line::styled("正在新建会话…", Style::default().fg(muted(t))));
+        return lines;
+    };
+    let model = c
+        .model
+        .as_ref()
+        .map(|m| match &m.effort {
+            Some(effort) => format!("{}/{} · effort {effort}", m.provider, m.model),
+            None => format!("{}/{}", m.provider, m.model),
+        })
+        .unwrap_or_else(|| "内核未报告".into());
+    let state = if c.running { "进行中" } else { "空闲" };
+    for (name, value) in [
+        ("会话", c.title.clone().unwrap_or_else(|| "（无标题）".into())),
+        ("ID", c.session_id.clone()),
+        ("下一轮模型", model),
+        ("状态", state.to_string()),
+    ] {
+        lines.push(Line::styled(name, Style::default().fg(muted(t))));
+        lines.push(Line::raw(clean(&value)));
+    }
+    let mut total = arc_deck_core::conversation::TokenUsage::default();
+    let mut turns = 0;
+    for message in &c.messages {
+        if let Message::Assistant(turn) = message {
+            turns += 1;
+            if let Some(usage) = &turn.usage {
+                total.add(usage);
+            }
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(format!("{turns} 轮"), Style::default().fg(muted(t))));
+    // 只显示 provider 真的报告过的数（§7.3：信息栏只显示真实数据）。
+    if total.input.is_some() || total.output.is_some() {
+        lines.push(Line::styled("用量（provider 实报）", Style::default().fg(accent(t))));
+        lines.push(Line::raw(format!("输入 {} · 输出 {}", token(total.input), token(total.output))));
+        if total.cache_read.is_some() {
+            lines.push(Line::raw(format!("缓存 {}", token(total.cache_read))));
+        }
+    }
+    if !c.history_complete {
+        lines.push(Line::styled("历史未取全", Style::default().fg(warning(t))));
+    }
+    lines
+}
+
+/// 会话正文。
+///
+/// 折叠规则（§7.3）：思考与工具输出默认折叠，`/tools` 展开；**失败与被拒在折叠态也看得见** ——
+/// 折叠是为了少占屏幕，不是为了把出错藏起来。
+fn conversation_lines(app: &App, t: &Theme, width: u16) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let expanded = app
+        .expanded
+        .get(&format!("session:{}", app.session_id.clone().unwrap_or_default()))
+        .copied()
+        .unwrap_or(false);
+    let you = || Line::styled("你", Style::default().fg(accent(t)).add_modifier(Modifier::BOLD));
+    if let Some(c) = &app.conversation {
+        if !c.history_complete {
+            lines.push(Line::styled("（更早的历史没有取全）", Style::default().fg(warning(t))));
+        }
+        for message in &c.messages {
+            match message {
+                Message::User(user) => {
+                    lines.push(you());
+                    lines.extend(clean(&user.text).lines().map(|s| Line::raw(s.to_string())));
+                    for attachment in &user.attachments {
+                        lines.push(Line::styled(clean(attachment), Style::default().fg(muted(t))));
+                    }
+                    lines.push(Line::raw(""));
+                }
+                Message::Assistant(turn) => {
+                    lines.extend(assistant_lines(turn, t, width, expanded));
+                    lines.push(Line::raw(""));
+                }
+                Message::Unknown => {}
+            }
+        }
+    }
+    if let Some(text) = &app.pending {
+        lines.push(you());
+        lines.extend(clean(text).lines().map(|s| Line::raw(s.to_string())));
+        lines.push(Line::styled("发送中…", Style::default().fg(muted(t))));
+    }
+    if lines.is_empty() {
+        lines.push(Line::styled("正在打开会话…", Style::default().fg(muted(t))));
+    }
+    lines
+}
+
+fn assistant_lines(turn: &AssistantTurn, t: &Theme, width: u16, expanded: bool) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::styled(
+        "Arc Deck",
+        Style::default().fg(muted(t)).add_modifier(Modifier::BOLD),
+    )];
+    for block in &turn.blocks {
+        match block {
+            ViewBlock::Text(part) => {
+                lines.extend(markdown::render(&part.text, width, &markdown_palette(t)));
+                if part.streaming {
+                    lines.push(Line::styled("▍", Style::default().fg(accent(t))));
+                }
+            }
+            ViewBlock::Reasoning(part) => {
+                let chars = part.text.chars().count();
+                if expanded {
+                    lines.push(Line::styled("思考", Style::default().fg(muted(t))));
+                    lines.extend(clean(&part.text).lines().map(|s| {
+                        Line::styled(format!("  {s}"), Style::default().fg(muted(t)).add_modifier(Modifier::ITALIC))
+                    }));
+                } else {
+                    let tail = if part.streaming { " · 进行中" } else { "" };
+                    lines.push(Line::styled(
+                        format!("思考 · {chars} 字{tail}（/tools 展开）"),
+                        Style::default().fg(muted(t)),
+                    ));
+                }
+            }
+            ViewBlock::Tool(call) => lines.extend(tool_lines(call, t, expanded)),
+            ViewBlock::Unknown => {}
+        }
+    }
+    match &turn.state {
+        TurnState::Running => {
+            if turn.blocks.is_empty() {
+                lines.push(Line::styled("正在思考…", Style::default().fg(muted(t))));
+            }
+        }
+        TurnState::Completed => {}
+        TurnState::Cancelled => lines.push(Line::styled("已取消", Style::default().fg(warning(t)))),
+        TurnState::Failed { message, code } => {
+            let code = code.as_deref().map(|c| format!("[{c}] ")).unwrap_or_default();
+            lines.push(Line::styled(
+                clean(&format!("模型失败：{code}{message}")),
+                Style::default().fg(danger(t)),
+            ));
+        }
+        TurnState::MaxTokens => lines.push(Line::styled("达到输出上限", Style::default().fg(warning(t)))),
+        TurnState::Blocked => lines.push(Line::styled("这一轮被阻塞", Style::default().fg(warning(t)))),
+        TurnState::Interrupted => {
+            lines.push(Line::styled("这一轮在内核崩溃时中断", Style::default().fg(warning(t))))
+        }
+        TurnState::Other { kind } => {
+            lines.push(Line::styled(clean(&format!("结束：{kind}")), Style::default().fg(muted(t))))
+        }
+        TurnState::Unknown => {}
+    }
+    if turn.retries > 0 && turn.state == TurnState::Completed {
+        lines.push(Line::styled(
+            format!("（模型调用失败后重试过 {} 次）", turn.retries),
+            Style::default().fg(muted(t)),
+        ));
+    }
+    lines
+}
+
+/// 一次工具调用：标题行 + 按需的输出。
+fn tool_lines(call: &ToolCall, t: &Theme, expanded: bool) -> Vec<Line<'static>> {
+    let subject = ["command", "path", "file_path", "pattern", "url", "query"]
+        .iter()
+        .find_map(|key| call.argument(key))
+        .map(|value| format!(" {}", first_row(&value, 80)))
+        .unwrap_or_default();
+    let (mark, color, label) = match call.status {
+        ToolStatus::Running => ("…", muted(t), "进行中"),
+        ToolStatus::Done if call.exit_code.is_some_and(|c| c != 0) => ("✗", danger(t), "非零退出"),
+        ToolStatus::Done => ("✓", ok(t), "完成"),
+        ToolStatus::Failed => ("✗", danger(t), "失败"),
+        ToolStatus::Abandoned => ("·", warning(t), "未完成"),
+        ToolStatus::Unknown => ("?", muted(t), "未知"),
+    };
+    let exit = call.exit_code.map(|c| format!(" · exit {c}")).unwrap_or_default();
+    let mut lines = vec![Line::styled(
+        clean(&format!("  {mark} {}{subject} · {label}{exit}", call.name)),
+        Style::default().fg(color),
+    )];
+    let failed = matches!(call.status, ToolStatus::Failed) || call.exit_code.is_some_and(|c| c != 0);
+    if let Some(error) = &call.error {
+        lines.push(Line::styled(clean(&format!("    {error}")), Style::default().fg(danger(t))));
+    }
+    if let Some(output) = &call.output {
+        // 展开时给足；折叠时失败的那一条仍露出开头几行（拒因通常就在第一行）。
+        let limit = if expanded { 40 } else if failed { 4 } else { 0 };
+        let rows: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
+        for row in rows.iter().take(limit) {
+            lines.push(Line::styled(clean(&format!("    {row}")), Style::default().fg(muted(t))));
+        }
+        if limit > 0 && rows.len() > limit {
+            lines.push(Line::styled(
+                format!("    …另有 {} 行", rows.len() - limit),
+                Style::default().fg(muted(t)),
+            ));
+        }
+    }
+    lines
+}
+
+fn first_row(text: &str, max: usize) -> String {
+    let row = text.lines().next().unwrap_or("");
+    if row.chars().count() > max {
+        format!("{}…", row.chars().take(max).collect::<String>())
+    } else {
+        row.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -1460,7 +1747,7 @@ mod tests {
     fn help_lists_the_real_bindings() {
         let mut a = app();
         a.open_dialog(Dialog::Help);
-        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(120, 50)).unwrap();
         terminal.draw(|f| draw(f, &mut a)).unwrap();
         let buffer = terminal.backend().buffer();
         for needle in ["Ctrl+C", "Shift+Tab", "Ctrl+P", "Plan", "只读", "仅模型对话框"] {
@@ -1546,7 +1833,7 @@ mod tests {
         terminal.draw(|f| draw(f, &mut a)).unwrap();
         let buffer = terminal.backend().buffer();
         assert!(contains_wrapped(buffer, "Ctrl+X："));
-        assert!(contains_wrapped(buffer, "新的独立请求"));
+        assert!(contains_wrapped(buffer, "新会话"));
     }
 
     /// 元数据的省略顺序：模型最高、permission 最低。窄终端上必须仍看得见模型，

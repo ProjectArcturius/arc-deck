@@ -6,7 +6,9 @@
 #
 # 用法（Windows PowerShell 5.1；脚本含中文，必须带 BOM）：
 #   powershell -File console-probe.ps1 -Exe D:\arcdeck\target-main\release\arcdeck.exe
-#   powershell -File console-probe.ps1 -Exe ... -Submit     # 真发一条 "say OK"，消耗一次小配额
+#   powershell -File console-probe.ps1 -Exe ... -Submit     # 同一会话真发两轮，消耗两次小配额
+#   powershell -File console-probe.ps1 -Exe ... -Cancel     # 发一条长的再 Esc，消耗一次小配额
+#   powershell -File console-probe.ps1 -Exe ... -Resume     # 新进程里打开最近的会话（先跑过 -Cancel），不耗配额
 #
 # 三个实测出来的坑：
 # 1. 屏幕缓冲区里宽字符占两个 cell，第二个 cell 是 NUL —— 不先去掉，`Contains("文件引用")`
@@ -14,13 +16,16 @@
 # 2. 提交后的第一秒屏幕还显示着草稿（`say OK`），用它当「已回复」的判据会假阳性；
 #    要等 notice 变成「运行已结束」。
 # 3. Ctrl+C 之后监工要收尾（可能十几秒），等进程退出再断言 quit。
+# 4. 多轮的判据要是「答案不在题面里」：第一轮问 7×6（答 42），第二轮只说「再加 1」（答 43）——
+#    第二轮答对，只可能是同一个会话记得上一轮。
 
 param(
     [Parameter(Mandatory=$true)][string]$Exe,
     [string]$WorkDir = "",
     [string]$Log = (Join-Path $env:TEMP "arcdeck-console-probe.log"),
     [switch]$Submit,
-    [switch]$Cancel
+    [switch]$Cancel,
+    [switch]$Resume
 )
 
 $ErrorActionPreference = "Stop"
@@ -54,7 +59,9 @@ public static class Probe {
         public COORD dwSize; public COORD dwCursorPosition; public ushort wAttributes;
         public SMALL_RECT srWindow; public COORD dwMaximumWindowSize;
     }
-    [StructLayout(LayoutKind.Explicit)] public struct KEY_EVENT_RECORD {
+    // CharSet.Unicode 是必需的：不写的话结构里的 char 按 ANSI 单字节封送，
+    // 非 ASCII 字符（中文）转码失败，WriteConsoleInputW 报 0x8007007A —— 只打 ASCII 时看不出来。
+    [StructLayout(LayoutKind.Explicit, CharSet=CharSet.Unicode)] public struct KEY_EVENT_RECORD {
         [FieldOffset(0)] public int bKeyDown;
         [FieldOffset(4)] public ushort wRepeatCount;
         [FieldOffset(6)] public ushort wVirtualKeyCode;
@@ -62,7 +69,7 @@ public static class Probe {
         [FieldOffset(10)] public char UnicodeChar;
         [FieldOffset(12)] public uint dwControlKeyState;
     }
-    [StructLayout(LayoutKind.Sequential)] public struct INPUT_RECORD {
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct INPUT_RECORD {
         public ushort EventType;
         public KEY_EVENT_RECORD KeyEvent;
     }
@@ -131,9 +138,23 @@ function Send-Key($vk, $ch, $ctrl) {
     Start-Sleep -Milliseconds 400
 }
 
+# 断言中途出错也要收掉 TUI：留一个隐藏的 arcdeck 在后台，它会一直占着交互会话目录的锁
+#（实测踩过：下一次启动被「另一个 arcdeck 正在使用」拒绝）。
+try {
 $checks = [ordered]@{}
 $screenHome = Snapshot "home"
 $checks.home_has_brand = $screenHome.Contains("Arc Deck")
+
+# 交互内核在后台起（几秒到几十秒）；就绪之前提交会排队，但探针要的是「就绪」这个事实。
+$ready = $false
+for ($i = 0; $i -lt 60; $i++) {
+    $now = Screen
+    if ($now.Contains("交互内核就绪")) { $ready = $true; break }
+    if ($now.Contains("交互会话不可用")) { break }
+    Start-Sleep -Seconds 1
+}
+$checks.kernel_ready = $ready
+[void](Snapshot "ready")
 
 # `@` alone at the start of an empty draft opens the file popup.
 Send-Key 0x1B ([char]0x1B) 0
@@ -152,64 +173,84 @@ Send-Text "hi"
 $typed = Snapshot "typed"
 $checks.typed_shows_hi = $typed.Contains("hi")
 
-if ($Submit -or $Cancel) {
-    # `/sessions` opens the runs dialog without touching the model.
-    Send-Key 0x1B ([char]0x1B) 0
-    Send-Text "/sessions"
-    Send-Key 0x75 ([char]0) 0
-    $runsScreen = Snapshot "runs"
-    $checks.runs_dialog = $runsScreen.Contains("运行历史")
-    Send-Key 0x1B ([char]0x1B) 0
+# `/sessions` 是会话列表、`/runs` 是工人运行；两个都不碰模型。
+Send-Key 0x1B ([char]0x1B) 0
+Send-Text "/sessions"
+Send-Key 0x75 ([char]0) 0
+$sessionsScreen = Snapshot "sessions"
+$checks.sessions_dialog = $sessionsScreen.Contains("会话（当前工作区）")
+Send-Key 0x1B ([char]0x1B) 0
+Send-Text "/runs"
+Send-Key 0x75 ([char]0) 0
+$runsScreen = Snapshot "runs"
+$checks.runs_dialog = $runsScreen.Contains("工人运行")
+Send-Key 0x1B ([char]0x1B) 0
+
+function Wait-Screen($needle, $seconds) {
+    for ($i = 0; $i -lt $seconds; $i++) {
+        $now = Screen
+        if ($now.Contains($needle)) { return $true }
+        if ($now.Contains("模型失败") -or $now.Contains("错误：")) { return $false }
+        Start-Sleep -Seconds 1
+    }
+    return $false
 }
 
 if ($Submit) {
-    # 真发一条；只等「运行已结束」，不等「屏幕里出现 OK」——草稿里本来就有 OK。
     Send-Key 0x1B ([char]0x1B) 0
-    Send-Text "say OK"
+    Send-Text "7 乘以 6 等于多少？只回复阿拉伯数字"
     Send-Key 0x75 ([char]0) 0
-    $settled = $false
-    for ($i = 0; $i -lt 120; $i++) {
-        Start-Sleep -Seconds 2
-        $now = Screen
-        if ($now.Contains("运行已结束")) { $settled = $true; break }
-        if ($now.Contains("运行退出") -or $now.Contains("失败")) { $settled = $true; break }
-    }
-    $final = Snapshot "submit"
-    $checks.submit_settled = $settled
-    $checks.submit_has_ok = $final.Contains("OK")
-    $checks.submit_has_error = $final.Contains("运行退出") -or $final.Contains("失败")
+    $checks.turn1_answer_42 = Wait-Screen "42" 120
+    [void](Snapshot "turn1")
+    Start-Sleep -Seconds 2
+    Send-Text "再加 1 呢？只回复阿拉伯数字"
+    Send-Key 0x75 ([char]0) 0
+    $checks.turn2_answer_43 = Wait-Screen "43" 120
+    $final = Snapshot "turn2"
+    $checks.submit_has_error = $final.Contains("模型失败") -or $final.Contains("错误：")
 }
 
 if ($Cancel) {
-    # Start a run, then Esc while it is still starting; the run should end cancelled.
+    # 一条要写很久的；Esc 取消这一轮，界面上要看得到「已取消」，输入区还能用。
     Send-Key 0x1B ([char]0x1B) 0
-    Send-Text "say OK"
+    Send-Key 0x1B ([char]0x1B) 0
+    # 要足够长：flash 6 秒内就能数完 300（实测），那时 Esc 已经没有进行中的一轮可取消。
+    Send-Text "从 1 数到 5000，每行一个数字，不要省略"
     Send-Key 0x75 ([char]0) 0
-    Start-Sleep -Seconds 3
+    Start-Sleep -Seconds 2
     Send-Key 0x1B ([char]0x1B) 0
-    $cancelSettled = $false
-    for ($i = 0; $i -lt 60; $i++) {
-        Start-Sleep -Seconds 2
-        $now = Screen
-        if ($now.Contains("运行已结束") -or $now.Contains("取消")) { $cancelSettled = $true; break }
-    }
-    $finalCancel = Snapshot "cancel"
-    $checks.cancel_settled = $cancelSettled
-    $checks.cancel_screen = $finalCancel.Contains("取消")
-    $newest = Get-ChildItem (Join-Path $env:LOCALAPPDATA "arcdeck\\state\\runs") -Directory -ErrorAction SilentlyContinue |
-        Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if ($newest) {
-        $status = Get-Content (Join-Path $newest.FullName "status.json") -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
-        if ($status) { $checks.cancel_run_state = $status.state }
-    }
+    $checks.cancel_shown = Wait-Screen "已取消" 60
+    [void](Snapshot "cancel")
+    Send-Text "still here"
+    $checks.composer_usable_after_cancel = (Screen).Contains("still here")
+}
+
+if ($Resume) {
+    # 跨进程恢复：会话列表的第一行是最近的那个（上一次 -Cancel 留下的），打开后历史要回来。
+    Send-Key 0x1B ([char]0x1B) 0
+    Send-Text "/sessions"
+    Send-Key 0x75 ([char]0) 0
+    Start-Sleep -Seconds 2
+    Send-Key 0x0D ([char]0x0D) 0
+    $checks.resume_history = Wait-Screen "数到 5000" 30
+    $checks.resume_shows_cancelled = (Screen).Contains("已取消")
+    [void](Snapshot "resume")
 }
 
 # Ctrl+C quits (and cancels an active run); the supervisor may take a while to clean up.
 Send-Key 0x43 ([char]3) 8
 for ($i = 0; $i -lt 20 -and -not $process.HasExited; $i++) { Start-Sleep -Seconds 1 }
 $checks.quit = $process.HasExited
+# 交互内核是 TUI 拉起的 node 子进程：退出后不该留下（参 AGENTS 的 Windows 进程规则）。
+Start-Sleep -Seconds 2
+$kernels = @(Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine.Contains("--profile web") -and $_.CommandLine.Contains("arcdeck") })
+$checks.no_kernel_left = ($kernels.Count -eq 0)
 
 $checks | ConvertTo-Json | Tee-Object -FilePath $Log -Append
+} finally {
+    if (-not $process.HasExited) { & taskkill /PID $process.Id /T /F | Out-Null }
+}
 
 [void][Probe]::CloseHandle($out)
 [void][Probe]::CloseHandle($in)

@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use arc_deck_core::conversation::{Conversation, Message, ModelCatalog, ModelChoice, SessionSummary};
+use arc_deck_core::service::{self, BackendState, Command, NoticeLevel};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 
 use crate::autocomplete::{self, Autocomplete};
@@ -22,6 +24,7 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Dialog {
     Commands,
+    Sessions,
     Runs,
     Agents,
     Permissions,
@@ -90,6 +93,14 @@ pub(crate) struct App {
     pub notice: String,
     pub dirty: bool,
     serial: u64,
+    /// 交互内核的状态。`Failed` 时提交退回独立运行（headless 那条路），界面说清楚为什么。
+    pub backend: BackendState,
+    /// 当前会话。`None` 且 `pending` 有值 = 新会话正在建。
+    pub session_id: Option<String>,
+    pub conversation: Option<Conversation>,
+    /// 已发出、还没在会话视图里出现的那条（乐观回显）。看到同样的用户消息就清掉。
+    pub pending: Option<String>,
+    pub sessions: Vec<SessionSummary>,
 }
 
 impl App {
@@ -110,7 +121,11 @@ impl App {
             .clone()
             .or(theme_notice)
             .or(keymap_notice)
-            .unwrap_or_else(|| "每次提交是独立请求；多轮会话正在接入；/help 查看键位".into());
+            .unwrap_or_else(|| "交互内核启动中；可以先输入；/help 查看键位".into());
+        let backend = match &boot.config_error {
+            Some(reason) => BackendState::Failed { reason: reason.clone() },
+            None => BackendState::Starting,
+        };
         // History lives in the preferences file, so it has to be seeded into the editor at
         // startup and written back on exit; the cap keeps the file from growing without bound.
         let mut editor = Editor::default();
@@ -148,6 +163,123 @@ impl App {
             expanded: HashMap::new(),
             dirty: true,
             serial: 0,
+            backend,
+            session_id: None,
+            conversation: None,
+            pending: None,
+            sessions: Vec::new(),
+        }
+    }
+
+    /// 主区显示会话（而不是 Home 或工人运行详情）。
+    pub fn in_conversation(&self) -> bool {
+        self.session_id.is_some() || self.pending.is_some()
+    }
+
+    /// 交互会话能不能用。`Starting` 也算：命令会在服务的队列里等内核就绪。
+    fn sessions_usable(&self) -> bool {
+        matches!(self.backend, BackendState::Starting | BackendState::Ready { .. })
+    }
+
+    fn conversation_running(&self) -> bool {
+        self.conversation.as_ref().is_some_and(|c| c.running)
+    }
+
+    /// 当前工作区里的会话（不含子 agent 会话与空会话），按搜索串过滤。
+    pub fn filtered_sessions(&self) -> Vec<&SessionSummary> {
+        let workspace = normalize_path(&self.boot.workspace.display().to_string());
+        let query = self.filter.to_lowercase();
+        self.sessions
+            .iter()
+            .filter(|s| s.parent_session_id.is_none() && !s.blank)
+            .filter(|s| s.cwd.as_deref().map(normalize_path).as_deref() == Some(workspace.as_str()))
+            .filter(|s| {
+                query.is_empty()
+                    || format!("{} {}", s.title.as_deref().unwrap_or(""), s.session_id)
+                        .to_lowercase()
+                        .contains(&query)
+            })
+            .collect()
+    }
+
+    fn session_event(&mut self, event: service::Event) {
+        use service::Event as E;
+        match event {
+            E::Backend { state } => {
+                match &state {
+                    BackendState::Ready { model } => {
+                        // 配置里的路由用的是**用户的** provider id（`deepseek`），内核目录里是 DSH 的
+                        // 路由名（`deepseek-official`）。用户还没动过模型时换成内核的说法，否则第一次
+                        // selectModel 就会被拒。
+                        let untouched = self.model.as_ref().map(ModelRef::route) == self.boot.model;
+                        if untouched && let Some(choice) = model {
+                            self.model = Some(ModelRef {
+                                provider_id: choice.provider.clone(),
+                                model_id: choice.model.clone(),
+                            });
+                        }
+                        self.notice = "交互内核就绪：同一会话可以多轮继续；/sessions 打开以前的会话".into();
+                    }
+                    BackendState::Failed { reason } => {
+                        self.notice = format!("交互会话不可用（{}）；提交改为独立请求", first_line(reason));
+                        // 新会话还没建好就失败：那条消息没有去处，放回输入框而不是吞掉。
+                        if self.session_id.is_none()
+                            && let Some(text) = self.pending.take()
+                        {
+                            self.editor.set_text(text);
+                        }
+                    }
+                    BackendState::Stopped if self.session_id.is_some() => {
+                        self.notice = "交互内核已停止".into();
+                    }
+                    _ => {}
+                }
+                self.backend = state;
+            }
+            E::Sessions { sessions } => {
+                self.sessions = sessions;
+                self.choice = self.choice.min(self.selection_count().saturating_sub(1));
+            }
+            E::Catalog { catalog } => {
+                if !catalog.failures.is_empty() {
+                    let names: Vec<&str> = catalog.failures.iter().map(|f| f.name.as_str()).collect();
+                    self.notice = format!("这些 provider 的模型目录读取失败：{}", names.join("、"));
+                }
+                let providers = catalog_from_kernel(&catalog);
+                if !providers.is_empty() {
+                    self.boot.catalog = providers;
+                }
+            }
+            E::SessionStarted { session_id } => {
+                if self.session_id.is_none() && self.pending.is_some() {
+                    self.session_id = Some(session_id);
+                }
+            }
+            E::Conversation { conversation } => {
+                if self.session_id.as_deref() == Some(conversation.session_id.as_str()) {
+                    if let Some(text) = &self.pending
+                        && conversation
+                            .messages
+                            .iter()
+                            .any(|m| matches!(m, Message::User(u) if u.text.trim() == text.trim()))
+                    {
+                        self.pending = None;
+                    }
+                    self.conversation = Some(*conversation);
+                }
+            }
+            E::SessionClosed { session_id, reason } => {
+                if self.session_id.as_deref() == Some(session_id.as_str()) {
+                    self.notice = format!("会话订阅已结束：{}", first_line(&reason));
+                }
+            }
+            E::Notice { level, text } => {
+                self.notice = match level {
+                    NoticeLevel::Error => format!("错误：{text}"),
+                    _ => text,
+                };
+            }
+            E::Welcome { .. } | E::Unknown => {}
         }
     }
 
@@ -197,6 +329,10 @@ impl App {
             }
             Update::Notice(text) => {
                 self.notice = text;
+                self.dirty = true;
+            }
+            Update::Session(event) => {
+                self.session_event(event);
                 self.dirty = true;
             }
             _ => {}
@@ -255,6 +391,7 @@ impl App {
     fn selection_count(&self) -> usize {
         match &self.dialog {
             Some(Dialog::Commands) => self.filtered_commands().len(),
+            Some(Dialog::Sessions) => self.filtered_sessions().len(),
             Some(Dialog::Runs) => self.filtered_runs().len(),
             Some(Dialog::Agents) => 3,
             Some(Dialog::Permissions) => commands::PERMISSIONS.len(),
@@ -278,11 +415,20 @@ impl App {
         match action {
             // `/new` clears the view; it does not cancel or queue anything, so it stays
             // available while a run is active (the submit path is what refuses a second one).
-            Action::Cancel if !self.has_running() => Some("当前没有活动运行".to_string()),
+            Action::Cancel if !self.has_running() => Some("当前没有进行中的一轮".to_string()),
+            Action::Rename if self.session_id.is_none() => {
+                Some("还没有会话；先发一条消息，或用 /sessions 打开一个".to_string())
+            }
+            Action::Evidence if self.in_conversation() => {
+                Some("证据目录只属于工人运行（/runs）；交互会话的日志在 DSH home 里".to_string())
+            }
             Action::Usage | Action::Evidence | Action::Tools | Action::Latest
-                if self.detail.is_none() =>
+                if self.detail.is_none() && !self.in_conversation() =>
             {
-                Some("先选择一条运行记录（/sessions）".to_string())
+                Some("先开始一个会话，或在 /runs 里选一条工人运行".to_string())
+            }
+            Action::Permission if self.conversation_running() => {
+                Some("这一轮还在进行；先取消或等它结束，再修改授权（要重启交互内核）".to_string())
             }
             Action::Effort | Action::CycleEffort if self.active.is_some() => {
                 Some("当前请求的模型强度已固定，请等它结束".to_string())
@@ -303,7 +449,7 @@ impl App {
         }
     }
     fn has_running(&self) -> bool {
-        self.selected_is_running() || self.active.is_some()
+        self.selected_is_running() || self.active.is_some() || self.conversation_running()
     }
     /// Keymap focus. Provider/effort are steps inside the model flow but do not carry the
     /// model dialog's Ctrl+F/Ctrl+A, so they count as "other".
@@ -324,7 +470,7 @@ impl App {
             return false;
         }
         let arg = arg.map(str::trim).filter(|arg| !arg.is_empty());
-        if arg.is_some() && !matches!(action, Action::Effort | Action::Permission) {
+        if arg.is_some() && !matches!(action, Action::Effort | Action::Permission | Action::Rename) {
             let entry = commands::entry(action);
             self.notice = format!(
                 "{} 不接受参数；Ctrl+P 查看命令用法",
@@ -338,12 +484,34 @@ impl App {
                 self.selected = None;
                 self.detail = None;
                 self.scroll = None;
+                if let Some(id) = self.session_id.take() {
+                    let _ = requests.send(Request::Session(Command::CloseSession { session_id: id }));
+                }
+                self.conversation = None;
+                self.pending = None;
                 // A new request is a new session boundary: a completion popup left over from
                 // the previous prompt would insert text that no longer starts a command.
                 self.autocomplete = None;
                 let _ = requests.send(Request::Open(None));
             }
             Action::Runs => self.open_dialog(Dialog::Runs),
+            Action::Sessions => {
+                if !self.sessions_usable() {
+                    self.notice = "交互会话不可用；工人运行在 /runs".into();
+                } else {
+                    let _ = requests.send(Request::Session(Command::ListSessions));
+                    self.open_dialog(Dialog::Sessions);
+                }
+            }
+            Action::Rename => match (arg, &self.session_id) {
+                (Some(title), Some(id)) => {
+                    let _ = requests.send(Request::Session(Command::Rename {
+                        session_id: id.clone(),
+                        title: title.to_string(),
+                    }));
+                }
+                _ => self.notice = "用法：/rename <新标题>".into(),
+            },
             Action::Agents => self.open_dialog(Dialog::Agents),
             Action::Models => self.open_dialog(Dialog::Models(ModelDialogState::default())),
             Action::Effort => match arg {
@@ -352,7 +520,7 @@ impl App {
             },
             Action::CycleEffort => self.cycle_effort(),
             Action::Permission => match arg {
-                Some(arg) => self.set_permission(arg),
+                Some(arg) => self.set_permission(arg, requests),
                 None => {
                     self.open_dialog(Dialog::Permissions);
                     self.choice = commands::PERMISSIONS
@@ -374,6 +542,12 @@ impl App {
             Action::Sidebar => {
                 self.preferences.sidebar = !self.preferences.sidebar;
                 self.sidebar_overlay = self.preferences.sidebar;
+            }
+            Action::Tools if self.in_conversation() => {
+                let key = format!("session:{}", self.session_id.clone().unwrap_or_default());
+                let open = self.expanded.entry(key).or_default();
+                *open = !*open;
+                self.notice = if *open { "已展开思考与工具输出".into() } else { "已折叠思考与工具输出".into() };
             }
             Action::Tools => {
                 if let Some(id) = &self.selected {
@@ -400,6 +574,12 @@ impl App {
                 self.open_dialog(Dialog::Help);
                 self.help_scroll = 0;
             }
+            Action::Cancel if self.conversation_running() => {
+                if let Some(id) = &self.session_id {
+                    let _ = requests.send(Request::Session(Command::Cancel { session_id: id.clone() }));
+                    self.notice = "已请求取消这一轮".into();
+                }
+            }
             Action::Cancel => {
                 if let Some(id) = self
                     .selected
@@ -412,6 +592,26 @@ impl App {
                 } else {
                     self.notice = "当前没有活动运行".into();
                 }
+            }
+            Action::Usage if self.in_conversation() => {
+                let mut total = arc_deck_core::conversation::TokenUsage::default();
+                for message in self.conversation.iter().flat_map(|c| &c.messages) {
+                    if let Message::Assistant(turn) = message
+                        && let Some(usage) = &turn.usage
+                    {
+                        total.add(usage);
+                    }
+                }
+                self.notice = if total.input.is_none() && total.output.is_none() {
+                    "provider 尚未报告用量".into()
+                } else {
+                    format!(
+                        "本会话合计：输入 {} · 缓存 {} · 输出 {} token（provider 实报）",
+                        token(total.input),
+                        token(total.cache_read),
+                        token(total.output)
+                    )
+                };
             }
             Action::Usage => {
                 self.notice = self
@@ -457,17 +657,27 @@ impl App {
         }
         false
     }
-    fn set_permission(&mut self, arg: &str) {
+    fn set_permission(&mut self, arg: &str, requests: &Sender<Request>) {
         match arg {
-            "workspace" | "full" => {
+            "readonly" | "workspace" | "full" => {
+                if self.permission == arg {
+                    self.notice = format!("授权级别已经是 {arg}");
+                    return;
+                }
                 self.permission = arg.into();
-                self.notice = format!("下一次独立请求的授权级别：{arg}");
+                if self.sessions_usable() {
+                    // 授权级别落在交互内核的启动参数里（沙箱档 + 预设表），只能重启内核。
+                    // 会话在独立的 DSH home 里，重启后桥会把当前会话重新打开。
+                    let _ = requests.send(Request::RestartBackend { permission: arg.into() });
+                    self.backend = BackendState::Starting;
+                    self.notice = format!("授权级别改为 {arg}：交互内核重启中，当前会话会自动重新打开");
+                } else {
+                    self.notice = format!("下一次独立请求的授权级别：{arg}");
+                }
             }
-            "readonly" => self.notice = commands::READONLY_REASON.into(),
+            "confirm" => self.notice = commands::CONFIRM_REASON.into(),
             other => {
-                self.notice = format!(
-                    "未知授权级别 `{other}`；支持 readonly / workspace / full（readonly 尚未接通）"
-                )
+                self.notice = format!("未知授权级别 `{other}`；支持 readonly / workspace / full")
             }
         }
     }
@@ -662,6 +872,9 @@ impl App {
                 }
             };
         }
+        if self.boot.config_error.is_none() && self.sessions_usable() {
+            return self.submit_to_session(requests);
+        }
         if self.active.is_some() {
             self.notice = "已有活动运行；Esc 取消，结束后可发起新请求".into();
             return false;
@@ -706,6 +919,40 @@ impl App {
         self.notice = "正在启动独立请求；工具进度实时更新，正文在结束后显示".into();
         false
     }
+    /// 会话这条路：没有当前会话就由服务新建；运行中也能发（内核按 `queue` 排到下一轮）。
+    fn submit_to_session(&mut self, requests: &Sender<Request>) -> bool {
+        if self.session_id.is_none() && self.pending.is_some() {
+            self.notice = "上一条还在新建会话，请稍候".into();
+            return false;
+        }
+        let text = self.editor.take();
+        if let Some(model) = &self.model {
+            self.model_prefs.touch_recent(model);
+            self.model_prefs_dirty = true;
+        }
+        let model = self.model.as_ref().map(|m| ModelChoice {
+            provider: m.provider_id.clone(),
+            model: m.model_id.clone(),
+            effort: self.effort.clone(),
+        });
+        let queued = self.conversation_running();
+        let command = Command::Prompt { session_id: self.session_id.clone(), text: text.clone(), model };
+        if requests.send(Request::Session(command)).is_err() {
+            self.notice = "执行端已断开".into();
+            return false;
+        }
+        self.pending = Some(text);
+        self.selected = None;
+        self.detail = None;
+        self.scroll = None;
+        self.notice = match (&self.backend, queued) {
+            (BackendState::Starting, _) => "交互内核启动中，消息已排队".into(),
+            (_, true) => "这一轮还在进行，消息排到下一轮".into(),
+            _ => "已发送；Esc 取消这一轮".into(),
+        };
+        false
+    }
+
     fn select(&mut self, requests: &Sender<Request>) -> bool {
         // 克隆而不是借用：下面几个分支都要 &mut self（打开新对话框、改偏好）。
         match self.dialog.clone() {
@@ -718,8 +965,29 @@ impl App {
                     return self.execute(action, None, requests);
                 }
             }
+            Some(Dialog::Sessions) => {
+                if let Some(id) = self.filtered_sessions().get(self.choice).map(|s| s.session_id.clone()) {
+                    if let Some(old) = self.session_id.replace(id.clone())
+                        && old != id
+                    {
+                        let _ = requests.send(Request::Session(Command::CloseSession { session_id: old }));
+                    }
+                    self.conversation = None;
+                    self.pending = None;
+                    self.selected = None;
+                    self.detail = None;
+                    self.scroll = None;
+                    let _ = requests.send(Request::Session(Command::OpenSession { session_id: id }));
+                    self.dialog = None;
+                    self.notice = "正在打开会话（历史较长时要翻页）…".into();
+                }
+            }
             Some(Dialog::Runs) => {
                 if let Some(id) = self.filtered_runs().get(self.choice).map(|r| r.id.clone()) {
+                    // 看工人运行时离开会话视图（会话照常在后台订阅着，/sessions 能回去）。
+                    self.session_id = None;
+                    self.conversation = None;
+                    self.pending = None;
                     self.selected = Some(id.clone());
                     self.detail = None;
                     self.scroll = None;
@@ -758,9 +1026,8 @@ impl App {
                     match reason {
                         Some(reason) => self.notice = (*reason).into(),
                         None => {
-                            self.permission = (*name).into();
-                            self.notice = format!("下一次独立请求的授权级别：{name}");
                             self.dialog = None;
+                            self.set_permission(name, requests);
                         }
                     }
                 }
@@ -1297,6 +1564,37 @@ pub(crate) fn token(n: Option<u64>) -> String {
     n.map(|n| n.to_string()).unwrap_or_else(|| "未报告".into())
 }
 
+/// 路径比较用：大小写与分隔符不算差别（Windows 上 `C:\\ws` 与 `c:/ws` 是同一个目录）。
+fn normalize_path(path: &str) -> String {
+    path.replace('\\', "/").trim_end_matches('/').to_lowercase()
+}
+
+fn first_line(text: &str) -> &str {
+    text.lines().find(|line| !line.trim().is_empty()).unwrap_or(text)
+}
+
+/// 内核报告的目录 → 模型对话框的形状。权威来源是 DSH（§7.2）；没有的数据（发布日期、免费与否）留空，不编。
+fn catalog_from_kernel(catalog: &ModelCatalog) -> Vec<catalog::Provider> {
+    catalog
+        .providers
+        .iter()
+        .map(|provider| catalog::Provider {
+            id: provider.id.clone(),
+            name: provider.name.clone(),
+            models: provider
+                .models
+                .iter()
+                .map(|model| catalog::Model {
+                    id: model.id.clone(),
+                    name: Some(model.name.clone()).filter(|n| !n.is_empty()),
+                    efforts: model.efforts.iter().map(|e| e.id.clone()).collect(),
+                    ..catalog::Model::default()
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1524,6 +1822,7 @@ mod tests {
     #[test]
     fn selecting_a_model_without_efforts_closes_and_applies_to_the_next_request() {
         let mut app = model_dialog_app();
+        app.backend = BackendState::Failed { reason: "测试走独立请求那条路".into() };
         let (tx, rx) = mpsc::channel();
         // 搜索把候选缩到 "Model N"，省得依赖排序位置。
         type_text(&mut app, "Model N", &tx);
@@ -1544,6 +1843,7 @@ mod tests {
     #[test]
     fn request_carries_the_configured_route_even_before_the_dialog_is_used() {
         let mut app = app();
+        app.backend = BackendState::Failed { reason: "测试走独立请求那条路".into() };
         let (tx, rx) = mpsc::channel();
         app.editor.insert("跑一条");
         app.input(key(KeyCode::F(6)), &tx);
@@ -1556,6 +1856,7 @@ mod tests {
     #[test]
     fn selecting_a_model_with_efforts_opens_the_effort_dialog() {
         let mut app = model_dialog_app();
+        app.backend = BackendState::Failed { reason: "测试走独立请求那条路".into() };
         let (tx, rx) = mpsc::channel();
         type_text(&mut app, "Effort Model", &tx);
         app.input(key(KeyCode::Enter), &tx);
@@ -1775,6 +2076,7 @@ mod tests {
     #[test]
     fn request_is_independent_and_current_execution_cannot_be_reconfigured() {
         let mut app = app();
+        app.backend = BackendState::Failed { reason: "测试走独立请求那条路".into() };
         let (tx, rx) = mpsc::channel();
         app.editor.insert("第一条");
         app.input(key(KeyCode::F(6)), &tx);
@@ -1819,7 +2121,7 @@ mod tests {
     fn plan_and_confirm_do_not_pretend_to_be_supported() {
         let mut app = app();
         let (tx, rx) = mpsc::channel();
-        for cmd in ["/plan", "/permission confirm", "/permission readonly"] {
+        for cmd in ["/plan", "/permission confirm"] {
             app.editor.insert(cmd);
             app.input(key(KeyCode::F(6)), &tx);
             assert!(rx.try_recv().is_err());
@@ -2052,13 +2354,13 @@ mod tests {
     /// is the failure mode §7.4 calls out.
     #[test]
     fn unavailable_commands_report_their_reason_instead_of_doing_nothing() {
-        for (command, action) in [("/plan", Action::Plan), ("/permission readonly", Action::Permission)] {
+        for (command, action) in [("/plan", Action::Plan), ("/permission confirm", Action::Permission)] {
             let mut app = app();
             let (tx, _rx) = mpsc::channel();
             app.editor.insert(command);
             app.input(key(KeyCode::F(6)), &tx);
             let expected = app.availability(action).or_else(|| {
-                (action == Action::Permission).then(|| commands::READONLY_REASON.to_string())
+                (action == Action::Permission).then(|| commands::CONFIRM_REASON.to_string())
             });
             assert_eq!(
                 Some(app.notice.clone()),
@@ -2293,6 +2595,7 @@ mod tests {
     #[test]
     fn a_large_paste_is_summarized_and_expands_on_submit() {
         let mut app = self::app();
+        app.backend = BackendState::Failed { reason: "测试走独立请求那条路".into() };
         let (tx, rx) = mpsc::channel();
         let big = (0..10).map(|i| format!("行{i}\n")).collect::<String>();
         app.input(Event::Paste(big.clone()), &tx);
@@ -2338,5 +2641,199 @@ mod tests {
         assert_eq!(favorite.context, commands::Context::ModelDialog);
         // Every registry row is documented exactly once.
         assert_eq!(rows.len(), commands::ENTRIES.len());
+    }
+
+    // ── 交互会话（Remote）那条路 ──────────────────────────────────────────────
+
+    fn ready(app: &mut App) {
+        app.update(Update::Session(service::Event::Backend {
+            state: BackendState::Ready {
+                model: Some(ModelChoice { provider: "p".into(), model: "m".into(), effort: None }),
+            },
+        }));
+    }
+
+    fn conversation(id: &str, running: bool, messages: Vec<Message>) -> Update {
+        Update::Session(service::Event::Conversation {
+            conversation: Box::new(Conversation {
+                session_id: id.into(),
+                messages,
+                running,
+                history_complete: true,
+                ..Conversation::default()
+            }),
+        })
+    }
+
+    fn user(text: &str) -> Message {
+        Message::User(arc_deck_core::conversation::UserMessage { turn: 1, text: text.into(), ..Default::default() })
+    }
+
+    #[test]
+    fn a_prompt_goes_to_the_session_service_and_continues_the_same_session() {
+        let mut app = app();
+        ready(&mut app);
+        let (tx, rx) = mpsc::channel();
+        app.editor.insert("第一问");
+        app.input(key(KeyCode::F(6)), &tx);
+        let Request::Session(Command::Prompt { session_id, text, model }) = rx.recv().unwrap() else {
+            panic!("交互内核就绪时提交应当走会话")
+        };
+        assert_eq!(session_id, None, "没有当前会话：由服务新建");
+        assert_eq!(text, "第一问");
+        assert_eq!(model.map(|m| format!("{}/{}", m.provider, m.model)).as_deref(), Some("p/m"));
+        assert!(app.in_conversation(), "发出去之后立刻进会话视图（乐观回显）");
+        assert_eq!(app.pending.as_deref(), Some("第一问"));
+
+        // 新会话建好、视图里出现了这条：回显清掉。
+        app.update(Update::Session(service::Event::SessionStarted { session_id: "s1".into() }));
+        app.update(conversation("s1", true, vec![user("第一问")]));
+        assert_eq!(app.pending, None);
+        assert_eq!(app.session_id.as_deref(), Some("s1"));
+
+        // 运行中再发：同一个会话，内核排到下一轮。
+        app.editor.insert("第二问");
+        app.input(key(KeyCode::F(6)), &tx);
+        let Request::Session(Command::Prompt { session_id, .. }) = rx.recv().unwrap() else { panic!() };
+        assert_eq!(session_id.as_deref(), Some("s1"));
+        assert!(app.notice.contains("下一轮"), "{}", app.notice);
+    }
+
+    #[test]
+    fn escape_cancels_the_running_turn_of_the_current_session() {
+        let mut app = app();
+        ready(&mut app);
+        let (tx, rx) = mpsc::channel();
+        app.session_id = Some("s1".into());
+        app.update(conversation("s1", true, vec![user("hi")]));
+        app.input(key(KeyCode::Esc), &tx);
+        assert!(matches!(rx.recv().unwrap(), Request::Session(Command::Cancel { session_id }) if session_id == "s1"));
+        // 一轮结束之后 Esc 什么都不发。
+        app.update(conversation("s1", false, vec![user("hi")]));
+        app.input(key(KeyCode::Esc), &tx);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_kernel_that_fails_to_start_returns_the_draft_and_falls_back_to_independent_runs() {
+        let mut app = app();
+        let (tx, rx) = mpsc::channel();
+        app.editor.insert("还没起来就发了");
+        app.input(key(KeyCode::F(6)), &tx);
+        assert!(matches!(rx.recv().unwrap(), Request::Session(Command::Prompt { .. })));
+        app.update(Update::Session(service::Event::Backend {
+            state: BackendState::Failed { reason: "DSH 运行时未安装：先运行 `arcdeck runtime install`".into() },
+        }));
+        assert_eq!(app.editor.text, "还没起来就发了", "没有去处的消息要放回输入框，不能吞掉");
+        assert!(app.notice.contains("runtime install"), "{}", app.notice);
+        app.input(key(KeyCode::F(6)), &tx);
+        assert!(matches!(rx.recv().unwrap(), Request::Start(_)), "失败之后退回独立请求");
+    }
+
+    #[test]
+    fn changing_the_permission_restarts_the_kernel_and_readonly_is_selectable() {
+        let mut app = app();
+        ready(&mut app);
+        let (tx, rx) = mpsc::channel();
+        app.editor.insert("/permission readonly");
+        app.input(key(KeyCode::F(6)), &tx);
+        assert!(matches!(rx.recv().unwrap(), Request::RestartBackend { permission } if permission == "readonly"));
+        assert_eq!(app.permission, "readonly");
+        assert_eq!(app.backend, BackendState::Starting);
+        // 一轮进行中不能改：要重启内核，会打断它。
+        app.session_id = Some("s1".into());
+        app.update(conversation("s1", true, vec![]));
+        app.editor.insert("/permission full");
+        app.input(key(KeyCode::F(6)), &tx);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(app.permission, "readonly");
+    }
+
+    #[test]
+    fn the_session_list_shows_this_workspace_only_and_enter_opens_one() {
+        let mut app = app();
+        ready(&mut app);
+        let (tx, rx) = mpsc::channel();
+        let here = app.boot.workspace.display().to_string();
+        let row = |id: &str, cwd: &str, parent: Option<&str>| SessionSummary {
+            session_id: id.into(),
+            title: Some(format!("标题 {id}")),
+            cwd: Some(cwd.into()),
+            updated_at: 1,
+            parent_session_id: parent.map(str::to_string),
+            ..SessionSummary::default()
+        };
+        app.update(Update::Session(service::Event::Sessions {
+            sessions: vec![
+                row("mine", &here.to_uppercase(), None),
+                row("elsewhere", "/somewhere/else", None),
+                row("child", &here, Some("mine")),
+            ],
+        }));
+        app.editor.insert("/sessions");
+        app.input(key(KeyCode::F(6)), &tx);
+        assert!(matches!(rx.recv().unwrap(), Request::Session(Command::ListSessions)));
+        assert_eq!(app.dialog, Some(Dialog::Sessions));
+        let ids: Vec<&str> = app.filtered_sessions().iter().map(|s| s.session_id.as_str()).collect();
+        assert_eq!(ids, ["mine"], "别的目录与子 agent 会话不列");
+        app.input(key(KeyCode::Enter), &tx);
+        assert!(matches!(rx.recv().unwrap(), Request::Session(Command::OpenSession { session_id }) if session_id == "mine"));
+        assert_eq!(app.session_id.as_deref(), Some("mine"));
+        assert!(app.in_conversation());
+    }
+
+    #[test]
+    fn the_kernel_catalog_replaces_the_config_catalog_and_keeps_efforts() {
+        let mut app = app();
+        app.update(Update::Session(service::Event::Catalog {
+            catalog: ModelCatalog {
+                providers: vec![arc_deck_core::conversation::CatalogProvider {
+                    id: "opencode-go".into(),
+                    name: "OpenCode Go".into(),
+                    models: vec![arc_deck_core::conversation::CatalogModel {
+                        id: "deepseek-v4.1-flash".into(),
+                        name: "DeepSeek V4.1 Flash".into(),
+                        efforts: vec![arc_deck_core::conversation::CatalogEffort { id: "high".into(), ..Default::default() }],
+                        ..Default::default()
+                    }],
+                }],
+                ..ModelCatalog::default()
+            },
+        }));
+        assert_eq!(app.boot.catalog.len(), 1);
+        assert_eq!(app.boot.catalog[0].models[0].efforts, ["high"]);
+    }
+
+    #[test]
+    fn the_conversation_renders_folded_thinking_visible_failures_and_the_model_error() {
+        use arc_deck_core::conversation::{AssistantTurn, Block, TextPart, ToolCall, ToolStatus, TurnState};
+        let mut app = app();
+        ready(&mut app);
+        app.session_id = Some("s1".into());
+        let turn = AssistantTurn {
+            turn: 1,
+            blocks: vec![
+                Block::Reasoning(TextPart { text: "先想一想".into(), streaming: false, step: 1 }),
+                Block::Tool(ToolCall {
+                    call_id: "c1".into(),
+                    name: "write".into(),
+                    arguments: r#"{"path":"x.txt"}"#.into(),
+                    status: ToolStatus::Failed,
+                    output: Some("[sandbox: file access denied under read-only mode]".into()),
+                    ..ToolCall::default()
+                }),
+                Block::Text(TextPart { text: "写不了".into(), streaming: false, step: 2 }),
+            ],
+            state: TurnState::Failed { message: "Insufficient Balance".into(), code: Some("QUOTA".into()) },
+            ..AssistantTurn::default()
+        };
+        app.update(conversation("s1", false, vec![user("写个文件"), Message::Assistant(turn)]));
+        let text = buffer_text(&mut app, 120, 30);
+        assert!(text.contains("写个文件") && text.contains("写不了"), "{text}");
+        assert!(text.contains("思考 · 4 字"), "思考默认折叠：{text}");
+        assert!(!text.contains("先想一想"), "折叠时不显示思考原文：{text}");
+        assert!(text.contains("write x.txt · 失败"), "{text}");
+        assert!(text.contains("file access denied"), "失败在折叠态也要看得见：{text}");
+        assert!(text.contains("[QUOTA] Insufficient Balance"), "模型失败原文要到界面上（P3）：{text}");
     }
 }
