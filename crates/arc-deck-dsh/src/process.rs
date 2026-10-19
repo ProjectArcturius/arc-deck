@@ -37,6 +37,87 @@ pub struct RuntimeProcess {
     stderr: Option<ChildStderr>,
 }
 
+/// 组装一个运行时子进程的命令：标准流全接管、`kill_on_drop`、Unix 上自成进程组。
+///
+/// 单独一个函数是因为它有**两个**入口：直接 `spawn`，与需要平台 flags 的
+/// [`RuntimeProcess::spawn_no_window`]。组装的规矩只写这一份。
+fn configure_command(
+    program: &Path,
+    args: &[String],
+    env: &BTreeMap<String, String>,
+    cwd: Option<&Path>,
+    inherit_env: bool,
+) -> Command {
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    // 自成一个进程组，收尾时才能连子孙一起结束（Windows 用 taskkill /T）。
+    #[cfg(unix)]
+    command.process_group(0);
+    if inherit_env {
+        for (key, _) in std::env::vars_os() {
+            let k = key.to_string_lossy();
+            if k.starts_with("DSH_") || k.starts_with("ARCDECK_KEY_") {
+                command.env_remove(&key);
+            }
+        }
+    } else {
+        command.env_clear();
+        // PATH 与系统根目录不是秘密，但缺了它们连子进程都起不来。
+        for key in ["PATH", "SystemRoot", "windir", "TEMP", "TMP", "HOME", "USERPROFILE"] {
+            if let Ok(value) = std::env::var(key) {
+                command.env(key, value);
+            }
+        }
+    }
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    command
+}
+
+/// 这个 pid 现在有没有进程。拿不准时答 `true`（调用方据此拒绝而不是接管）。
+///
+/// 用系统命令而不是 FFI：调用频率极低（拿锁时一次），不值得为它在这个 crate 里开一块
+/// unsafe 表面。它**不能**区分 pid 复用 —— 用在「锁文件里的 pid 还活不活」这种
+/// 宁可多拒一次的判断上可以，用在收进程上不行（那里要 pid + 启动时刻，见 cli 的 status）。
+pub fn pid_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(true)
+    }
+    #[cfg(windows)]
+    {
+        let output = no_window(&mut std::process::Command::new("tasklist"))
+            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+            .stderr(Stdio::null())
+            .output();
+        match output {
+            // 找到时第二列是带引号的 pid；找不到时是一句本地化的「没有任务」提示。
+            Ok(out) => String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\"")),
+            Err(_) => true,
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
 /// 收尾结果。
 #[derive(Debug, Clone)]
 pub struct Termination {
@@ -115,39 +196,34 @@ impl RuntimeProcess {
         cwd: Option<&Path>,
         inherit_env: bool,
     ) -> std::io::Result<Self> {
-        let mut command = Command::new(program);
-        command
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        // 自成一个进程组，收尾时才能连子孙一起结束（Windows 用 taskkill /T）。
-        #[cfg(unix)]
-        command.process_group(0);
-        if inherit_env {
-            for (key, _) in std::env::vars_os() {
-                let k = key.to_string_lossy();
-                if k.starts_with("DSH_") || k.starts_with("ARCDECK_KEY_") {
-                    command.env_remove(&key);
-                }
-            }
-        } else {
-            command.env_clear();
-            // PATH 与系统根目录不是秘密，但缺了它们连子进程都起不来。
-            for key in ["PATH", "SystemRoot", "windir", "TEMP", "TMP", "HOME", "USERPROFILE"] {
-                if let Ok(value) = std::env::var(key) {
-                    command.env(key, value);
-                }
-            }
-        }
-        for (key, value) in env {
-            command.env(key, value);
-        }
-        if let Some(cwd) = cwd {
-            command.current_dir(cwd);
-        }
+        Self::spawn_prepared(configure_command(program, args, env, cwd, inherit_env))
+    }
 
+    /// 与 [`RuntimeProcess::spawn`] 相同，但给子进程补上平台 flags ——
+    /// **Windows 上是 `CREATE_NO_WINDOW`**。
+    ///
+    /// 为什么不给 `spawn` 直接加一个 bool：那个函数被 worker 的三条路径共用，
+    /// 加参数会把「不弹窗」变成每个调用点都要重新决定一次的事；而这里只有 web
+    /// 内核需要它（Remote 层是一个没有控制台的宿主，见 `no_window` 的注释）。
+    /// 组装的另一半仍然只有一份 [`configure_command`]，所以不会出现
+    /// 「一条路有 `kill_on_drop`、另一条忘了」这种分叉。
+    pub fn spawn_no_window(
+        program: &Path,
+        args: &[String],
+        env: &BTreeMap<String, String>,
+        cwd: Option<&Path>,
+        inherit_env: bool,
+    ) -> std::io::Result<Self> {
+        let mut command = configure_command(program, args, env, cwd, inherit_env);
+        // `no_window` 接的是 `std::process::Command`；tokio 的 Command 把它原样
+        // 包在里面，`as_std_mut` 就是那条缝 —— 于是这里不需要第二份 flags 逻辑。
+        #[cfg(windows)]
+        no_window(command.as_std_mut());
+        Self::spawn_prepared(command)
+    }
+
+    /// 接管一个已经配好的命令：三条标准流全部接管，`kill_on_drop`，Unix 上自成进程组。
+    fn spawn_prepared(mut command: Command) -> std::io::Result<Self> {
         let mut child = command.spawn()?;
         let stdin = child.stdin.take().expect("stdin 已 piped");
         let stdout = child.stdout.take().expect("stdout 已 piped");
@@ -208,6 +284,13 @@ impl RuntimeProcess {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pid_alive_sees_this_process_and_not_an_absurd_pid() {
+        // 交互会话目录的锁靠它判「写锁的进程还在不在」：误判成「不在」会让两个内核写同一份日志。
+        assert!(pid_alive(std::process::id()));
+        assert!(!pid_alive(4_294_967_294));
+    }
 
     /// 起一个自成一组的 `sleep`，并**立刻把它交给 init**。
     ///

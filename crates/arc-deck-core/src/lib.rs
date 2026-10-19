@@ -12,6 +12,7 @@
 pub mod agent;
 pub mod authz;
 pub mod config;
+pub mod conversation;
 pub mod error;
 pub mod event;
 pub mod failure;

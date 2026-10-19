@@ -8,6 +8,7 @@
 pub mod process;
 pub mod projection;
 pub mod protocol;
+pub mod remote;
 pub mod runtime;
 pub mod transport;
 

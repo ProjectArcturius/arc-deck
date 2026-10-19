@@ -110,6 +110,15 @@ pub struct PatchInput<'a> {
 /// 限制行的来源是 [`PatchInput::guard`]，映射表在 `docs/M3_GUARD.md`：
 /// 每一行都能对回表里的一格（包名 / 配置键 / 取值 / 保证范围）。
 pub fn render_patch(input: &PatchInput<'_>) -> String {
+    render_patch_with_routes(input, &[])
+}
+
+/// 与 [`render_patch`] 相同，另外把 `extra_routes` 也装进内核。
+///
+/// 交互会话要用：worker 的路由在 `initialize` 时钉死（§7.2），一份 patch 一条路由足够；
+/// 而交互内核里用户会在模型对话框里**跨 provider** 切换（`session/selectModel`），
+/// 内核只认 patch 里装过的适配器 —— 没装的 provider 在目录里根本不出现。
+pub fn render_patch_with_routes(input: &PatchInput<'_>, extra_routes: &[RouteSpec]) -> String {
     let mut rows: Vec<Value> = Vec::new();
     let guard = input.guard;
 
@@ -188,14 +197,34 @@ pub fn render_patch(input: &PatchInput<'_>) -> String {
         "config": { "personaPrefix": "", "personaSuffix": escape_template(input.persona_suffix) },
     }));
 
-    let route = input.route;
-    if route.adapter == arc_deck_core::provider::DEEPSEEK_OFFICIAL_ROUTE {
-        let mut config = json!({ "apiKeyEnv": route.key_env });
-        if let Some(base) = &route.base_url {
-            config["baseURL"] = json!(base);
+    rows.extend(llm_rows(std::iter::once(input.route).chain(extra_routes.iter())));
+    serde_json::to_string_pretty(&Value::Array(rows)).unwrap_or_default()
+}
+
+/// 模型适配器行。
+///
+/// **pi-ai 的所有 provider 必须并进同一行**：patch 对目标行是整块替换 `config`、不做深合并，
+/// 分成两行写，后一行会把前一行的 provider 整个盖掉。同名 provider 只取第一次出现的。
+fn llm_rows<'a>(routes: impl Iterator<Item = &'a RouteSpec>) -> Vec<Value> {
+    let mut rows = Vec::new();
+    let mut official_done = false;
+    let mut pi_providers = serde_json::Map::new();
+    for route in routes {
+        if route.adapter == arc_deck_core::provider::DEEPSEEK_OFFICIAL_ROUTE {
+            if official_done {
+                continue;
+            }
+            official_done = true;
+            let mut config = json!({ "apiKeyEnv": route.key_env });
+            if let Some(base) = &route.base_url {
+                config["baseURL"] = json!(base);
+            }
+            rows.push(json!({ "id": "llm-deepseek", "config": config }));
+            continue;
         }
-        rows.push(json!({ "id": "llm-deepseek", "config": config }));
-    } else {
+        if pi_providers.contains_key(&route.provider_id) {
+            continue;
+        }
         let mut provider = json!({ "apiKeyEnv": route.key_env });
         if let Some(name) = &route.display_name {
             provider["displayName"] = json!(name);
@@ -224,12 +253,15 @@ pub fn render_patch(input: &PatchInput<'_>) -> String {
             })
             .collect();
         provider["models"] = Value::Array(models);
+        pi_providers.insert(route.provider_id.clone(), provider);
+    }
+    if !pi_providers.is_empty() {
         rows.push(json!({
             "id": "llm-pi-ai",
-            "config": { "providers": { route.provider_id.clone(): provider } },
+            "config": { "providers": Value::Object(pi_providers) },
         }));
     }
-    serde_json::to_string_pretty(&Value::Array(rows)).unwrap_or_default()
+    rows
 }
 
 /// persona 模板会插值 `{{变量}}`，未定义的变量让整次组装失败（dsh-system-prompt README）。
