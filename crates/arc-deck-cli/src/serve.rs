@@ -194,21 +194,17 @@ pub(crate) async fn cmd_serve(argv: &[String]) -> Result<i32, SpecError> {
         }
     });
     let commands = handle.commands.clone();
-    loop {
-        match lines.next_line().await {
-            Ok(Some(line)) => match decode(&line) {
-                Line::Blank => {}
-                Line::Command(Command::Shutdown) => break,
-                Line::Command(Command::Hello { .. }) => {}
-                Line::Command(command) => {
-                    let _ = commands.send(command);
-                }
-                Line::Bad(notice) => {
-                    let _ = out_tx.send(notice);
-                }
-            },
-            // stdin EOF = 前端走了：收掉后端（stdio 模式下后端只属于它）。
-            _ => break,
+    // stdin EOF（或读错）= 前端走了：收掉后端（stdio 模式下后端只属于它）。
+    while let Ok(Some(line)) = lines.next_line().await {
+        match decode(&line) {
+            Line::Blank | Line::Command(Command::Hello { .. }) => {}
+            Line::Command(Command::Shutdown) => break,
+            Line::Command(command) => {
+                let _ = commands.send(command);
+            }
+            Line::Bad(notice) => {
+                let _ = out_tx.send(notice);
+            }
         }
     }
     let _ = commands.send(Command::Shutdown);
