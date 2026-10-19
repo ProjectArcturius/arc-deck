@@ -1,10 +1,14 @@
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 
+use crate::autocomplete::{self, Autocomplete};
 use crate::catalog::{self, ModelPrefs, ModelRef};
+use crate::commands::{self, Action, Category, Entry};
+use crate::keymap::{self, Focus, Keymap};
+use crate::files::FileIndex;
 use crate::model_dialog::{self, EffortDialogState, ModelDialogState, ProviderDialogState};
 use crate::{
     Boot, Preferences, Request, RunDetail, RunRecord, StartRequest, Update,
@@ -13,98 +17,6 @@ use crate::{
     theme_dialog::{ThemeDialog, ThemeDialogAction},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Action {
-    New,
-    Runs,
-    Agents,
-    Models,
-    Sidebar,
-    Tools,
-    Latest,
-    Theme,
-    Mode,
-    Cancel,
-    Usage,
-    Evidence,
-    Quit,
-}
-
-pub(crate) struct Command {
-    pub action: Action,
-    pub slash: &'static str,
-    pub label: &'static str,
-}
-
-// Keyboard and slash dispatch share this registry, so labels cannot drift from actions.
-pub(crate) const COMMANDS: &[Command] = &[
-    Command {
-        action: Action::New,
-        slash: "/new",
-        label: "新的独立请求",
-    },
-    Command {
-        action: Action::Runs,
-        slash: "/sessions",
-        label: "运行历史（当前工作区）",
-    },
-    Command {
-        action: Action::Agents,
-        slash: "/agents",
-        label: "选择 Agent",
-    },
-    Command {
-        action: Action::Models,
-        slash: "/models",
-        label: "选择模型（下一次请求生效）",
-    },
-    Command {
-        action: Action::Sidebar,
-        slash: "/sidebar",
-        label: "切换信息栏",
-    },
-    Command {
-        action: Action::Tools,
-        slash: "/tools",
-        label: "展开 / 折叠工具记录",
-    },
-    Command {
-        action: Action::Latest,
-        slash: "/latest",
-        label: "回到最新",
-    },
-    Command {
-        action: Action::Theme,
-        slash: "/theme",
-        label: "选择主题",
-    },
-    Command {
-        action: Action::Mode,
-        slash: "/mode",
-        label: "切换深 / 浅色",
-    },
-    Command {
-        action: Action::Cancel,
-        slash: "/cancel",
-        label: "取消当前运行",
-    },
-    Command {
-        action: Action::Usage,
-        slash: "/usage",
-        label: "查看 provider 报告的用量",
-    },
-    Command {
-        action: Action::Evidence,
-        slash: "/evidence",
-        label: "查看完整证据位置",
-    },
-    Command {
-        action: Action::Quit,
-        slash: "/exit",
-        label: "退出（取消本次 TUI 发起的活动）",
-    },
-];
-
 /// 弹层。带状态的那几个（模型 / provider / effort）的渲染与选择规则都在
 /// `model_dialog` 里，这里只保留「当前开着哪个」。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,10 +24,23 @@ pub(crate) enum Dialog {
     Commands,
     Runs,
     Agents,
+    Permissions,
+    Help,
     Models(ModelDialogState),
     Providers(ProviderDialogState),
     Efforts(EffortDialogState),
     Theme,
+}
+
+/// One `/help` row: the chord(s) the keymap actually binds, the registry title, where the
+/// binding applies, and why the action cannot run in this build (`None` when it can).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HelpRow {
+    pub category: Category,
+    pub keys: String,
+    pub title: String,
+    pub context: commands::Context,
+    pub reason: Option<String>,
 }
 
 pub(crate) struct App {
@@ -143,7 +68,21 @@ pub(crate) struct App {
     pub theme_dialog: Option<ThemeDialog>,
     pub filter: String,
     pub choice: usize,
-    pub leader: bool,
+    /// Parsed defaults plus the user's `keybinds.json`. Every key the composer reacts to comes
+    /// from here, so the help page and the footer cannot disagree with what actually fires.
+    pub keymap: Keymap,
+    /// Completion popup over the composer; `None` when there is nothing to complete.
+    pub autocomplete: Option<Autocomplete>,
+    /// Set while the leader chord is waiting for its second key. A deadline, not a bool: a
+    /// forgotten leader that never expired would swallow the next unrelated keystroke.
+    leader_until: Option<Instant>,
+    /// Workspace file list for `@` references. Loaded lazily on the first `@` — a `git ls-files`
+    /// on every keystroke would make the popup feel broken in a large repository.
+    pub files: FileIndex,
+    /// Set by the editor action; `run` owns the terminal and performs the suspend/resume.
+    pending_editor: bool,
+    /// First visible help row. Help is longer than a 40×12 terminal allows, so it scrolls.
+    pub help_scroll: usize,
     pub scroll: Option<usize>,
     pub scroll_max: usize,
     pub sidebar_overlay: bool,
@@ -163,18 +102,27 @@ impl App {
             .as_ref()
             .and_then(|model| model_prefs.effort(model).map(str::to_string))
             .or_else(|| boot.effort.clone());
+        // `keybinds.json` 是手改的文件：写坏了要报出来并回退默认，不能因此起不来。
+        let keymap = Keymap::load(&boot.preferences);
+        let keymap_notice = (!keymap.warnings().is_empty()).then(|| keymap.warnings().join("；"));
         let notice = boot
             .config_error
             .clone()
             .or(theme_notice)
-            .unwrap_or_else(|| "每次提交是独立请求；多轮会话正在接入".into());
+            .or(keymap_notice)
+            .unwrap_or_else(|| "每次提交是独立请求；多轮会话正在接入；/help 查看键位".into());
+        // History lives in the preferences file, so it has to be seeded into the editor at
+        // startup and written back on exit; the cap keeps the file from growing without bound.
+        let mut editor = Editor::default();
+        let keep = preferences.history.len().saturating_sub(200);
+        editor.history = preferences.history[keep..].to_vec();
         Self {
             notice,
             effort,
             boot,
             preferences,
             theme,
-            editor: Editor::default(),
+            editor,
             runs: Vec::new(),
             selected: None,
             detail: None,
@@ -188,7 +136,12 @@ impl App {
             theme_dialog: None,
             filter: String::new(),
             choice: 0,
-            leader: false,
+            keymap,
+            autocomplete: None,
+            leader_until: None,
+            files: FileIndex::default(),
+            pending_editor: false,
+            help_scroll: 0,
             scroll: None,
             scroll_max: 0,
             sidebar_overlay: false,
@@ -249,14 +202,16 @@ impl App {
             _ => {}
         }
     }
-    pub fn filtered_commands(&self) -> Vec<&'static Command> {
-        let query = self.filter.to_lowercase();
-        COMMANDS
-            .iter()
-            .filter(|c| {
-                format!("{} {}", c.slash, c.label)
-                    .to_lowercase()
-                    .contains(&query)
+    /// Palette rows, in registry order so the category headers the view draws stay grouped.
+    /// Filtering is fuzzy but does not reorder: a search that reshuffles groups makes the
+    /// headers meaningless.
+    pub fn filtered_commands(&self) -> Vec<&'static Entry> {
+        let query = self.filter.trim().to_lowercase();
+        commands::palette_entries()
+            .filter(|entry| {
+                query.is_empty()
+                    || autocomplete::fuzzy(&query, entry.slash.unwrap_or(entry.id)).is_some()
+                    || autocomplete::fuzzy(&query, entry.title).is_some()
             })
             .collect()
     }
@@ -272,11 +227,21 @@ impl App {
             .collect()
     }
     pub fn open_dialog(&mut self, dialog: Dialog) {
+        // Leaving the theme picker by any route other than Enter must undo its live preview,
+        // exactly like Esc does. Ctrl+P from inside the picker used to leave the preview
+        // applied but unconfirmed, which looked like a saved theme after a restart.
+        if dialog != Dialog::Theme
+            && let Some(open) = self.theme_dialog.take()
+        {
+            let action = open.restore();
+            self.apply_theme_dialog_action(action);
+        }
         // `Dialog` 带着模型对话框的状态，不是 Copy：先记下是不是主题选择器再移进去。
         let is_theme = dialog == Dialog::Theme;
         self.dialog = Some(dialog);
         self.filter.clear();
         self.choice = 0;
+        self.autocomplete = None;
         // The picker snapshots the current theme on open so Esc can put it back; a stale
         // snapshot from a previous open would restore the wrong theme.
         self.theme_dialog = is_theme.then(|| ThemeDialog::open(self));
@@ -292,6 +257,9 @@ impl App {
             Some(Dialog::Commands) => self.filtered_commands().len(),
             Some(Dialog::Runs) => self.filtered_runs().len(),
             Some(Dialog::Agents) => 3,
+            Some(Dialog::Permissions) => commands::PERMISSIONS.len(),
+            // Help scrolls instead of selecting; non-zero keeps the generic clamp harmless.
+            Some(Dialog::Help) => 1,
             Some(Dialog::Models(state)) => self.model_rows(*state).len(),
             Some(Dialog::Providers(_)) => self.provider_rows().len(),
             Some(Dialog::Efforts(_)) => self.effort_count(),
@@ -300,6 +268,287 @@ impl App {
             Some(Dialog::Theme) => 1,
             None => 0,
         }
+    }
+    /// The state-dependent half of availability. `Entry::unavailable` covers what this build
+    /// cannot do at all; this covers what cannot be done *right now*.
+    pub(crate) fn availability(&self, action: Action) -> Option<String> {
+        if let Some(reason) = commands::entry(action).unavailable {
+            return Some(reason.to_string());
+        }
+        match action {
+            // `/new` clears the view; it does not cancel or queue anything, so it stays
+            // available while a run is active (the submit path is what refuses a second one).
+            Action::Cancel if !self.has_running() => Some("当前没有活动运行".to_string()),
+            Action::Usage | Action::Evidence | Action::Tools | Action::Latest
+                if self.detail.is_none() =>
+            {
+                Some("先选择一条运行记录（/sessions）".to_string())
+            }
+            Action::Effort | Action::CycleEffort if self.active.is_some() => {
+                Some("当前请求的模型强度已固定，请等它结束".to_string())
+            }
+            Action::Effort | Action::CycleEffort if self.model.is_none() => {
+                Some("还没有当前模型；先用 /models 选一个".to_string())
+            }
+            Action::Permission if self.active.is_some() => {
+                Some("请先取消并等待当前运行结束，再修改授权".to_string())
+            }
+            Action::Build | Action::CycleAgent if self.active.is_some() => {
+                Some("请先取消并等待当前运行结束，再切换 Agent".to_string())
+            }
+            Action::CycleModelNext | Action::CycleModelReverse if self.model.is_none() => {
+                Some("还没有当前模型；用 /models 选一个".to_string())
+            }
+            _ => None,
+        }
+    }
+    fn has_running(&self) -> bool {
+        self.selected_is_running() || self.active.is_some()
+    }
+    /// Keymap focus. Provider/effort are steps inside the model flow but do not carry the
+    /// model dialog's Ctrl+F/Ctrl+A, so they count as "other".
+    fn focus(&self) -> Focus {
+        match self.dialog {
+            Some(Dialog::Models(_)) => Focus::ModelDialog,
+            Some(_) => Focus::OtherDialog,
+            None => Focus::Composer,
+        }
+    }
+    /// Runs one action. `true` means "quit the TUI".
+    ///
+    /// Every path starts with the availability check, so a command the backend cannot serve
+    /// says why instead of doing nothing (§7.4: 不可用能力有原因).
+    fn execute(&mut self, action: Action, arg: Option<&str>, requests: &Sender<Request>) -> bool {
+        if let Some(reason) = self.availability(action) {
+            self.notice = reason;
+            return false;
+        }
+        let arg = arg.map(str::trim).filter(|arg| !arg.is_empty());
+        if arg.is_some() && !matches!(action, Action::Effort | Action::Permission) {
+            let entry = commands::entry(action);
+            self.notice = format!(
+                "{} 不接受参数；Ctrl+P 查看命令用法",
+                entry.slash.unwrap_or(entry.title)
+            );
+            return false;
+        }
+        match action {
+            Action::Palette => self.open_dialog(Dialog::Commands),
+            Action::New => {
+                self.selected = None;
+                self.detail = None;
+                self.scroll = None;
+                // A new request is a new session boundary: a completion popup left over from
+                // the previous prompt would insert text that no longer starts a command.
+                self.autocomplete = None;
+                let _ = requests.send(Request::Open(None));
+            }
+            Action::Runs => self.open_dialog(Dialog::Runs),
+            Action::Agents => self.open_dialog(Dialog::Agents),
+            Action::Models => self.open_dialog(Dialog::Models(ModelDialogState::default())),
+            Action::Effort => match arg {
+                Some(arg) => self.set_effort(arg),
+                None => self.open_effort_picker(),
+            },
+            Action::CycleEffort => self.cycle_effort(),
+            Action::Permission => match arg {
+                Some(arg) => self.set_permission(arg),
+                None => {
+                    self.open_dialog(Dialog::Permissions);
+                    self.choice = commands::PERMISSIONS
+                        .iter()
+                        .position(|(name, _, _)| *name == self.permission)
+                        .unwrap_or(0);
+                }
+            },
+            Action::Build => {
+                self.agent = "build".into();
+                self.notice = "下一次独立请求使用 Build".into();
+            }
+            Action::Theme => self.open_dialog(Dialog::Theme),
+            Action::Mode => {
+                self.preferences.light = !self.preferences.light;
+                self.apply_preferences_theme();
+                self.notice = format!("界面模式：{}", self.preferences.mode().as_str());
+            }
+            Action::Sidebar => {
+                self.preferences.sidebar = !self.preferences.sidebar;
+                self.sidebar_overlay = self.preferences.sidebar;
+            }
+            Action::Tools => {
+                if let Some(id) = &self.selected {
+                    let open = self.expanded.entry(id.clone()).or_default();
+                    *open = !*open;
+                }
+            }
+            Action::Latest => self.scroll = None,
+            Action::Edit => {
+                // The terminal has to be handed back to the editor process; `run` owns that,
+                // so this only raises the flag and explains what is about to happen.
+                self.pending_editor = true;
+                self.notice = "正在打开外部编辑器…".into();
+            }
+            Action::PasteSummary => {
+                self.preferences.paste_summary = !self.preferences.paste_summary;
+                self.notice = if self.preferences.paste_summary {
+                    "大段粘贴将折叠为 [粘贴 N 行]，发送时展开原文".into()
+                } else {
+                    "大段粘贴保持原文".into()
+                };
+            }
+            Action::Help => {
+                self.open_dialog(Dialog::Help);
+                self.help_scroll = 0;
+            }
+            Action::Cancel => {
+                if let Some(id) = self
+                    .selected
+                    .as_ref()
+                    .filter(|_| self.selected_is_running())
+                    .or(self.active.as_ref())
+                {
+                    let _ = requests.send(Request::Cancel(id.clone()));
+                    self.notice = "已请求取消，等待监工确认收尾".into();
+                } else {
+                    self.notice = "当前没有活动运行".into();
+                }
+            }
+            Action::Usage => {
+                self.notice = self
+                    .detail
+                    .as_ref()
+                    .and_then(|d| d.record.usage.as_ref())
+                    .map(|u| {
+                        format!(
+                            "输入 {} · 缓存 {} · 输出 {} token",
+                            token(u.prompt_tokens),
+                            token(u.cache_read_tokens),
+                            token(u.completion_tokens)
+                        )
+                    })
+                    .unwrap_or_else(|| "provider 尚未报告用量".into());
+            }
+            Action::Evidence => {
+                self.notice = self
+                    .detail
+                    .as_ref()
+                    .map(|d| {
+                        format!(
+                            "完整证据：{}；可用 arcdeck report {}",
+                            d.evidence_dir.display(),
+                            d.record.id
+                        )
+                    })
+                    .unwrap_or_else(|| "先选择一条运行记录".into())
+            }
+            Action::Quit => return true,
+            // `/plan` is behind `Entry::unavailable`, so this arm is unreachable from every
+            // surface; it stays explicit instead of `_ =>`, which would hide a future mistake.
+            Action::Plan => unreachable!("Plan is unavailable and filtered by availability"),
+            Action::Favorite => self.toggle_favorite(),
+            Action::ProviderList => {
+                if let Some(Dialog::Models(back)) = self.dialog {
+                    self.swap_dialog(Dialog::Providers(ProviderDialogState { back: Some(back) }));
+                }
+            }
+            Action::CycleModelNext => self.cycle_model(1),
+            Action::CycleModelReverse => self.cycle_model(-1),
+            Action::CycleAgent => self.cycle_agent(),
+        }
+        false
+    }
+    fn set_permission(&mut self, arg: &str) {
+        match arg {
+            "workspace" | "full" => {
+                self.permission = arg.into();
+                self.notice = format!("下一次独立请求的授权级别：{arg}");
+            }
+            "readonly" => self.notice = commands::READONLY_REASON.into(),
+            other => {
+                self.notice = format!(
+                    "未知授权级别 `{other}`；支持 readonly / workspace / full（readonly 尚未接通）"
+                )
+            }
+        }
+    }
+    fn set_effort(&mut self, arg: &str) {
+        let value = (arg != "default").then(|| arg.to_string());
+        let mut notice = match &value {
+            Some(_) => format!("下一次请求的 effort：{arg}（由运行时校验）"),
+            None => "下一次请求恢复模型缺省强度".to_string(),
+        };
+        if let Some(model) = self.model.clone()
+            && let Some(efforts) = model_dialog::efforts(&self.boot.catalog, &model)
+        {
+            // Validate before assigning: a rejected level must leave the current one alone.
+            if let Some(value) = &value
+                && !efforts.iter().any(|effort| effort == value)
+            {
+                self.notice = format!(
+                    "`{arg}` 不是 {} 的强度档；可用：{}",
+                    catalog::display_name(&self.boot.catalog, &model),
+                    efforts.join(" / ")
+                );
+                return;
+            }
+            self.model_prefs.set_effort(&model, value.as_deref());
+            self.model_prefs_dirty = true;
+            notice.push_str("；已记住这个模型的强度");
+        }
+        self.effort = value;
+        self.notice = notice;
+    }
+    fn open_effort_picker(&mut self) {
+        let Some(model) = self.model.clone() else {
+            return;
+        };
+        match model_dialog::efforts(&self.boot.catalog, &model) {
+            Some(efforts) if !efforts.is_empty() => {
+                self.open_dialog(Dialog::Efforts(EffortDialogState {
+                    model,
+                    efforts: efforts.len(),
+                }));
+            }
+            _ => {
+                self.notice = format!(
+                    "{} 没有报告强度档；/effort default 清掉当前值",
+                    catalog::display_name(&self.boot.catalog, &model)
+                );
+            }
+        }
+    }
+    /// Ctrl+T: cycle the current model's effort levels, ending on "default" so one key reaches
+    /// every level. The list comes from the catalog, never from a hard-coded table.
+    fn cycle_effort(&mut self) {
+        let Some(model) = self.model.clone() else {
+            return;
+        };
+        let Some(efforts) = model_dialog::efforts(&self.boot.catalog, &model) else {
+            self.notice = format!(
+                "{} 没有报告强度档",
+                catalog::display_name(&self.boot.catalog, &model)
+            );
+            return;
+        };
+        let current = self.effort.clone();
+        let next = match current
+            .as_ref()
+            .and_then(|value| efforts.iter().position(|effort| effort == value))
+        {
+            None => efforts.first().cloned(),
+            Some(index) => efforts.get(index + 1).cloned(),
+        };
+        self.effort = next;
+        self.model_prefs.set_effort(&model, self.effort.as_deref());
+        self.model_prefs_dirty = true;
+        self.notice = match &self.effort {
+            Some(effort) => format!("下一次请求的 effort：{effort}"),
+            None => "下一次请求使用模型缺省强度".into(),
+        };
+    }
+    fn cycle_agent(&mut self) {
+        self.agent = if self.agent == "echo" { "build" } else { "echo" }.into();
+        self.notice = format!("下一次独立请求的 Agent：{}", self.agent);
     }
     fn selected_is_running(&self) -> bool {
         self.detail
@@ -390,79 +639,6 @@ impl App {
             target.route()
         );
     }
-    fn action(&mut self, action: Action, requests: &Sender<Request>) -> bool {
-        match action {
-            Action::New => {
-                self.selected = None;
-                self.detail = None;
-                self.scroll = None;
-                let _ = requests.send(Request::Open(None));
-            }
-            Action::Runs => self.open_dialog(Dialog::Runs),
-            Action::Agents => self.open_dialog(Dialog::Agents),
-            Action::Models => self.open_dialog(Dialog::Models(ModelDialogState::default())),
-            Action::Sidebar => {
-                self.preferences.sidebar = !self.preferences.sidebar;
-                self.sidebar_overlay = self.preferences.sidebar;
-            }
-            Action::Tools => {
-                if let Some(id) = &self.selected {
-                    let open = self.expanded.entry(id.clone()).or_default();
-                    *open = !*open;
-                }
-            }
-            Action::Latest => self.scroll = None,
-            Action::Theme => self.open_dialog(Dialog::Theme),
-            Action::Mode => {
-                self.preferences.light = !self.preferences.light;
-                self.apply_preferences_theme();
-                self.notice = format!("界面模式：{}", self.preferences.mode().as_str());
-            }
-            Action::Cancel => {
-                if let Some(id) = self
-                    .selected
-                    .as_ref()
-                    .filter(|_| self.selected_is_running())
-                    .or(self.active.as_ref())
-                {
-                    let _ = requests.send(Request::Cancel(id.clone()));
-                    self.notice = "已请求取消，等待监工确认收尾".into();
-                } else {
-                    self.notice = "当前没有活动运行".into();
-                }
-            }
-            Action::Usage => {
-                self.notice = self
-                    .detail
-                    .as_ref()
-                    .and_then(|d| d.record.usage.as_ref())
-                    .map(|u| {
-                        format!(
-                            "输入 {} · 缓存 {} · 输出 {} token",
-                            token(u.prompt_tokens),
-                            token(u.cache_read_tokens),
-                            token(u.completion_tokens)
-                        )
-                    })
-                    .unwrap_or_else(|| "provider 尚未报告用量".into());
-            }
-            Action::Evidence => {
-                self.notice = self
-                    .detail
-                    .as_ref()
-                    .map(|d| {
-                        format!(
-                            "完整证据：{}；可用 arcdeck report {}",
-                            d.evidence_dir.display(),
-                            d.record.id
-                        )
-                    })
-                    .unwrap_or_else(|| "先选择一条运行记录".into())
-            }
-            Action::Quit => return true,
-        }
-        false
-    }
     fn submit(&mut self, requests: &Sender<Request>) -> bool {
         let text = self.editor.text.trim().to_string();
         if text.is_empty() {
@@ -470,58 +646,21 @@ impl App {
         }
         if text.starts_with('/') {
             self.editor.take();
-            if let Some(command) = COMMANDS.iter().find(|c| c.slash == text) {
-                return self.action(command.action, requests);
-            }
-            if text == "/plan" {
-                self.notice = "Plan 暂不可用：M3 的执行 guard 还未接通，提示词不能保证只读".into();
-            } else if text == "/build" {
-                if self.active.is_some() {
-                    self.notice = "请先取消并等待当前运行结束，再切换 Agent".into();
-                } else {
-                    self.agent = "build".into();
-                    self.notice = "下一次独立请求使用 Build".into();
+            self.autocomplete = None;
+            // One parser for every surface: what the completion popup offers, what Enter runs
+            // and what the help page documents all resolve through `commands::parse`.
+            return match commands::parse(&text) {
+                Some(parsed) => {
+                    self.execute(parsed.entry.action, parsed.arg.as_deref(), requests)
                 }
-            } else if text == "/permission" {
-                self.notice = format!(
-                    "当前授权 {}；/permission workspace|full 影响下一次请求",
-                    self.permission
-                );
-            } else if text == "/effort" {
-                self.notice = format!(
-                    "当前 effort {}；/effort <级别|default> 影响下一次请求",
-                    self.effort.as_deref().unwrap_or("模型缺省")
-                );
-            } else if let Some(level) = text.strip_prefix("/permission ") {
-                if self.active.is_some() {
-                    self.notice = "请先取消并等待当前运行结束，再修改授权".into();
-                } else if matches!(level, "workspace" | "full") {
-                    self.permission = level.into();
-                    self.notice = format!("下一次独立请求的授权级别：{level}");
-                } else {
-                    self.notice =
-                        "此版支持 workspace / full；readonly 执行限制与 confirm 应答者尚未接通"
-                            .into();
+                None => {
+                    let name = text.split_whitespace().next().unwrap_or("/");
+                    self.notice = format!(
+                        "未知命令 `{name}`；Ctrl+P 查看命令，/help 查看键位"
+                    );
+                    false
                 }
-            } else if let Some(effort) = text.strip_prefix("/effort ") {
-                if self.active.is_some() {
-                    self.notice = "当前请求的模型强度已固定，请等它结束".into();
-                } else {
-                    self.effort = if effort == "default" {
-                        None
-                    } else {
-                        Some(effort.into())
-                    };
-                    self.notice =
-                        "effort 将用于下一次请求，由运行时校验；/effort default 恢复模型缺省值"
-                            .into();
-                }
-            } else {
-                self.notice =
-                    "未知命令；Ctrl+P 查看命令，/permission workspace|full，/effort <级别|default>"
-                        .into();
-            }
-            return false;
+            };
         }
         if self.active.is_some() {
             self.notice = "已有活动运行；Esc 取消，结束后可发起新请求".into();
@@ -571,10 +710,12 @@ impl App {
         // 克隆而不是借用：下面几个分支都要 &mut self（打开新对话框、改偏好）。
         match self.dialog.clone() {
             Some(Dialog::Commands) => {
-                let action = self.filtered_commands().get(self.choice).map(|c| c.action);
+                let action = self.filtered_commands().get(self.choice).map(|entry| entry.action);
                 self.dialog = None;
                 if let Some(action) = action {
-                    return self.action(action, requests);
+                    // Close first: an unavailable command reports into the notice line, which
+                    // the palette itself would cover.
+                    return self.execute(action, None, requests);
                 }
             }
             Some(Dialog::Runs) => {
@@ -589,13 +730,42 @@ impl App {
             Some(Dialog::Agents) => {
                 if self.active.is_some() {
                     self.notice = "请先取消并等待当前运行结束，再切换 Agent".into();
-                } else if self.choice == 2 {
-                    self.notice = "Plan 暂不可用：执行 guard 尚未接通".into();
                 } else {
-                    self.agent = if self.choice == 0 { "echo" } else { "build" }.into();
-                    self.dialog = None;
+                    match self.choice {
+                        0 => {
+                            self.agent = "echo".into();
+                            self.dialog = None;
+                            self.notice = "下一次独立请求的 Agent：echo".into();
+                        }
+                        1 => {
+                            self.agent = "build".into();
+                            self.dialog = None;
+                            self.notice = "下一次独立请求的 Agent：build".into();
+                        }
+                        // Plan has no read-only execution path; the reason comes from the
+                        // registry, so this row and `/plan` cannot drift apart.
+                        _ => {
+                            self.notice = commands::entry(Action::Plan)
+                                .unavailable
+                                .unwrap_or_default()
+                                .into();
+                        }
+                    }
                 }
             }
+            Some(Dialog::Permissions) => {
+                if let Some((name, _, reason)) = commands::PERMISSIONS.get(self.choice) {
+                    match reason {
+                        Some(reason) => self.notice = (*reason).into(),
+                        None => {
+                            self.permission = (*name).into();
+                            self.notice = format!("下一次独立请求的授权级别：{name}");
+                            self.dialog = None;
+                        }
+                    }
+                }
+            }
+            Some(Dialog::Help) => self.dialog = None,
             Some(Dialog::Models(state)) => self.select_model(state),
             Some(Dialog::Providers(_)) => {
                 if let Some(provider) = self.provider_rows().get(self.choice).cloned() {
@@ -688,7 +858,8 @@ impl App {
         let key = match event {
             Event::Paste(text) => {
                 if self.dialog.is_none() {
-                    self.editor.insert(&text);
+                    self.insert_paste(&text);
+                    self.refresh_autocomplete();
                 } else if self.theme_dialog.is_some() {
                     // A pasted theme name filters the list the same way typing does. Newlines
                     // are dropped rather than kept: the filter is a single-line field, and a
@@ -717,11 +888,15 @@ impl App {
             _ => return false,
         };
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        if ctrl && key.code == KeyCode::Char('c') {
-            return true;
-        }
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+
+        // Esc layering (§7.4): popup → dialog → editing state → cancel. Cancel is last on
+        // purpose: a stray Esc while typing must not kill a running job.
         if key.code == KeyCode::Esc {
-            self.leader = false;
+            self.leader_until = None;
+            if self.autocomplete.take().is_some() {
+                return false;
+            }
             // 从 provider 列表进来的那种：Esc 先退回模型对话框（上游是 replace 进去的），
             // 再按一次才关掉整个流程。对话框里也写了「Esc 返回模型对话框」。
             if let Some(Dialog::Providers(state)) = &self.dialog
@@ -738,14 +913,42 @@ impl App {
                 }
                 return false;
             }
-            if self.selected_is_running() || self.active.is_some() {
-                return self.action(Action::Cancel, requests);
+            if !self.editor.text.is_empty() {
+                self.editor.text.clear();
+                self.editor.cursor = 0;
+                return false;
             }
-            self.editor.text.clear();
-            self.editor.cursor = 0;
+            if self.has_running() {
+                return self.execute(Action::Cancel, None, requests);
+            }
             return false;
         }
+
+        if self.leader_until.is_some() {
+            self.leader_until = None;
+            return match self.keymap.leader_action(&key) {
+                Some(action) => self.execute(action, None, requests),
+                None => {
+                    self.notice = "没有这个 leader 组合；Ctrl+X 后看底部提示".into();
+                    false
+                }
+            };
+        }
+        // A leader chord only starts in the composer: inside a dialog Ctrl+X would otherwise
+        // swallow the next keystroke the dialog was waiting for.
+        if self.dialog.is_none() && self.keymap.is_leader_key(&key) {
+            self.leader_until =
+                Some(Instant::now() + Duration::from_millis(keymap::LEADER_TIMEOUT_MS));
+            return false;
+        }
+
         if self.dialog.is_some() {
+            // The keymap settles the "who owns this key" question before any dialog gets to
+            // see it: Ctrl+F/Ctrl+A are only bindings inside the model dialog, and Ctrl+C is
+            // global in every dialog.
+            if let Some(action) = self.keymap.resolve(&key, self.focus()) {
+                return self.execute(action, None, requests);
+            }
             if self.theme_dialog.is_some() {
                 match key.code {
                     KeyCode::Enter => {
@@ -764,32 +967,32 @@ impl App {
                     }
                 }
             }
-            // 对话框上下文的键位先判：Ctrl+F / Ctrl+A 只在模型对话框里有意义，
-            // 与同名会话级绑定不冲突（§7.4：冲突按上下文解析，不能全局覆盖）。
-            if ctrl && key.code == KeyCode::Char('f') {
-                self.toggle_favorite();
-                return false;
-            }
-            if ctrl && key.code == KeyCode::Char('a') {
-                // 只在模型对话框里有这个上下文入口（上游的 model.dialog.provider）。
-                if let Some(Dialog::Models(back)) = self.dialog {
-                    self.swap_dialog(Dialog::Providers(ProviderDialogState { back: Some(back) }));
+            if matches!(self.dialog, Some(Dialog::Help)) {
+                match key.code {
+                    KeyCode::Up => self.help_scroll = self.help_scroll.saturating_sub(1),
+                    KeyCode::Down => self.help_scroll = self.help_scroll.saturating_add(1),
+                    KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(8),
+                    KeyCode::PageDown => self.help_scroll = self.help_scroll.saturating_add(8),
+                    KeyCode::Enter => self.dialog = None,
+                    _ => {}
                 }
                 return false;
             }
+            // Permissions is a fixed three-row list; typing must not filter it.
+            let filterable = !matches!(self.dialog, Some(Dialog::Permissions));
             match key.code {
                 KeyCode::Up => self.choice = self.choice.saturating_sub(1),
                 KeyCode::Down => {
                     self.choice = (self.choice + 1).min(self.selection_count().saturating_sub(1))
                 }
                 KeyCode::Enter => return self.select(requests),
-                KeyCode::Backspace => {
+                KeyCode::Backspace if filterable => {
                     // effort 与 provider 列表也能搜：provider 是按名字找的，
                     // 而 effort 列表短到不需要搜，这里一并接受，键位才一致。
                     self.filter.pop();
                     self.choice = 0;
                 }
-                KeyCode::Char(c) if !ctrl => {
+                KeyCode::Char(c) if !ctrl && !alt && filterable => {
                     self.filter.push(c);
                     self.choice = 0;
                 }
@@ -800,69 +1003,251 @@ impl App {
             self.choice = self.choice.min(self.selection_count().saturating_sub(1));
             return false;
         }
-        if self.leader {
-            self.leader = false;
-            let action = match key.code {
-                KeyCode::Char('n') => Some(Action::New),
-                KeyCode::Char('l') => Some(Action::Runs),
-                KeyCode::Char('a') => Some(Action::Agents),
-                KeyCode::Char('m') => Some(Action::Models),
-                KeyCode::Char('b') => Some(Action::Sidebar),
-                KeyCode::Char('t') => Some(Action::Theme),
-                _ => None,
-            };
-            if let Some(action) = action {
-                return self.action(action, requests);
-            }
-            return false;
-        }
-        match key.code {
-            KeyCode::Char('p') if ctrl => self.open_dialog(Dialog::Commands),
-            KeyCode::Char('x') if ctrl => self.leader = true,
-            KeyCode::Char('j') if ctrl => self.editor.insert("\n"),
-            // F2 / Shift+F2 在 Recent 里前后循环（§7.4，采自上游 local.tsx 的 cycle）。
-            // 运行中也允许 —— 它只改「下一次请求」用的路由，不碰正在跑的那个。
-            KeyCode::F(2) if key.modifiers.contains(KeyModifiers::SHIFT) => self.cycle_model(-1),
-            KeyCode::F(2) => self.cycle_model(1),
-            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.editor.insert("\n")
-            }
-            KeyCode::Enter if cfg!(windows) => self.editor.insert("\n"),
-            KeyCode::Enter | KeyCode::F(6) => return self.submit(requests),
-            KeyCode::BackTab => {
-                if self.active.is_some() {
-                    self.notice = "请先等待当前运行结束".into();
-                } else {
-                    self.agent = if self.agent == "echo" {
-                        "build"
-                    } else {
-                        "echo"
+
+        // Completion owns ↑↓/Tab/Enter while it is open, so those keys do not reach history
+        // or the submit path.
+        if self.autocomplete.is_some() {
+            match key.code {
+                KeyCode::Up => {
+                    if let Some(popup) = self.autocomplete.as_mut() {
+                        popup.move_by(-1);
                     }
-                    .into();
+                    return false;
                 }
+                KeyCode::Down => {
+                    if let Some(popup) = self.autocomplete.as_mut() {
+                        popup.move_by(1);
+                    }
+                    return false;
+                }
+                KeyCode::Tab => {
+                    self.accept_autocomplete(false, requests);
+                    return false;
+                }
+                // Windows keeps Enter as a newline (F6 submits), so accepting with Enter there
+                // would be the only place Enter submits — §4 of the audit says F6 is the send
+                // key, and completion must not quietly reintroduce the ambiguity.
+                KeyCode::Enter if !cfg!(windows) => {
+                    self.accept_autocomplete(true, requests);
+                    return false;
+                }
+                KeyCode::F(6) => {
+                    self.accept_autocomplete(true, requests);
+                    return false;
+                }
+                _ => {}
             }
-            KeyCode::Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
-                self.editor.insert(&c.to_string())
+        }
+
+        if let Some(action) = self.keymap.resolve(&key, Focus::Composer) {
+            return self.execute(action, None, requests);
+        }
+
+        match key.code {
+            KeyCode::Char('j') if ctrl => self.editor.insert("\n"),
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.editor.insert("\n");
+                self.refresh_autocomplete();
             }
-            KeyCode::Backspace => self.editor.backspace(),
-            KeyCode::Delete => self.editor.delete(),
+            KeyCode::Enter if cfg!(windows) => {
+                self.editor.insert("\n");
+                self.refresh_autocomplete();
+            }
+            KeyCode::Enter | KeyCode::F(6) => return self.submit(requests),
+            KeyCode::Char(c) if !ctrl && !alt => {
+                self.editor.insert(&c.to_string());
+                self.refresh_autocomplete();
+            }
+            KeyCode::Backspace => {
+                self.editor.backspace();
+                self.refresh_autocomplete();
+            }
+            KeyCode::Delete => {
+                self.editor.delete();
+                self.refresh_autocomplete();
+            }
             KeyCode::Left => self.editor.left(),
             KeyCode::Right => self.editor.right(),
             KeyCode::Home => self.editor.home(),
-            KeyCode::End if ctrl => self.scroll = None,
             KeyCode::End => self.editor.end(),
-            KeyCode::Up if ctrl => self.editor.history(true),
-            KeyCode::Down if ctrl => self.editor.history(false),
+            KeyCode::Up if ctrl => {
+                self.editor.history(true);
+                self.refresh_autocomplete();
+            }
+            KeyCode::Down if ctrl => {
+                self.editor.history(false);
+                self.refresh_autocomplete();
+            }
             KeyCode::Up if self.editor.text.contains('\n') => self.editor.vertical(true),
             KeyCode::Down if self.editor.text.contains('\n') => self.editor.vertical(false),
-            KeyCode::Up => self.editor.history(true),
-            KeyCode::Down => self.editor.history(false),
+            KeyCode::Up => {
+                self.editor.history(true);
+                self.refresh_autocomplete();
+            }
+            KeyCode::Down => {
+                self.editor.history(false);
+                self.refresh_autocomplete();
+            }
             KeyCode::PageUp => self.scroll_up(8),
             KeyCode::PageDown => self.scroll_down(8),
             _ => {}
         }
         false
     }
+
+    /// Recomputes the completion popup from the draft. Called after every edit, never on
+    /// submit: a command that was just executed must not leave its own completion behind.
+    ///
+    /// Two triggers share the popup: `/` at the start of the draft (commands) and `@` at the
+    /// start of the current word (files). The trigger decides where accepting starts replacing.
+    fn refresh_autocomplete(&mut self) {
+        if self.dialog.is_some() {
+            self.autocomplete = None;
+            return;
+        }
+        if let Some(query) = autocomplete::trigger_query(&self.editor.text, '/') {
+            let items =
+                autocomplete::slash_items(query, &self.keymap, &|action| self.availability(action));
+            self.autocomplete = Autocomplete::new('/', 0, query.to_string(), items);
+            return;
+        }
+        if let Some((start, query)) =
+            autocomplete::mention_query(&self.editor.text, self.editor.cursor, '@')
+        {
+            self.files.ensure(&self.boot.workspace);
+            let recent = self.preferences.recent_files.clone();
+            let items = autocomplete::file_items(&self.files, query, &recent, 50);
+            self.autocomplete = Autocomplete::new('@', start, query.to_string(), items);
+            return;
+        }
+        self.autocomplete = None;
+    }
+
+    /// Tab accepts; Enter accepts and immediately runs when the command takes no argument.
+    /// An unavailable command is reported instead of inserted — inserting it would only move
+    /// the same refusal one keystroke later.
+    ///
+    /// `@` references are inserted as one segment (see `Editor::insert_segment`), and Enter
+    /// after one never submits: the user is still composing prose around the reference.
+    fn accept_autocomplete(&mut self, run: bool, requests: &Sender<Request>) {
+        let Some(popup) = self.autocomplete.take() else {
+            return;
+        };
+        let Some(item) = popup.current().cloned() else {
+            return;
+        };
+        if !item.available {
+            self.notice = item
+                .reason
+                .clone()
+                .unwrap_or_else(|| "该命令当前不可用".into());
+            return;
+        }
+        let end = self.editor.cursor;
+        if popup.trigger == '@' {
+            // The segment is the reference only; the trailing space is ordinary prose so one
+            // Backspace right after accepting removes the space, the next one the whole path.
+            let display = item.insert.trim_end();
+            self.editor
+                .replace_with_segment(popup.start, end, display, None);
+            self.editor.insert(" ");
+            let path = item
+                .insert
+                .trim_start_matches('@')
+                .trim_end()
+                .to_string();
+            self.touch_recent_file(&path);
+            return;
+        }
+        self.editor.replace_range(popup.start, end, &item.insert);
+        if run && !item.insert.ends_with(' ') {
+            let _ = self.submit(requests);
+        }
+    }
+
+    fn touch_recent_file(&mut self, path: &str) {
+        if path.is_empty() {
+            return;
+        }
+        self.preferences.recent_files.retain(|item| item != path);
+        self.preferences.recent_files.insert(0, path.to_string());
+        self.preferences.recent_files.truncate(20);
+    }
+
+    /// A paste over the threshold becomes one atomic `[粘贴 N 行]` segment whose payload is the
+    /// original text. Below it the text goes in literally: a two-line paste is usually part of
+    /// the sentence being written, and hiding it would be worse than the rows it takes.
+    fn insert_paste(&mut self, text: &str) {
+        let lines = text.lines().count();
+        if self.preferences.paste_summary && (lines >= 6 || text.len() > 600) {
+            self.editor
+                .insert_segment(&format!("[粘贴 {lines} 行]"), Some(text));
+        } else {
+            self.editor.insert(text);
+        }
+    }
+
+    /// `run` owns the terminal, so the external-editor action only raises this flag.
+    pub fn take_editor_request(&mut self) -> bool {
+        std::mem::take(&mut self.pending_editor)
+    }
+
+    /// Copies the parts of the editor that the preferences file owns. Called right before the
+    /// file is written so `history` can never be saved stale.
+    pub fn persist_preferences(&mut self) {
+        let keep = self.editor.history.len().saturating_sub(200);
+        self.preferences.history = self.editor.history[keep..].to_vec();
+    }
+
+    /// 2000 ms after the leader chord with no second key, the leader is forgotten. Without a
+    /// deadline it would eat the next keystroke the user typed for the composer.
+    pub fn tick(&mut self) {
+        if let Some(deadline) = self.leader_until
+            && Instant::now() >= deadline
+        {
+            self.leader_until = None;
+            self.dirty = true;
+        }
+    }
+
+    pub fn leader_active(&self) -> bool {
+        self.leader_until.is_some()
+    }
+
+    /// Keys shown in the which-key strip while the leader is waiting.
+    pub fn leader_hints(&self) -> Vec<(String, String)> {
+        self.keymap
+            .leader_hints()
+            .into_iter()
+            .map(|(key, action)| (key, commands::entry(action).title.to_string()))
+            .collect()
+    }
+
+    /// Every binding, grouped by category, for `/help`. Uses the same keymap the input path
+    /// uses, so a rebound key is documented in its new form.
+    pub fn help_rows(&self) -> Vec<HelpRow> {
+        let mut rows = Vec::new();
+        for category in Category::ALL {
+            for entry in commands::ENTRIES
+                .iter()
+                .filter(|entry| entry.category == category)
+            {
+                let keys = self.keymap.display(entry.action).unwrap_or_else(|| "—".into());
+                // Only the build-level reason belongs in a reference page; "nothing is
+                // running right now" would change under the reader's feet.
+                let reason = entry.unavailable.map(str::to_string);
+                rows.push(HelpRow {
+                    category,
+                    keys,
+                    title: entry.title.to_string(),
+                    context: entry.context,
+                    reason,
+                });
+            }
+        }
+        rows
+    }
+
     fn scroll_up(&mut self, n: usize) {
         self.scroll = Some(self.scroll.unwrap_or(self.scroll_max).saturating_sub(n));
     }
@@ -1409,17 +1794,24 @@ mod tests {
         assert_eq!(second.agent, "echo");
         assert_ne!(first.id, second.id);
     }
+    /// §7.4's Esc layering: popup → dialog → editing state → cancel. The draft survives the
+    /// dialog closing, so a second Esc is what clears it — and only a third cancels a running
+    /// job. The old order cancelled first, which made a stray Esc while typing end the run.
     #[test]
     fn paste_does_not_dispatch_and_modal_escape_does_not_cancel() {
         let mut app = app();
         let (tx, rx) = mpsc::channel();
         app.input(Event::Paste("一\n二".into()), &tx);
-        assert!(rx.try_recv().is_err());
+        assert!(rx.try_recv().is_err(), "a paste never dispatches");
         app.active = Some("r".into());
         app.selected = app.active.clone();
         app.open_dialog(Dialog::Commands);
         app.input(key(KeyCode::Esc), &tx);
+        assert_eq!(app.dialog, None, "the first Esc closes the dialog");
         assert!(rx.try_recv().is_err());
+        app.input(key(KeyCode::Esc), &tx);
+        assert_eq!(app.editor.text, "", "the second Esc cancels the edit");
+        assert!(rx.try_recv().is_err(), "clearing the draft must not cancel the run");
         app.input(key(KeyCode::Esc), &tx);
         assert!(matches!(rx.recv().unwrap(), Request::Cancel(id) if id == "r"));
     }
@@ -1494,6 +1886,7 @@ mod tests {
             light: true,
             sidebar: false,
             theme: Some("nord".into()),
+            ..Preferences::default()
         })
         .unwrap();
         let back: Preferences = serde_json::from_str(&text).unwrap();
@@ -1515,19 +1908,14 @@ mod tests {
         assert_eq!(app.preferences.theme.as_deref(), Some("Nope"));
     }
 
-    /// `/theme` now opens the picker and `/mode` owns the dark/light toggle. Both are in
-    /// `COMMANDS`, which is the single source the slash parser and the command palette share.
+    /// `/theme` now opens the picker and `/mode` owns the dark/light toggle. Both rows live in
+    /// `commands::ENTRIES`, the single source the slash parser, the palette and the keymap share.
     #[test]
     fn the_mode_toggle_moved_to_slash_mode() {
-        let theme = COMMANDS.iter().find(|command| command.action == Action::Theme).unwrap();
-        assert_eq!(theme.slash, "/theme");
-        let mode = COMMANDS.iter().find(|command| command.action == Action::Mode).unwrap();
-        assert_eq!(mode.slash, "/mode");
-        let mut slashes: Vec<&str> = COMMANDS.iter().map(|command| command.slash).collect();
-        let count = slashes.len();
-        slashes.sort_unstable();
-        slashes.dedup();
-        assert_eq!(slashes.len(), count, "two commands share a slash");
+        let theme = commands::entry(Action::Theme);
+        assert_eq!(theme.slash, Some("/theme"));
+        let mode = commands::entry(Action::Mode);
+        assert_eq!(mode.slash, Some("/mode"));
 
         let mut app = app();
         let (tx, _rx) = mpsc::channel();
@@ -1602,5 +1990,353 @@ mod tests {
         // A paste filters the same way typing does, newlines dropped.
         app.input(Event::Paste("nor\nd".into()), &tx);
         assert_eq!(app.theme.name, "nord");
+    }
+
+    /// The leader window is wall-clock, not "until the next key": `tick` is what the event loop
+    /// calls between polls, and a leader that never expired would eat an unrelated keystroke.
+    #[test]
+    fn a_leader_left_alone_expires_after_the_timeout() {
+        let mut app = app();
+        let (tx, _rx) = mpsc::channel();
+        app.input(key_with(KeyCode::Char('x'), KeyModifiers::CONTROL), &tx);
+        assert!(app.leader_active());
+        app.leader_until = Some(Instant::now() - Duration::from_millis(1));
+        app.tick();
+        assert!(!app.leader_active(), "an expired leader must be forgotten");
+        // And the next keystroke goes back to the composer instead of being read as a chord.
+        app.input(key(KeyCode::Char('h')), &tx);
+        assert_eq!(app.editor.text, "h");
+    }
+
+    #[test]
+    fn slash_completion_filters_accepts_with_tab_and_closes_on_escape() {
+        let mut app = app();
+        let (tx, _rx) = mpsc::channel();
+        app.input(key(KeyCode::Char('/')), &tx);
+        let popup = app.autocomplete.as_ref().expect("typing / opens completion");
+        assert!(popup.items.len() >= 10, "every slash command is offered");
+        type_text(&mut app, "hel", &tx);
+        let popup = app.autocomplete.as_ref().unwrap();
+        assert_eq!(popup.current().unwrap().insert, "/help");
+        app.input(key(KeyCode::Tab), &tx);
+        assert_eq!(app.editor.text, "/help", "Tab accepts without running");
+        assert!(app.autocomplete.is_none(), "the popup closes after accepting");
+
+        // Escape closes the popup without touching the draft. The trigger is the first
+        // character of the draft, so this needs a fresh app rather than a second `/`.
+        let mut app = self::app();
+        app.input(key(KeyCode::Char('/')), &tx);
+        assert!(app.autocomplete.is_some());
+        app.input(key(KeyCode::Esc), &tx);
+        assert!(app.autocomplete.is_none());
+        assert_eq!(app.editor.text, "/", "Esc must not clear the draft while the popup is open");
+        // A second Esc now clears the draft.
+        app.input(key(KeyCode::Esc), &tx);
+        assert_eq!(app.editor.text, "");
+    }
+
+    /// On Windows Enter is a newline, so F6 is the "accept and run" chord there. Both must
+    /// route through the completion popup or the popup would stay open over the next screen.
+    #[test]
+    fn accepting_completion_with_the_send_key_runs_the_command() {
+        let mut app = app();
+        let (tx, _rx) = mpsc::channel();
+        type_text(&mut app, "/the", &tx);
+        assert!(app.autocomplete.is_some());
+        app.input(key(KeyCode::F(6)), &tx);
+        assert_eq!(app.dialog, Some(Dialog::Theme));
+        assert!(app.autocomplete.is_none());
+    }
+
+    /// A command the build cannot serve still executes — and says why. Silently doing nothing
+    /// is the failure mode §7.4 calls out.
+    #[test]
+    fn unavailable_commands_report_their_reason_instead_of_doing_nothing() {
+        for (command, action) in [("/plan", Action::Plan), ("/permission readonly", Action::Permission)] {
+            let mut app = app();
+            let (tx, _rx) = mpsc::channel();
+            app.editor.insert(command);
+            app.input(key(KeyCode::F(6)), &tx);
+            let expected = app.availability(action).or_else(|| {
+                (action == Action::Permission).then(|| commands::READONLY_REASON.to_string())
+            });
+            assert_eq!(
+                Some(app.notice.clone()),
+                expected,
+                "{command} must explain itself, got {}",
+                app.notice
+            );
+        }
+        // The same reason is what the palette shows when the row is selected.
+        let mut app = app();
+        let (tx, _rx) = mpsc::channel();
+        app.open_dialog(Dialog::Commands);
+        app.filter = "plan".into();
+        app.choice = app
+            .filtered_commands()
+            .iter()
+            .position(|entry| entry.action == Action::Plan)
+            .unwrap();
+        app.select(&tx);
+        assert_eq!(app.notice, commands::PLAN_REASON);
+        assert_eq!(app.dialog, None, "the palette closes so the reason is readable");
+    }
+
+    /// Walks every palette row through the palette. A row that panics, or that is present but
+    /// not dispatched, fails here rather than at the user's keyboard.
+    #[test]
+    fn every_palette_action_can_be_triggered_from_the_palette() {
+        for entry in commands::palette_entries() {
+            let mut app = app();
+            let (tx, _rx) = mpsc::channel();
+            app.open_dialog(Dialog::Commands);
+            app.filter = entry.slash.unwrap_or(entry.id).trim_start_matches('/').to_string();
+            let rows = app.filtered_commands();
+            let index = rows
+                .iter()
+                .position(|row| row.action == entry.action)
+                .unwrap_or_else(|| panic!("{} is not reachable by searching its own name", entry.id));
+            app.choice = index;
+            // `select` returns true only for Quit; every other row must return false here.
+            let quit = app.select(&tx);
+            assert_eq!(quit, entry.action == Action::Quit, "{}", entry.id);
+            if let Some(reason) = entry.unavailable {
+                assert_eq!(app.notice, reason, "{} should report its reason", entry.id);
+            }
+        }
+    }
+
+    #[test]
+    fn commands_with_arguments_validate_and_apply() {
+        let mut app = app();
+        let (tx, _rx) = mpsc::channel();
+        app.editor.insert("/permission full");
+        app.input(key(KeyCode::F(6)), &tx);
+        assert_eq!(app.permission, "full");
+
+        app.editor.insert("/permission bogus");
+        app.input(key(KeyCode::F(6)), &tx);
+        assert!(app.notice.contains("未知授权级别"), "{}", app.notice);
+        assert_eq!(app.permission, "full", "a rejected value must not be applied");
+
+        app.editor.insert("/theme now");
+        app.input(key(KeyCode::F(6)), &tx);
+        assert!(app.notice.contains("不接受参数"), "{}", app.notice);
+    }
+
+    /// `/effort` without an argument opens the picker; an argument is checked against what the
+    /// model actually reports instead of being passed through blindly.
+    #[test]
+    fn effort_arguments_are_checked_against_the_model() {
+        let mut app = App::new(
+            boot(Some("p/m-effort"), PathBuf::from("unused.json")),
+            Preferences::default(),
+            ModelPrefs::default(),
+        );
+        let (tx, _rx) = mpsc::channel();
+        app.editor.insert("/effort bogus");
+        app.input(key(KeyCode::F(6)), &tx);
+        assert!(app.notice.contains("不是"), "{}", app.notice);
+        assert!(app.notice.contains("high"), "the notice lists the real levels: {}", app.notice);
+        assert_eq!(app.effort, None);
+
+        app.editor.insert("/effort high");
+        app.input(key(KeyCode::F(6)), &tx);
+        assert_eq!(app.effort.as_deref(), Some("high"));
+
+        app.editor.insert("/effort");
+        app.input(key(KeyCode::F(6)), &tx);
+        assert!(matches!(app.dialog, Some(Dialog::Efforts(_))), "{:?}", app.dialog);
+    }
+
+    /// Ctrl+T walks the model's own levels and ends on the default, so one key reaches every
+    /// value without a dialog.
+    #[test]
+    fn ctrl_t_cycles_effort_and_wraps_back_to_default() {
+        let mut app = App::new(
+            boot(Some("p/m-effort"), PathBuf::from("unused.json")),
+            Preferences::default(),
+            ModelPrefs::default(),
+        );
+        let (tx, _rx) = mpsc::channel();
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            app.input(key_with(KeyCode::Char('t'), KeyModifiers::CONTROL), &tx);
+            seen.push(app.effort.clone().unwrap_or_else(|| "default".into()));
+        }
+        assert_eq!(seen, ["off", "low", "high", "max", "default"]);
+    }
+
+    /// The same Ctrl+F must not toggle favourites from the composer. §7.4: keys resolve by
+    /// context, never by globally overriding one of the meanings.
+    #[test]
+    fn ctrl_f_does_nothing_outside_the_model_dialog() {
+        let mut app = app();
+        let (tx, _rx) = mpsc::channel();
+        let before = app.model_prefs.favorite.clone();
+        app.input(key_with(KeyCode::Char('f'), KeyModifiers::CONTROL), &tx);
+        assert_eq!(app.model_prefs.favorite, before);
+        assert_eq!(app.editor.text, "", "a control chord must not insert a character");
+    }
+
+    /// `keybinds.json` sits next to the preferences file and rebinds by action id. The app must
+    /// load it at startup and surface parse problems in the notice line, not refuse to start.
+    #[test]
+    fn keybinds_json_next_to_the_preferences_is_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let preferences = dir.path().join("tui-preferences.json");
+        std::fs::write(dir.path().join("keybinds.json"), r#"{"theme.list":"ctrl+g"}"#).unwrap();
+        let app = App::new(
+            Boot {
+                preferences,
+                ..boot(Some("p/m"), PathBuf::from("unused.json"))
+            },
+            Preferences::default(),
+            ModelPrefs::default(),
+        );
+        assert_eq!(app.keymap.display(Action::Theme).as_deref(), Some("Ctrl+G"));
+
+        std::fs::write(dir.path().join("keybinds.json"), "{broken").unwrap();
+        let app = App::new(
+            Boot {
+                preferences: dir.path().join("tui-preferences.json"),
+                ..boot(Some("p/m"), PathBuf::from("unused.json"))
+            },
+            Preferences::default(),
+            ModelPrefs::default(),
+        );
+        assert!(app.notice.contains("keybinds.json"), "{}", app.notice);
+        assert_eq!(app.keymap.display(Action::Theme).as_deref(), Some("Ctrl+X T"));
+    }
+
+    /// Leaving the picker by another route must undo the live preview, exactly like Esc. The
+    /// bug this guards against: Ctrl+P from the picker used to leave the previewed theme
+    /// applied in memory, so the next exit persisted a theme the user never confirmed.
+    #[test]
+    fn opening_another_dialog_restores_the_theme_preview() {
+        let mut app = app();
+        let (tx, _rx) = mpsc::channel();
+        let initial = app.theme.name.clone();
+        app.open_dialog(Dialog::Theme);
+        app.input(key(KeyCode::Down), &tx);
+        assert_ne!(app.theme.name, initial, "the preview is live");
+        app.input(key_with(KeyCode::Char('p'), KeyModifiers::CONTROL), &tx);
+        assert_eq!(app.dialog, Some(Dialog::Commands));
+        assert_eq!(app.theme.name, initial, "the unconfirmed preview must be undone");
+        assert_eq!(app.preferences.theme.as_deref(), Some(initial.as_str()));
+    }
+
+    /// `@` completes against the workspace and inserts one atomic reference. The trailing
+    /// space is outside the segment so the next word does not get swallowed by Backspace.
+    #[test]
+    fn at_references_complete_and_delete_as_one_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "x").unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "x").unwrap();
+        let mut app = self::app();
+        app.boot.workspace = dir.path().to_path_buf();
+        let (tx, _rx) = mpsc::channel();
+        type_text(&mut app, "看 @ma", &tx);
+        let popup = app.autocomplete.as_ref().expect("@ opens files");
+        assert_eq!(popup.trigger, '@');
+        assert_eq!(popup.start, "看 ".len());
+        assert!(
+            popup.items.iter().any(|item| item.detail == "@main.rs"),
+            "{:?}",
+            popup.items
+        );
+        app.input(key(KeyCode::Tab), &tx);
+        assert_eq!(app.editor.text, "看 @main.rs ");
+        assert_eq!(app.editor.segments().len(), 1, "the reference is one unit");
+        assert_eq!(app.preferences.recent_files.first().map(String::as_str), Some("main.rs"));
+
+        // First Backspace eats the trailing space, second removes the whole reference.
+        app.input(key(KeyCode::Backspace), &tx);
+        assert_eq!(app.editor.text, "看 @main.rs");
+        app.input(key(KeyCode::Backspace), &tx);
+        assert_eq!(app.editor.text, "看 ");
+        assert!(app.editor.segments().is_empty());
+    }
+
+    /// History is seeded from the preferences file and written back on exit; without that it
+    /// would only survive as long as the process does.
+    #[test]
+    fn input_history_is_loaded_and_persisted_with_the_preferences() {
+        let prefs = Preferences {
+            history: vec!["上一次输入".into()],
+            ..Preferences::default()
+        };
+        let mut app = App::new(
+            boot(Some("p/m"), PathBuf::from("unused.json")),
+            prefs,
+            ModelPrefs::default(),
+        );
+        assert_eq!(app.editor.history, vec!["上一次输入".to_string()]);
+        let (tx, _rx) = mpsc::channel();
+        app.editor.insert("新输入");
+        app.input(key(KeyCode::F(6)), &tx);
+        app.persist_preferences();
+        assert_eq!(
+            app.preferences.history.last().map(String::as_str),
+            Some("新输入")
+        );
+        // And the editor can walk back through history: the newest entry first, then the one
+        // loaded from disk.
+        app.editor.history(true);
+        assert_eq!(app.editor.text, "新输入");
+        app.editor.history(true);
+        assert_eq!(app.editor.text, "上一次输入");
+    }
+
+    /// A large paste becomes a summary segment and expands to the original text on submit;
+    /// `/paste` turns the summarization off. The draft never holds the paste twice.
+    #[test]
+    fn a_large_paste_is_summarized_and_expands_on_submit() {
+        let mut app = self::app();
+        let (tx, rx) = mpsc::channel();
+        let big = (0..10).map(|i| format!("行{i}\n")).collect::<String>();
+        app.input(Event::Paste(big.clone()), &tx);
+        assert_eq!(app.editor.text, "[粘贴 10 行]");
+        app.input(key(KeyCode::F(6)), &tx);
+        let Request::Start(request) = rx.recv().unwrap() else {
+            panic!()
+        };
+        assert_eq!(request.prompt.trim_end(), big.trim_end());
+
+        // `/paste` toggles the behaviour; the same paste is then inserted literally.
+        let mut app = self::app();
+        let (tx, _rx) = mpsc::channel();
+        app.editor.insert("/paste");
+        app.input(key(KeyCode::F(6)), &tx);
+        assert!(!app.preferences.paste_summary);
+        app.input(Event::Paste(big.clone()), &tx);
+        assert_eq!(app.editor.text, big);
+    }
+
+    #[test]
+    fn leader_e_asks_run_to_open_the_external_editor() {
+        let mut app = self::app();
+        let (tx, _rx) = mpsc::channel();
+        app.input(key_with(KeyCode::Char('x'), KeyModifiers::CONTROL), &tx);
+        app.input(key(KeyCode::Char('e')), &tx);
+        assert!(app.take_editor_request());
+        assert!(!app.take_editor_request(), "the request is consumed once");
+    }
+
+    /// `/help` is generated from the registry, so a rebound key shows its new chord and an
+    /// unavailable action carries its reason — no second hand-written key list.
+    #[test]
+    fn help_rows_come_from_the_keymap_and_the_registry() {
+        let app = app();
+        let rows = app.help_rows();
+        let quit = rows.iter().find(|row| row.title.contains("退出")).unwrap();
+        assert!(quit.keys.contains("Ctrl+C"), "{}", quit.keys);
+        let plan = rows.iter().find(|row| row.title.contains("Plan")).unwrap();
+        assert_eq!(plan.reason.as_deref(), Some(commands::PLAN_REASON));
+        // Context is part of the row: Ctrl+F is a model-dialog binding, not a global one.
+        let favorite = rows.iter().find(|row| row.title.contains("收藏")).unwrap();
+        assert_eq!(favorite.context, commands::Context::ModelDialog);
+        // Every registry row is documented exactly once.
+        assert_eq!(rows.len(), commands::ENTRIES.len());
     }
 }

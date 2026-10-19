@@ -2,9 +2,13 @@
 //! M4a uses independent headless runs; Remote conversations are a separate capability.
 
 mod app;
+mod autocomplete;
 pub mod catalog;
 mod color;
+mod commands;
 mod editor;
+mod files;
+mod keymap;
 mod markdown;
 mod model_dialog;
 mod theme;
@@ -23,6 +27,7 @@ use arc_deck_core::{
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
 };
@@ -111,6 +116,13 @@ pub(crate) struct Preferences {
     /// Kept as written even when the name is unknown so the warning repeats instead of the
     /// typo being silently rewritten to the default.
     theme: Option<String>,
+    /// Submitted drafts, oldest first. Input history has to survive a restart to be useful;
+    /// the file is the same one the UI preferences live in so there is no second store to lose.
+    history: Vec<String>,
+    /// Most-recently-used `@` references, used to rank file candidates.
+    recent_files: Vec<String>,
+    /// Summarize a large paste into `[粘贴 N 行]` in the draft and expand it on submit.
+    paste_summary: bool,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -118,6 +130,9 @@ impl Default for Preferences {
             light: false,
             sidebar: true,
             theme: None,
+            history: Vec::new(),
+            recent_files: Vec::new(),
+            paste_summary: true,
         }
     }
 }
@@ -135,8 +150,49 @@ impl Preferences {
 struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture);
+        let _ = execute!(
+            io::stdout(),
+            PopKeyboardEnhancementFlags,
+            DisableBracketedPaste,
+            DisableMouseCapture
+        );
         ratatui::restore();
+    }
+}
+
+/// Hands the terminal back to an external editor and returns the edited draft.
+///
+/// The editor command is `$VISUAL` / `$EDITOR` (whitespace-split, so `code -w` works) or
+/// `notepad` on Windows and `vi` elsewhere. Failure is reported, never fatal: the draft would
+/// otherwise be lost because the user's editor was mistyped.
+fn run_external_editor(draft: &str) -> io::Result<Option<String>> {
+    let path = std::env::temp_dir().join(format!("arcdeck-draft-{}.md", std::process::id()));
+    std::fs::write(&path, draft)?;
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| if cfg!(windows) { "notepad".into() } else { "vi".into() });
+    let mut parts = editor.split_whitespace();
+    let program = parts.next().unwrap_or(if cfg!(windows) { "notepad" } else { "vi" });
+    let status = std::process::Command::new(program)
+        .args(parts)
+        .arg(&path)
+        .status();
+    match status {
+        Ok(status) if status.success() => {
+            let text = std::fs::read_to_string(&path)?;
+            // Editors append a final newline; the composer should not gain one from that.
+            let text = text.trim_end_matches('\n').to_string();
+            let _ = std::fs::remove_file(&path);
+            Ok(Some(text))
+        }
+        Ok(status) => {
+            let _ = std::fs::remove_file(&path);
+            Err(io::Error::other(format!("外部编辑器以 {status} 退出")))
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&path);
+            Err(error)
+        }
     }
 }
 
@@ -157,12 +213,48 @@ pub fn run(boot: Boot, requests: Sender<Request>, updates: Receiver<Update>) -> 
     let _guard = TerminalGuard;
     let mut terminal = ratatui::try_init()?;
     execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
+    // Kitty keyboard protocol (where the terminal supports it) is what makes Shift+Enter
+    // distinguishable from Enter. Terminals that don't implement it ignore the sequence; the
+    // existing keys (F6/Enter on Windows, Enter/Ctrl+J elsewhere) keep working either way.
+    let _ = execute!(
+        io::stdout(),
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    );
     let mut app = app::App::new(boot, preferences, model_prefs);
     let _ = requests.send(Request::Refresh);
     let result = (|| {
         loop {
             while let Ok(update) = updates.try_recv() {
                 app.update(update);
+            }
+            // The leader chord expires on wall-clock time, not on the next keystroke; a poll
+            // timeout is the only place that can notice the 2000 ms window closing.
+            app.tick();
+            if app.take_editor_request() {
+                // The external editor needs a normal screen and normal keys; leave the
+                // enhanced-key mode only if it was on.
+                let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+                let _ = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture);
+                ratatui::restore();
+                let draft = app.editor.text.clone();
+                match run_external_editor(&draft) {
+                    Ok(Some(text)) => {
+                        app.editor.set_text(text);
+                        app.notice = "已从外部编辑器回填".into();
+                    }
+                    Ok(None) => {}
+                    Err(error) => app.notice = format!("外部编辑器失败：{error}"),
+                }
+                terminal = ratatui::try_init()?;
+                execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
+                let _ = execute!(
+                    io::stdout(),
+                    PushKeyboardEnhancementFlags(
+                        KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    )
+                );
+                app.dirty = true;
+                continue;
             }
             if app.dirty {
                 terminal.draw(|frame| view::draw(frame, &mut app))?;
@@ -187,6 +279,8 @@ pub fn run(boot: Boot, requests: Sender<Request>, updates: Receiver<Update>) -> 
         eprintln!("模型偏好保存失败：{error}");
         return result;
     }
+    // Input history and recent `@` files ride along with the UI preferences.
+    app.persist_preferences();
     if let Ok(text) = serde_json::to_string_pretty(&app.preferences)
         && let Err(error) = std::fs::write(&app.boot.preferences, text)
     {

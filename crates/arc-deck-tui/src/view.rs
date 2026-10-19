@@ -18,6 +18,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{App, Dialog, token},
+    commands::{self, Action, Category},
     markdown::{self, MarkdownPalette},
     model_dialog,
     theme::{Feedback, State, Theme, Variant},
@@ -108,32 +109,44 @@ pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
         return;
     }
     let footer = Rect::new(area.x + 1, area.bottom() - 2, area.width - 2, 2);
+    let leader = app.keymap.leader_label();
+    let hint = if app.leader_active() {
+        // Which-key, generated from the same keymap that resolves the chord: the strip cannot
+        // advertise a combination that no longer exists after a rebind.
+        let mut text = format!("{leader}：");
+        for (index, (key, title)) in app.leader_hints().into_iter().enumerate() {
+            if index > 0 {
+                text.push_str(" · ");
+            }
+            text.push_str(&format!("{key} {title}"));
+        }
+        text
+    } else if cfg!(windows) && area.width < 65 {
+        "F6发送 Enter换行 ^P命令 F1帮助 ^C退出".into()
+    } else if cfg!(windows) {
+        format!(
+            "F6 发送 · Enter 换行 · ^P 命令 · {leader} leader · F1 帮助 · PgUp 上滚 · Esc 取消 · /exit 退出"
+        )
+    } else if area.width < 65 {
+        "Enter发送 ^J换行 ^P命令 F1帮助 ^C退出".into()
+    } else {
+        format!(
+            "Enter 发送 · ^J 换行 · ^P 命令 · {leader} leader · F1 帮助 · PgUp 上滚 · Esc 取消 · ^C 退出"
+        )
+    };
     frame.render_widget(
         Paragraph::new(vec![
             Line::styled(clean(&app.notice), Style::default().fg(warning(t))),
-            Line::styled(
-                if app.leader {
-                    "leader: n 新请求 · l 历史 · a Agent · m 模型 · b 信息栏 · t 主题"
-                } else if cfg!(windows) && area.width < 65 {
-                    "F6发送 Enter换行 ^P命令 /exit退出"
-                } else if cfg!(windows) {
-                    "F6 发送 · Enter 换行 · ^P 命令 · ^X leader · PgUp 上滚 · Esc 取消 · /theme 主题 · /exit 退出"
-                } else if area.width < 65 {
-                    "Enter发送 ^J换行 ^P命令 ^C退出"
-                } else {
-                    "Enter 发送 · ^J 换行 · ^P 命令 · ^X leader · PgUp 上滚 · Esc 取消 · /theme 主题 · ^C 退出"
-                },
-                Style::default().fg(muted(t)),
-            ),
+            Line::styled(hint, Style::default().fg(muted(t))),
         ]),
         footer,
     );
     let content = Rect::new(area.x, area.y, area.width, area.height - 2);
-    if app.selected.is_none() {
-        home(frame, app, content, t);
+    let composer_area = if app.selected.is_none() {
+        home(frame, app, content, t)
     } else {
-        session(frame, app, content, t);
-    }
+        session(frame, app, content, t)
+    };
     if app.sidebar_overlay
         && app.preferences.sidebar
         && content.width <= 120
@@ -147,12 +160,16 @@ pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
             t,
         );
     }
+    // The popup is anchored to the composer, not the screen: on Home the composer sits in the
+    // middle, and a completion list glued to the bottom edge would look like a different widget.
     if let Some(dialog) = &app.dialog {
         popup(frame, app, dialog, content, t);
+    } else if app.autocomplete.is_some() {
+        autocomplete_popup(frame, app, composer_area, content, t);
     }
 }
 
-fn home(frame: &mut Frame, app: &App, area: Rect, t: &Theme) {
+fn home(frame: &mut Frame, app: &App, area: Rect, t: &Theme) -> Rect {
     let width = 75.min(area.width.saturating_sub(4));
     let x = area.x + (area.width - width) / 2;
     let height = 9.min(area.height);
@@ -171,12 +188,8 @@ fn home(frame: &mut Frame, app: &App, area: Rect, t: &Theme) {
         Paragraph::new("从当前项目开始一次独立请求").style(Style::default().fg(muted(t))),
         Rect::new(x, y + 2, width, 1),
     );
-    composer(
-        frame,
-        app,
-        Rect::new(x, y + 3, width, height.saturating_sub(3)),
-        t,
-    );
+    let composer_area = Rect::new(x, y + 3, width, height.saturating_sub(3));
+    composer(frame, app, composer_area, t);
     if area.height > 16 {
         frame.render_widget(
             Paragraph::new(clean(&app.boot.workspace.display().to_string()))
@@ -184,9 +197,10 @@ fn home(frame: &mut Frame, app: &App, area: Rect, t: &Theme) {
             Rect::new(x, y + height + 1, width, 1),
         );
     }
+    composer_area
 }
 
-fn session(frame: &mut Frame, app: &mut App, area: Rect, t: &Theme) {
+fn session(frame: &mut Frame, app: &mut App, area: Rect, t: &Theme) -> Rect {
     let side = if app.preferences.sidebar && area.width > 120 {
         42
     } else {
@@ -236,17 +250,14 @@ fn session(frame: &mut Frame, app: &mut App, area: Rect, t: &Theme) {
         ),
         body,
     );
-    composer(
-        frame,
-        app,
-        Rect::new(
-            main.x + 1,
-            main.bottom() - composer_height,
-            main.width - 2,
-            composer_height,
-        ),
-        t,
+    let composer_area = Rect::new(
+        main.x + 1,
+        main.bottom() - composer_height,
+        main.width - 2,
+        composer_height,
     );
+    composer(frame, app, composer_area, t);
+    composer_area
 }
 
 fn composer(frame: &mut Frame, app: &App, area: Rect, t: &Theme) {
@@ -288,17 +299,38 @@ fn composer(frame: &mut Frame, app: &App, area: Rect, t: &Theme) {
         )),
         inner,
     );
-    let mut metadata = format!("{} · {}", app.agent, app.permission);
-    // 模型与 effort 都显示**当前值**（由模型对话框改动），不是配置里的那份 ——
-    // 这一行是用户确认「下一次请求到底用什么」的地方。
-    if inner.width > 42 {
-        metadata.push_str(&format!(" · {}", app.model_name()));
+    // 元数据按**省略顺序**拼，而不是按宽度阈值：模型优先级最高（它决定这一轮到底发给谁），
+    // 然后 agent、effort、授权级别。宽度不够时从优先级最低的一项开始丢 —— 固定阈值会在某个
+    // 宽度上同时跳掉两项，看起来像显示坏了。
+    let mut parts: Vec<(u8, String)> = vec![(0, app.model_name()), (1, app.agent.clone())];
+    if let Some(effort) = &app.effort {
+        parts.push((2, format!("effort {effort}")));
     }
-    if inner.width > 63
-        && let Some(effort) = &app.effort
-    {
-        metadata.push_str(&format!(" · effort {effort}"));
+    parts.push((3, app.permission.clone()));
+    loop {
+        let joined = parts
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        if joined.width() <= inner.width as usize || parts.len() <= 1 {
+            break;
+        }
+        let Some(index) = parts
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, (priority, _))| *priority)
+            .map(|(index, _)| index)
+        else {
+            break;
+        };
+        parts.remove(index);
     }
+    let metadata = parts
+        .iter()
+        .map(|(_, text)| text.as_str())
+        .collect::<Vec<_>>()
+        .join(" · ");
     frame.render_widget(
         Paragraph::new(metadata).style(Style::default().fg(accent(t))),
         Rect::new(inner.x, area.bottom() - 2, inner.width, 1),
@@ -443,10 +475,20 @@ fn body_lines(app: &App, t: &Theme, width: u16) -> Vec<Line<'static>> {
             }
         } else if event.kind == "diagnostic" && matches!(str_at("level").as_str(), "error" | "warn")
         {
-            lines.push(Line::styled(
-                clean(&str_at("message")),
-                Style::default().fg(warning(t)),
-            ));
+            // 一次运行时 stderr 可能有 32 KiB / 上百行（Node 的栈），整段画进正文会把
+            // 真正的对话推出屏幕。只显示第一条（通常是摘要），其余指向 /evidence ——
+            // 诊断仍然可见，只是不再占满屏幕。
+            let message = str_at("message");
+            let mut parts = message.lines().filter(|line| !line.trim().is_empty());
+            let first = parts.next().unwrap_or("");
+            let rest = parts.count();
+            lines.push(Line::styled(clean(first), Style::default().fg(warning(t))));
+            if rest > 0 {
+                lines.push(Line::styled(
+                    format!("…（另有 {rest} 行诊断，完整内容见 /evidence）"),
+                    Style::default().fg(muted(t)),
+                ));
+            }
         }
     }
     if !tools.is_empty() {
@@ -580,7 +622,8 @@ fn popup(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, t: &Theme) {
         }
         return;
     }
-    // 模型/provider/effort 三个对话框在 model_dialog 里，其余三个仍是这里的小浮层。
+    // 模型/provider/effort 三个对话框在 model_dialog 里；命令面板与帮助各有自己的行模型，
+    // 剩下三个（运行历史 / Agent / 授权级别）共用下面的小浮层。
     match dialog {
         Dialog::Models(state) => {
             let search = model_dialog::draw_model(
@@ -628,43 +671,33 @@ fn popup(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, t: &Theme) {
             );
             return;
         }
+        Dialog::Commands => {
+            commands_popup(frame, app, area, t);
+            return;
+        }
+        Dialog::Help => {
+            help_popup(frame, app, area, t);
+            return;
+        }
         // 主题选择器在函数开头就交给 theme_dialog 画了。
-        Dialog::Commands | Dialog::Runs | Dialog::Agents | Dialog::Theme => {}
+        Dialog::Runs | Dialog::Agents | Dialog::Permissions | Dialog::Theme => {}
     }
-    // 40×12 之类的窄终端会给出一条负宽度的矩形；用 saturating_sub 而不是 `-`，
-    // 否则 debug 构建直接 panic（「窗口太小」正是这条路径最常遇到的情形）。
-    let w = 72.min(area.width.saturating_sub(2));
-    let h = 18.min(area.height.saturating_sub(2)).max(4);
-    let rect = Rect::new(
-        area.x + area.width.saturating_sub(w) / 2,
-        area.y + area.height.saturating_sub(h) / 2,
-        w,
-        h,
-    );
+    let rect = dialog_rect(area);
     let title = match dialog {
-        Dialog::Commands => "命令",
         Dialog::Runs => "运行历史",
         Dialog::Agents => "Agent",
+        Dialog::Permissions => "授权级别",
         Dialog::Theme => return,
-        // 上面已经把这三个分支返回掉了；这里给编译器一个穷尽的分支。
-        Dialog::Models(_) | Dialog::Providers(_) | Dialog::Efforts(_) => return,
+        // 上面已经把其余分支返回掉了；这里给编译器一个穷尽的分支。
+        Dialog::Commands
+        | Dialog::Help
+        | Dialog::Models(_)
+        | Dialog::Providers(_)
+        | Dialog::Efforts(_) => return,
     };
-    frame.render_widget(Clear, rect);
-    frame.render_widget(
-        Block::bordered()
-            .title(title)
-            .border_style(Style::default().fg(t.border.to_ratatui()))
-            .style(Style::default().bg(t.dialog_background(t.background_raised).over(t.background))),
-        rect,
-    );
-    let inner = Rect::new(rect.x + 2, rect.y + 1, rect.width - 4, rect.height - 2);
-    // 走到这里的只有 Commands / Runs / Agents 三个（上面已经 return 掉另外三个）。
+    let inner = dialog_frame(frame, rect, title, t);
+    // 走到这里的只有 Runs / Agents / Permissions 三个。
     let mut rows: Vec<(String, bool)> = match dialog {
-        Dialog::Commands => app
-            .filtered_commands()
-            .iter()
-            .map(|c| (format!("{}  {}", c.slash, c.label), true))
-            .collect(),
         Dialog::Runs => app
             .filtered_runs()
             .iter()
@@ -673,15 +706,32 @@ fn popup(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, t: &Theme) {
         Dialog::Agents => vec![
             ("Echo · 默认工程角色".into(), true),
             ("Build · 实施".into(), true),
-            ("Plan · 不可用：执行 guard 尚未接通".into(), false),
+            (
+                format!(
+                    "Plan · 不可用：{}",
+                    app.availability(Action::Plan).unwrap_or_default()
+                ),
+                false,
+            ),
         ],
-        Dialog::Theme => return,
-        Dialog::Models(_) | Dialog::Providers(_) | Dialog::Efforts(_) => return,
+        Dialog::Permissions => commands::PERMISSIONS
+            .iter()
+            .map(|(name, description, reason)| match reason {
+                // Unavailable rows stay visible with the reason: hiding readonly would make
+                // "why can't I pick it" unanswerable from inside the app.
+                Some(reason) => (format!("{name} · {description} — {reason}"), false),
+                None => {
+                    let current = if *name == app.permission { "（当前）" } else { "" };
+                    (format!("{name} · {description}{current}"), true)
+                }
+            })
+            .collect(),
+        _ => Vec::new(),
     };
     if rows.is_empty() {
         rows.push(("没有匹配项".into(), false));
     }
-    let search = if matches!(dialog, Dialog::Commands | Dialog::Runs) {
+    let search = if matches!(dialog, Dialog::Runs) {
         format!("搜索：{}", app.filter)
     } else {
         "↑↓ 选择 · Enter 确定 · Esc 返回".into()
@@ -733,6 +783,262 @@ fn popup(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, t: &Theme) {
             inner.height.saturating_sub(2),
         ),
     );
+}
+
+/// Shared popup frame: 40×12 之类的窄终端会给出一条负宽度的矩形；用 saturating_sub 而不是
+/// `-`，否则 debug 构建直接 panic（「窗口太小」正是这条路径最常遇到的情形）。
+fn dialog_rect(area: Rect) -> Rect {
+    let w = 72.min(area.width.saturating_sub(2));
+    let h = 18.min(area.height.saturating_sub(2)).max(4);
+    Rect::new(
+        area.x + area.width.saturating_sub(w) / 2,
+        area.y + area.height.saturating_sub(h) / 2,
+        w,
+        h,
+    )
+}
+
+/// The palette and help are as long as the registry; a fixed 18 rows would hide whole
+/// categories (and their reasons) with no indication that there is more below.
+fn dialog_rect_tall(area: Rect) -> Rect {
+    let w = 72.min(area.width.saturating_sub(2));
+    let h = area.height.saturating_sub(2).max(4);
+    Rect::new(
+        area.x + area.width.saturating_sub(w) / 2,
+        area.y + area.height.saturating_sub(h) / 2,
+        w,
+        h,
+    )
+}
+
+fn dialog_frame(frame: &mut Frame, rect: Rect, title: &str, t: &Theme) -> Rect {
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Block::bordered()
+            .title(title)
+            .border_style(Style::default().fg(t.border.to_ratatui()))
+            .style(Style::default().bg(t.dialog_background(t.background_raised).over(t.background))),
+        rect,
+    );
+    Rect::new(rect.x + 2, rect.y + 1, rect.width - 4, rect.height - 2)
+}
+
+/// Command palette. Rows are grouped by category and carry the keybinding the keymap really
+/// resolves; an action the backend cannot serve stays listed, greyed, and its reason is shown
+/// on the footer line when it is the selected row.
+fn commands_popup(frame: &mut Frame, app: &App, area: Rect, t: &Theme) {
+    let rect = dialog_rect_tall(area);
+    let inner = dialog_frame(frame, rect, "命令", t);
+    frame.render_widget(
+        Paragraph::new(format!("搜索：{}", app.filter)).style(Style::default().fg(muted(t))),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+
+    enum Row<'a> {
+        Header(&'static str),
+        Item(&'a commands::Entry, Option<String>),
+    }
+    let entries = app.filtered_commands();
+    let mut rows: Vec<Row> = Vec::new();
+    let mut category: Option<Category> = None;
+    for entry in &entries {
+        if category != Some(entry.category) {
+            category = Some(entry.category);
+            rows.push(Row::Header(entry.category.label()));
+        }
+        let reason = entry
+            .unavailable
+            .map(str::to_string)
+            .or_else(|| app.availability(entry.action));
+        rows.push(Row::Item(entry, reason));
+    }
+    if entries.is_empty() {
+        rows.push(Row::Header("没有匹配项"));
+    }
+    let selected = entries.get(app.choice).map(|entry| entry.action);
+    let selected_row = rows
+        .iter()
+        .position(|row| matches!(row, Row::Item(entry, _) if Some(entry.action) == selected));
+    // One row for the search line, one for the footer; the rest is the list.
+    let visible = inner.height.saturating_sub(2) as usize;
+    let start = selected_row
+        .unwrap_or(0)
+        .saturating_sub(visible.saturating_sub(1));
+    let width = inner.width as usize;
+    let mut lines = Vec::new();
+    for row in rows.iter().skip(start).take(visible) {
+        match row {
+            Row::Header(title) => lines.push(Line::styled(
+                clean(&format!("— {title}")),
+                Style::default()
+                    .fg(muted(t))
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Row::Item(entry, reason) => {
+                let is_selected = Some(entry.action) == selected;
+                let available = reason.is_none();
+                let marker = if is_selected { "›" } else { " " };
+                let slash = entry.slash.unwrap_or("");
+                let keys = app.keymap.display(entry.action).unwrap_or_default();
+                let mut text = format!("{marker} {slash:<14}{}", entry.title);
+                let used = text.width() + keys.width();
+                if !keys.is_empty() && used < width {
+                    text.push_str(&" ".repeat(width - used));
+                    text.push_str(&keys);
+                }
+                let fg = if !available {
+                    t.text_action(Variant::Primary, &[State::Disabled]).over(t.background)
+                } else if is_selected {
+                    row_focus(t).0
+                } else {
+                    t.text.to_ratatui()
+                };
+                let style = Style::default().fg(fg);
+                let style = if is_selected && available {
+                    style.bg(row_focus(t).1)
+                } else {
+                    style
+                };
+                lines.push(Line::styled(clean(&text), style));
+            }
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(lines),
+        Rect::new(
+            inner.x,
+            inner.y + 1,
+            inner.width,
+            inner.height.saturating_sub(2),
+        ),
+    );
+    let footer = match selected.and_then(|action| app.availability(action)) {
+        Some(reason) => reason,
+        None => "↑↓ 选择 · Enter 执行 · Esc 返回".into(),
+    };
+    frame.render_widget(
+        Paragraph::new(clean(&footer)).style(Style::default().fg(muted(t))),
+        Rect::new(
+            inner.x,
+            inner.y + inner.height.saturating_sub(1),
+            inner.width,
+            1,
+        ),
+    );
+}
+
+/// Help lists every binding by category. The reason for an unavailable action is part of the
+/// row, not a tooltip: terminals have no hover.
+fn help_popup(frame: &mut Frame, app: &App, area: Rect, t: &Theme) {
+    let rect = dialog_rect_tall(area);
+    let inner = dialog_frame(frame, rect, "帮助", t);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut category: Option<Category> = None;
+    for row in app.help_rows() {
+        if category != Some(row.category) {
+            category = Some(row.category);
+            lines.push(Line::styled(
+                clean(row.category.label()),
+                Style::default()
+                    .fg(accent(t))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        let keys = format!("{:<18}", row.keys);
+        // Context is part of the documentation: Ctrl+F means "favourite" only inside the
+        // model dialog, and a help page that omits that is worse than no help page.
+        let context = match row.context {
+            commands::Context::ModelDialog => "（仅模型对话框）",
+            commands::Context::Anywhere | commands::Context::Composer => "",
+        };
+        let detail = match row.reason {
+            Some(reason) => format!("{context}{} — {reason}", row.title),
+            None => format!("{context}{}", row.title),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(clean(&keys), Style::default().fg(muted(t))),
+            Span::raw(clean(&detail)),
+        ]));
+    }
+    // Only the footer row is reserved; at 120×40 the whole reference must fit without
+    // scrolling, because Ctrl+P lives on the very last row.
+    let visible = inner.height.saturating_sub(1) as usize;
+    let start = app.help_scroll.min(lines.len().saturating_sub(1));
+    frame.render_widget(
+        Paragraph::new(
+            lines
+                .into_iter()
+                .skip(start)
+                .take(visible)
+                .collect::<Vec<_>>(),
+        )
+        .wrap(ratatui::widgets::Wrap { trim: true }),
+        Rect::new(inner.x, inner.y, inner.width, visible as u16),
+    );
+    frame.render_widget(
+        Paragraph::new("↑↓ 滚动 · Enter / Esc 关闭").style(Style::default().fg(muted(t))),
+        Rect::new(
+            inner.x,
+            inner.y + inner.height.saturating_sub(1),
+            inner.width,
+            1,
+        ),
+    );
+}
+
+/// `/` completion. Anchored above the composer so it does not cover the draft it is completing.
+fn autocomplete_popup(frame: &mut Frame, app: &App, composer: Rect, area: Rect, t: &Theme) {
+    let Some(popup) = &app.autocomplete else {
+        return;
+    };
+    let rows = popup.items.len().min(7);
+    let width = 64.min(area.width.saturating_sub(2)).max(20);
+    let height = (rows as u16 + 2).min(area.height.saturating_sub(2)).max(3);
+    let x = composer
+        .x
+        .min(area.right().saturating_sub(width))
+        .max(area.x);
+    let y = composer.y.saturating_sub(height).max(area.y);
+    let rect = Rect::new(x, y, width, height);
+    let title = if popup.trigger == '@' {
+        "@ 文件引用"
+    } else {
+        "命令补全"
+    };
+    let inner = dialog_frame(frame, rect, title, t);
+    let mut lines = Vec::new();
+    for (index, item) in popup.items.iter().enumerate().take(rows) {
+        let selected = index == popup.selected;
+        let fg = if !item.available {
+            t.text_action(Variant::Primary, &[State::Disabled]).over(t.background)
+        } else if selected {
+            row_focus(t).0
+        } else {
+            t.text.to_ratatui()
+        };
+        // Slash rows show the command and then its title; file rows have no second label, and
+        // their detail *is* the path, so printing the insert text again would duplicate it.
+        let left = match item.action {
+            Some(_) => item.insert.trim_end(),
+            None => item.detail.as_str(),
+        };
+        let mut text = format!(
+            "{} {:<14}{}",
+            if selected { "›" } else { " " },
+            left,
+            item.title
+        );
+        if !item.available && text.width() + 6 <= inner.width as usize {
+            text.push_str(" · 不可用");
+        }
+        let style = if selected && item.available {
+            Style::default().fg(fg).bg(row_focus(t).1)
+        } else {
+            Style::default().fg(fg)
+        };
+        lines.push(Line::styled(clean(&text), style));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// `markdown::clean` under the old local name: every non-Markdown field in the
@@ -880,6 +1186,8 @@ mod tests {
                     Some(Dialog::Commands),
                     Some(Dialog::Runs),
                     Some(Dialog::Agents),
+                    Some(Dialog::Help),
+                    Some(Dialog::Permissions),
                     Some(Dialog::Models(crate::model_dialog::ModelDialogState::default())),
                     Some(Dialog::Providers(
                         crate::model_dialog::ProviderDialogState::default(),
@@ -975,6 +1283,30 @@ mod tests {
         assert_eq!(text.matches("第0行中文结果").count(), 1);
         assert!(text.contains("Arc Deck 采集的事实"));
         assert!(text.contains("模型的陈述"));
+    }
+
+    /// 运行时 stderr 的一次警告可能带整段 Node 栈；正文只该显示第一条摘要，
+    /// 否则一屏对话被诊断顶掉（实测：0.2.1 的 libuv 退出断言夹着 5 行以上栈）。
+    #[test]
+    fn a_noisy_diagnostic_is_folded_to_its_first_line() {
+        let mut a = app();
+        long_run(&mut a);
+        let detail = a.detail.as_mut().unwrap();
+        detail.events.push(EventEnvelope::diagnostic(
+            "r",
+            9,
+            "warn",
+            None,
+            "运行时 stderr：dsh: warning: 1 entry did not activate spill-local\n    at privateRoot (x)\nAssertion failed: !(handle->flags & UV_HANDLE_CLOSING)",
+        ));
+        let text = body_lines(&a, &a.theme.clone(), 100)
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("运行时 stderr"));
+        assert!(text.contains("另有 2 行"));
+        assert!(!text.contains("Assertion failed"), "the stack must not fill the screen");
     }
     #[test]
     fn cjk_cursor_uses_terminal_cells_after_wrap() {
@@ -1095,13 +1427,165 @@ mod tests {
         }
     }
 
+    /// The palette used to be a flat list of `slash  label` rows. §7.3 asks for categories and
+    /// keys, and an unavailable row has to carry its reason somewhere the user can read.
+    #[test]
+    fn the_palette_groups_by_category_shows_keys_and_explains_unavailable_rows() {
+        let mut a = app();
+        a.open_dialog(Dialog::Commands);
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| draw(f, &mut a)).unwrap();
+        let buffer = terminal.backend().buffer();
+        for needle in ["会话", "Agent 与模型", "界面", "帮助", "Ctrl+X N", "Ctrl+X T"] {
+            assert!(
+                contains_wrapped(buffer, needle),
+                "the palette is missing {needle:?}: {:?}",
+                row_text(buffer, 4)
+            );
+        }
+        // Selecting the unavailable Plan row puts its reason on the footer line.
+        a.filter = "plan".into();
+        a.choice = 0;
+        terminal.draw(|f| draw(f, &mut a)).unwrap();
+        assert!(
+            contains_wrapped(terminal.backend().buffer(), "只读"),
+            "the reason for the unavailable row must be visible: {:?}",
+            row_text(terminal.backend().buffer(), 20)
+        );
+    }
+
+    /// Help is generated from the registry + keymap; if either drifts, this fails rather than
+    /// the page quietly documenting keys that do nothing.
+    #[test]
+    fn help_lists_the_real_bindings() {
+        let mut a = app();
+        a.open_dialog(Dialog::Help);
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| draw(f, &mut a)).unwrap();
+        let buffer = terminal.backend().buffer();
+        for needle in ["Ctrl+C", "Shift+Tab", "Ctrl+P", "Plan", "只读", "仅模型对话框"] {
+            assert!(
+                contains_wrapped(buffer, needle),
+                "help is missing {needle:?}"
+            );
+        }
+    }
+
+    /// The completion list has to sit above the composer and name the command it will insert.
+    #[test]
+    fn the_completion_popup_renders_above_the_composer() {
+        let mut a = app();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        a.input(
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('/'),
+                crossterm::event::KeyModifiers::NONE,
+            )),
+            &tx,
+        );
+        assert!(a.autocomplete.is_some());
+        for c in "the".chars() {
+            a.input(
+                crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char(c),
+                    crossterm::event::KeyModifiers::NONE,
+                )),
+                &tx,
+            );
+        }
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| draw(f, &mut a)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!(contains_wrapped(buffer, "命令补全"));
+        assert!(contains_wrapped(buffer, "/theme"));
+    }
+
+    /// File completion shares the popup but has its own title and shows the path exactly once.
+    #[test]
+    fn the_file_completion_popup_shows_the_path_once() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "x").unwrap();
+        let mut a = app();
+        a.boot.workspace = dir.path().to_path_buf();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        for c in "看 @ma".chars() {
+            a.input(
+                crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char(c),
+                    crossterm::event::KeyModifiers::NONE,
+                )),
+                &tx,
+            );
+        }
+        assert!(a.autocomplete.is_some());
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| draw(f, &mut a)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!(contains_wrapped(buffer, "@ 文件引用"));
+        let rows = (0..buffer.area.height)
+            .filter(|y| row_text(buffer, *y).contains("@main.rs"))
+            .count();
+        assert_eq!(rows, 1, "the path must not be printed twice in one row");
+    }
+
+    /// Which-key: the footer lists the chords that can follow the leader. Generated from the
+    /// keymap, so a rebind changes the strip too.
+    #[test]
+    fn the_leader_strip_lists_what_can_follow() {
+        let mut a = app();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        a.input(
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('x'),
+                crossterm::event::KeyModifiers::CONTROL,
+            )),
+            &tx,
+        );
+        assert!(a.leader_active());
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+        terminal.draw(|f| draw(f, &mut a)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!(contains_wrapped(buffer, "Ctrl+X："));
+        assert!(contains_wrapped(buffer, "新的独立请求"));
+    }
+
+    /// 元数据的省略顺序：模型最高、permission 最低。窄终端上必须仍看得见模型，
+    /// 而不是四个字段一起消失或按固定阈值一下跳掉两项。
+    #[test]
+    fn metadata_drops_low_priority_parts_as_the_terminal_narrows() {
+        for (width, height, workspace, agent) in [
+            (120, 30, true, true),
+            (40, 12, false, true),
+            (30, 12, false, false),
+        ] {
+            let mut a = app();
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|f| draw(f, &mut a)).unwrap();
+            let buffer = terminal.backend().buffer();
+            assert!(
+                contains_wrapped(buffer, "DeepSeek V4.1 Flash"),
+                "the model name is never dropped ({width}x{height})"
+            );
+            assert_eq!(
+                contains_wrapped(buffer, "workspace"),
+                workspace,
+                "permission is the first to go ({width}x{height})"
+            );
+            assert_eq!(
+                contains_wrapped(buffer, "echo"),
+                agent,
+                "agent goes after permission ({width}x{height})"
+            );
+        }
+    }
+
     #[test]
     fn generate_reviewable_cell_snapshots() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tui-preview");
         std::fs::create_dir_all(&dir).unwrap();
         for (w, h) in [(40, 12), (80, 24), (120, 30), (160, 40)] {
             for light in [false, true] {
-                for screen in ["home", "run", "commands", "theme"] {
+                for screen in ["home", "run", "commands", "theme", "help", "permissions"] {
                     let mut a = app();
                     set_mode(&mut a, light);
                     if screen != "home" {
@@ -1112,6 +1596,12 @@ mod tests {
                     }
                     if screen == "theme" {
                         a.open_dialog(Dialog::Theme);
+                    }
+                    if screen == "help" {
+                        a.open_dialog(Dialog::Help);
+                    }
+                    if screen == "permissions" {
+                        a.open_dialog(Dialog::Permissions);
                     }
                     let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
                     terminal.draw(|f| draw(f, &mut a)).unwrap();
