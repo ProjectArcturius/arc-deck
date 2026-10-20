@@ -12,11 +12,17 @@ $original = [Environment]::GetEnvironmentVariable('Path','User')
 $added = $false
 $written = $original
 if (($original -split ';') -notcontains $InstallDir) {
-    $written = if ([string]::IsNullOrEmpty($original)) { $InstallDir } else { $original.TrimEnd(';') + ';' + $InstallDir }
+    # An older cargo-installed arcdeck may already be on PATH. The installed version must win.
+    $written = if ([string]::IsNullOrEmpty($original)) { $InstallDir } else { $InstallDir + ';' + $original }
     $added = $true
 } elseif ($oldState) {
     $added = $oldState.added_path
-    $original = $oldState.original_path
+    if ($added) {
+        # Preserve PATH edits made between installs; the old snapshot is valid only while
+        # the current value still equals what that installation wrote.
+        $original = if ($original -eq $oldState.written_path) { $oldState.original_path } else { ($original -split ';' | Where-Object { $_ -ne $InstallDir }) -join ';' }
+        $written = if ([string]::IsNullOrEmpty($original)) { $InstallDir } else { $InstallDir + ';' + $original }
+    }
 }
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 foreach ($file in $files) { Copy-Item -LiteralPath (Join-Path $source $file) -Destination (Join-Path $InstallDir $file) -Force }

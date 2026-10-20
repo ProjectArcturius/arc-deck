@@ -8,6 +8,7 @@
 `%LOCALAPPDATA%\Programs\Arc Deck`，只改当前用户的 PATH，无需管理员权限。
 安装后**重新打开终端**，运行 `arcdeck --version`。也可用 Windows「已安装的应用」卸载；
 卸载只移除程序和安装器添加的 PATH，保留配置、密钥、运行时和会话。
+新安装目录放在用户 PATH 首位，避免继续启动 Cargo 目录中的旧 `arcdeck`。
 
 ZIP 版：解压 `arcdeck-1.0.0-windows-x86_64.zip`，双击 `install.cmd` 即可安装到同一用户目录并加入 PATH，
 卸载时运行安装目录里的 `uninstall.cmd`。也可直接用 `./arcdeck.exe`，作为便携程序使用。

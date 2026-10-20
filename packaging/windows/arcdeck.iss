@@ -53,9 +53,9 @@ begin
     RegQueryStringValue(HKCU, 'Environment', 'Path', Value);
     if not HasPath(Value, Entry) then begin
       RegWriteStringValue(HKCU, 'Software\Arc Deck', 'OriginalPath', Value);
-      if (Value <> '') and (Value[Length(Value)] <> ';') then Value := Value + ';';
-      RegWriteExpandStringValue(HKCU, 'Environment', 'Path', Value + Entry);
-      RegWriteStringValue(HKCU, 'Software\Arc Deck', 'WrittenPath', Value + Entry);
+      if Value <> '' then Value := Entry + ';' + Value else Value := Entry;
+      RegWriteExpandStringValue(HKCU, 'Environment', 'Path', Value);
+      RegWriteStringValue(HKCU, 'Software\Arc Deck', 'WrittenPath', Value);
       RegWriteStringValue(HKCU, 'Software\Arc Deck', 'AddedPath', Entry);
     end;
   end;
