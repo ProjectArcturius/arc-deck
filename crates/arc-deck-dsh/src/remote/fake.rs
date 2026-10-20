@@ -245,3 +245,109 @@ fn is_would_block(error: &std::io::Error) -> bool {
         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
     )
 }
+
+/// 进程内的**假一元接口**：按脚本回 `server-response`，并记下收到的原始请求。
+///
+/// 为什么不用 `rpc.rs` 里那个只接一次的假内核：审批的测试要「开流 → 收请求 → 回答」，
+/// 回答是一元调用，和开的流在同一套测试里发生。接一次的那个每次都要重开一个服务端。
+pub struct FakeRpc {
+    port: u16,
+    requests: UnboundedReceiver<String>,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl FakeRpc {
+    pub fn start() -> FakeRpc {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("绑一个空闲端口");
+        listener.set_nonblocking(true).expect("非阻塞监听");
+        let port = listener.local_addr().unwrap().port();
+        let (tx, requests) = unbounded_channel::<String>();
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let thread = std::thread::Builder::new()
+            .name("arcdeck-dsh-fake-rpc".into())
+            .spawn(move || {
+                use std::io::{Read, Write};
+                while !thread_stop.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            // Windows 上 accept 出来的连接**继承**监听端的非阻塞：不切回阻塞的话，
+                            // 请求还没到时 `read` 立刻返回空，假服务端就拿 `rpcId: "X"` 回话、
+                            // 客户端判它答非所问。只在机器忙时出现（2026-10-20 全量套件里偶发一次）。
+                            let _ = stream.set_nonblocking(false);
+                            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                            // 一次 `read` 也不保证读全：头和体可能分两段到。读到头结束、
+                            // 再按 Content-Length 读满体。
+                            let mut bytes: Vec<u8> = Vec::new();
+                            let mut chunk = vec![0u8; 64 * 1024];
+                            loop {
+                                let text = String::from_utf8_lossy(&bytes);
+                                if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                                    let length = head
+                                        .lines()
+                                        .find_map(|line| {
+                                            let (name, value) = line.split_once(':')?;
+                                            name.eq_ignore_ascii_case("content-length")
+                                                .then(|| value.trim().parse::<usize>().ok())
+                                                .flatten()
+                                        })
+                                        .unwrap_or(0);
+                                    if body.len() >= length {
+                                        break;
+                                    }
+                                }
+                                match stream.read(&mut chunk) {
+                                    Ok(0) | Err(_) => break,
+                                    Ok(n) => bytes.extend_from_slice(&chunk[..n]),
+                                }
+                            }
+                            let raw = String::from_utf8_lossy(&bytes).to_string();
+                            let rpc_id = raw
+                                .split_once("\r\n\r\n")
+                                .and_then(|(_, body)| serde_json::from_str::<Value>(body).ok())
+                                .and_then(|value| value["rpcId"].as_str().map(str::to_string))
+                                .unwrap_or_else(|| "X".into());
+                            let _ = tx.send(raw);
+                            let body = format!(
+                                r#"{{"type":"server-response","rpcId":"{rpc_id}","result":{{"ok":true,"value":{{}}}}}}"#
+                            );
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                                body.len()
+                            );
+                            let _ = stream.write_all(response.as_bytes());
+                            let _ = stream.flush();
+                        }
+                        Err(error) if is_would_block(&error) => {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            })
+            .expect("起假一元接口线程");
+        FakeRpc { port, requests, stop, thread: Some(thread) }
+    }
+
+    pub fn origin(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    /// 下一条请求的原文（HTTP 头 + 体）。
+    pub async fn request(&mut self) -> Option<String> {
+        tokio::time::timeout(Duration::from_secs(5), self.requests.recv())
+            .await
+            .ok()
+            .flatten()
+    }
+}
+
+impl Drop for FakeRpc {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}

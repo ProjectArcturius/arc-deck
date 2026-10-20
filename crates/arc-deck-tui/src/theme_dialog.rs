@@ -21,7 +21,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::Line,
-    widgets::{Block, Clear, Paragraph},
+    widgets::Paragraph,
 };
 
 use crate::app::App;
@@ -207,7 +207,7 @@ impl ThemeDialog {
         };
         // The hints collapse to the one that matters when the frame is narrow: a truncated hint
         // reads as a rendering bug, and `view.rs` already varies its own footer by width.
-        let hints = if width >= 48 { "↑↓ 预览 · Enter 确认 · Esc 还原 · /mode 深浅" } else { "↑↓ · Enter · Esc" };
+        let hints = if width >= 48 { "选中即预览 · esc 还原 · /mode 切深浅" } else { "" };
         Line::styled(
             format!("{} · {mode} · {hints}", theme.name),
             Style::default().fg(theme.text_action(Variant::Secondary, &[]).over(theme.background)),
@@ -224,23 +224,14 @@ pub(crate) fn popup_rect(area: Rect, width: u16, height: u16) -> Rect {
 
 pub(crate) fn draw(frame: &mut Frame, dialog: &ThemeDialog, area: Rect, theme: &Theme) {
     let rect = popup_rect(area, 72, 14);
-    frame.render_widget(Clear, rect);
-    frame.render_widget(
-        Block::bordered()
-            .title("主题")
-            .border_style(Style::default().fg(theme.border.to_ratatui()))
-            .style(Style::default().bg(theme.dialog_background(theme.background_raised).over(theme.background))),
+    let inner = crate::view::dialog_panel(
+        frame,
         rect,
-    );
-    let inner = Rect::new(
-        rect.x + 2,
-        rect.y + 1,
-        rect.width.saturating_sub(4),
-        rect.height.saturating_sub(2),
+        Line::styled("主题", Style::default().fg(crate::view::text(theme)).add_modifier(Modifier::BOLD)),
+        theme,
     );
     frame.render_widget(
-        Paragraph::new(format!("搜索：{}", dialog.filter()))
-            .style(Style::default().fg(theme.text_action(Variant::Secondary, &[]).over(theme.background))),
+        Paragraph::new(crate::view::search_line(dialog.filter(), theme)),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
     dialog.draw(
@@ -275,6 +266,7 @@ mod tests {
                 preferences: "unused".into(),
                 catalog: Vec::new(),
                 model_prefs: "unused".into(),
+                personalization: false,
             },
             crate::Preferences {
                 theme: theme.map(str::to_string),

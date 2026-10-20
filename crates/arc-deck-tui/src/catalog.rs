@@ -79,6 +79,8 @@ pub struct Model {
     /// off/low/high/max，pi-ai 路由来自它自己的目录）。临时目录一律留空 ——
     /// 在界面上编出几档再让运行时拒绝，比不给选择差得多。
     pub efforts: Vec<String>,
+    /// 上下文窗口（token）。只有内核目录报了才有；没有就不算占用百分比（§7.3）。
+    pub context_window: Option<u64>,
 }
 
 /// 本地偏好。收藏与最近是 Arc Deck 自己的状态，不写回 DSH（§7.2）。

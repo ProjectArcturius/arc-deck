@@ -123,6 +123,7 @@ fn patch_for(guard: &ExecutionGuard) -> String {
         route: &route(),
         persona_suffix: "M3 live 验收用的 persona 占位",
         session_log_upload: false,
+        session_search: false,
         guard,
     })
 }

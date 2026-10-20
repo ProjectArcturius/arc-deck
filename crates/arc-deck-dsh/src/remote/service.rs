@@ -20,9 +20,10 @@ use arc_deck_core::service::{BackendState, Command, Event, NoticeLevel};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use super::events::{self, Forwarded};
 use super::host::{WebKernel, WebKernelOptions};
 use super::launch::HomeLock;
-use super::session::{SessionClient, SessionUpdate};
+use super::session::{self, SessionClient, SessionUpdate};
 
 /// 流式更新推给前端的最短间隔。20 Hz 对人眼足够；再快只是在复制整份视图。
 pub const PUSH_INTERVAL: Duration = Duration::from_millis(50);
@@ -68,7 +69,12 @@ async fn run(input: ServiceInput, mut commands: mpsc::UnboundedReceiver<Command>
     let ServiceInput { options, default_model, workspace, lock } = input;
 
     let mut kernel = match WebKernel::start(options).await {
-        Ok(kernel) => kernel,
+        Ok(kernel) => {
+            if let (Some(lock), Some(pid)) = (&lock, kernel.pid()) {
+                lock.record_kernel(pid);
+            }
+            kernel
+        }
         Err(error) => {
             let reason = error.to_string();
             send(Event::Backend { state: BackendState::Failed { reason: reason.clone() } });
@@ -88,7 +94,11 @@ async fn run(input: ServiceInput, mut commands: mpsc::UnboundedReceiver<Command>
         Ok(client) => Arc::new(client),
         Err(error) => {
             send(Event::Backend { state: BackendState::Failed { reason: format!("连不上内核：{error}") } });
-            kernel.shutdown().await;
+            if kernel.shutdown().await.exited
+                && let Some(lock) = &lock
+            {
+                lock.kernel_exited();
+            }
             drop(lock);
             while let Some(command) = commands.recv().await {
                 if matches!(command, Command::Shutdown) {
@@ -110,12 +120,127 @@ async fn run(input: ServiceInput, mut commands: mpsc::UnboundedReceiver<Command>
     }
 
     let mut pumps: HashMap<String, Pump> = HashMap::new();
-    while let Some(command) = commands.recv().await {
+    // 上一次列表里的会话，按 id。只用来给子 agent 会话配父地址（见 OpenSession）。
+    let mut known: HashMap<String, arc_deck_core::conversation::SessionSummary> = HashMap::new();
+
+    // ── 审批通道 ──────────────────────────────────────────────────────────
+    //
+    // 为什么常开而不是等 `confirm` 才开：审批请求是**内核发给连着它的客户端**的，
+    // 没有客户端开着这条流时 ApprovalService 按 `unavailable` 失败关闭 —— 也就是工具被拒。
+    // 常开意味着「有界面在，就能问人」；策略是 `never` 的那些档位根本不会提问，开着也只是
+    // 一条空闲的流。断开时如实告诉界面，不让它以为还能应答。
+    let (forwarded_tx, mut forwarded) = mpsc::unbounded_channel::<Forwarded>();
+    let mut events_client: Option<String> = None;
+    match client.subscribe_events().await {
+        Ok(mut subscription) => {
+            events_client = Some(subscription.client_id().to_string());
+            tokio::spawn(async move {
+                loop {
+                    let item = subscription.next().await;
+                    let ended = matches!(item, Forwarded::Ended(_));
+                    if forwarded_tx.send(item).is_err() || ended {
+                        break;
+                    }
+                }
+            });
+        }
+        Err(error) => send(Event::Notice {
+            level: NoticeLevel::Warning,
+            text: format!(
+                "审批通道没有建起来（{error}）；`confirm` 授权下的审批请求会被内核按「无人应答」拒绝"
+            ),
+        }),
+    }
+
+    loop {
+        let command = tokio::select! {
+            command = commands.recv() => command,
+            // 通道任务退出后 `recv()` 会立刻返回 `None`；不把它关掉就会空转。
+            item = forwarded.recv(), if events_client.is_some() => {
+                match item {
+                    Some(Forwarded::Approval(request)) => {
+                        send(Event::Approval { request });
+                    }
+                    Some(Forwarded::Waterfall { request_id, event }) => {
+                        // 不是审批的 waterfall 一律交回 Host 的链。不回答等于把它短路掉。
+                        match &events_client {
+                            Some(client_id) => {
+                                if let Err(error) = client
+                                    .answer_event(client_id, &request_id, events::Answer::Next)
+                                    .await
+                                {
+                                    send(Event::Notice {
+                                        level: NoticeLevel::Warning,
+                                        text: format!("回答 {event} 失败：{error}"),
+                                    });
+                                }
+                            }
+                            None => send(Event::Notice {
+                                level: NoticeLevel::Warning,
+                                text: format!("收到 {event} 但没有审批通道可用"),
+                            }),
+                        }
+                    }
+                    Some(Forwarded::Cancelled { request_id }) => send(Event::ApprovalClosed {
+                        request_id,
+                        reason: "内核撤回了这条审批（这一轮被取消或已经结束）".into(),
+                    }),
+                    Some(Forwarded::Emit { .. } | Forwarded::Ignored) => {}
+                    None => events_client = None,
+                    Some(Forwarded::Ended(reason)) => {
+                        events_client = None;
+                        send(Event::Notice {
+                            level: NoticeLevel::Warning,
+                            text: format!(
+                                "审批通道已断开：{reason}；交互内核可能已经退出（/reconnect 重新拉起）"
+                            ),
+                        });
+                    }
+                }
+                continue;
+            }
+        };
+        let Some(command) = command else { break };
         match command {
             Command::Shutdown => break,
             Command::Hello { .. } | Command::Unknown => {}
+            Command::AnswerApproval { request_id, outcome } => {
+                match &events_client {
+                    Some(client_id) => {
+                        let answer = events::outcome_value(outcome);
+                        match client.answer_event(client_id, &request_id, answer).await {
+                            Ok(()) => send(Event::Notice {
+                                level: NoticeLevel::Info,
+                                text: if answer == events::Answer::AllowOnce {
+                                    "已允许这一次".into()
+                                } else {
+                                    "已拒绝".into()
+                                },
+                            }),
+                            Err(error) => send(Event::Notice {
+                                level: NoticeLevel::Error,
+                                text: format!("审批应答没有送达：{error}"),
+                            }),
+                        }
+                    }
+                    None => send(Event::Notice {
+                        level: NoticeLevel::Error,
+                        text: "审批通道已断开，这条应答没有去处".into(),
+                    }),
+                }
+            }
+            Command::SearchSessions { query } => match client.search(&query).await {
+                Ok(items) => send(Event::Search { query, items }),
+                Err(error) => send(Event::Notice {
+                    level: NoticeLevel::Error,
+                    text: format!("检索失败：{error}"),
+                }),
+            },
             Command::ListSessions => match client.list().await {
-                Ok(sessions) => send(Event::Sessions { sessions }),
+                Ok(sessions) => {
+                    known = sessions.iter().map(|s| (s.session_id.clone(), s.clone())).collect();
+                    send(Event::Sessions { sessions });
+                }
                 Err(error) => send(Event::Notice { level: NoticeLevel::Error, text: format!("读会话列表失败：{error}") }),
             },
             Command::Catalog => match client.model_catalog().await {
@@ -124,7 +249,15 @@ async fn run(input: ServiceInput, mut commands: mpsc::UnboundedReceiver<Command>
             },
             Command::OpenSession { session_id } => {
                 close_pump(&mut pumps, &session_id).await;
-                if let Err(text) = open_pump(&client, &session_id, None, &events, &mut pumps).await {
+                // 前端只给 id；子 agent 会话要父地址，地址从上一次列表里查（协议不变 ——
+                // GUI 与 TUI 都不需要知道地址有两种形状）。没见过这个 id 就先刷新一次列表。
+                if !known.contains_key(&session_id)
+                    && let Ok(sessions) = client.list().await
+                {
+                    known = sessions.into_iter().map(|s| (s.session_id.clone(), s)).collect();
+                }
+                let address = session::address(&session_id, known.get(&session_id));
+                if let Err(text) = open_pump(&client, &session_id, address, None, &events, &mut pumps).await {
                     send(Event::Notice { level: NoticeLevel::Error, text });
                 }
             }
@@ -155,7 +288,8 @@ async fn run(input: ServiceInput, mut commands: mpsc::UnboundedReceiver<Command>
                             continue;
                         }
                     }
-                    if let Err(text) = open_pump(&client, &session_id, wanted.clone(), &events, &mut pumps).await {
+                    let address = session::address(&session_id, known.get(&session_id));
+                    if let Err(text) = open_pump(&client, &session_id, address, wanted.clone(), &events, &mut pumps).await {
                         send(Event::Notice { level: NoticeLevel::Error, text });
                         continue;
                     }
@@ -199,6 +333,8 @@ async fn run(input: ServiceInput, mut commands: mpsc::UnboundedReceiver<Command>
     let termination = kernel.shutdown().await;
     if !termination.exited {
         send(Event::Notice { level: NoticeLevel::Warning, text: format!("内核收尾未确认：{}", termination.detail) });
+    } else if let Some(lock) = &lock {
+        lock.kernel_exited();
     }
     drop(lock);
     send(Event::Backend { state: BackendState::Stopped });
@@ -207,11 +343,12 @@ async fn run(input: ServiceInput, mut commands: mpsc::UnboundedReceiver<Command>
 async fn open_pump(
     client: &Arc<SessionClient>,
     session_id: &str,
+    address: serde_json::Value,
     model: Option<ModelChoice>,
     events: &mpsc::UnboundedSender<Event>,
     pumps: &mut HashMap<String, Pump>,
 ) -> Result<(), String> {
-    let mut open = client.open(session_id).await.map_err(|e| format!("打开会话失败：{e}"))?;
+    let mut open = client.open_at(address).await.map_err(|e| format!("打开会话失败：{e}"))?;
     let _ = events.send(Event::Conversation { conversation: Box::new(open.view().clone()) });
     let (close_tx, mut close_rx) = oneshot::channel::<()>();
     let tx = events.clone();

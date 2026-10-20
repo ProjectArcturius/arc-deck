@@ -21,7 +21,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::Paragraph,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -219,6 +219,8 @@ pub fn draw_model(frame: &mut Frame, area: Rect, t: &Theme, view: ModelView<'_>)
     let rect = geometry(area);
     let inner = frame_in(frame, rect, title_for(t, providers, state), t);
     let search = Rect::new(inner.x, inner.y, inner.width, 1);
+    // 搜索串此前从没画出来过：光标在动，字却看不见（2026-10-20 对着预览发现）。
+    frame.render_widget(Paragraph::new(crate::view::search_line(query, t)), search);
     // 「下一次请求生效」必须写在对话框里：worker 的路由在 initialize 时就被钉住（§7.2），
     // 「以为换完了、实际这一轮还在用旧路由」是这一类界面最容易造成的误解。
     // 这行文字要压在一行里（内宽 72 列）—— 挤成两行时对话框的高度与
@@ -273,7 +275,7 @@ pub fn draw_model(frame: &mut Frame, area: Rect, t: &Theme, view: ModelView<'_>)
     footer(
         frame,
         inner,
-        &format!("^F 收藏 · ^A provider · Enter 选定{close} · Esc 关闭"),
+        &format!("ctrl+f 收藏  ctrl+a provider{close}"),
         t,
     );
     Rect::new(search.x, search.y, search.width.saturating_sub(1), 1)
@@ -289,6 +291,7 @@ pub fn draw_providers(frame: &mut Frame, area: Rect, t: &Theme, view: ProviderVi
     let rect = geometry(area);
     let inner = frame_in(frame, rect, headline(t, "选择 provider"), t);
     let search = Rect::new(inner.x, inner.y, inner.width, 1);
+    frame.render_widget(Paragraph::new(crate::view::search_line(query, t)), search);
     let list = Rect::new(
         inner.x,
         inner.y + 2,
@@ -334,7 +337,7 @@ pub fn draw_providers(frame: &mut Frame, area: Rect, t: &Theme, view: ProviderVi
     footer(
         frame,
         inner,
-        "↑↓ 选择 · Enter 打开该 provider 的模型 · Esc 返回模型对话框",
+        "",
         t,
     );    Rect::new(search.x, search.y, search.width.saturating_sub(1), 1)
 }
@@ -423,7 +426,7 @@ pub fn draw_efforts(frame: &mut Frame, area: Rect, t: &Theme, view: EffortView<'
     footer(
         frame,
         inner,
-        "↑↓ 选择 · Enter 选定（下一次请求带 --effort）· 默认恢复模型缺省值",
+        "下一次请求生效 · 「默认」恢复模型缺省值",
         t,
     );
     // effort 没有搜索行，返回零宽矩形。
@@ -456,21 +459,7 @@ fn headline(t: &Theme, text: &str) -> Line<'static> {
 }
 
 fn frame_in(frame: &mut Frame, rect: Rect, title: Line<'static>, t: &Theme) -> Rect {
-    frame.render_widget(Clear, rect);
-    frame.render_widget(
-        Block::new()
-            .borders(Borders::ALL)
-            .title(title)
-            .border_style(Style::default().fg(t.border.to_ratatui()))
-            .style(Style::default().bg(crate::view::dialog_bg(t))),
-        rect,
-    );
-    Rect::new(
-        rect.x + 2,
-        rect.y + 1,
-        rect.width.saturating_sub(4),
-        rect.height.saturating_sub(2),
-    )
+    crate::view::dialog_panel(frame, rect, title, t)
 }
 
 fn geometry(area: Rect) -> Rect {

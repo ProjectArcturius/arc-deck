@@ -13,7 +13,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::conversation::{Conversation, ModelCatalog, ModelChoice, SessionSummary};
+use crate::conversation::{
+    ApprovalOutcome, ApprovalRequest, Conversation, ModelCatalog, ModelChoice, SearchHit,
+    SessionSummary,
+};
 
 /// 协议主版本。改义或删除字段时加一；只「加」不算。
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -44,6 +47,14 @@ pub enum Command {
     Rename { session_id: String, title: String },
     /// 重新读模型目录（回 [`Event::Catalog`]）。
     Catalog,
+    /// 检索会话内容（`session/search`，回 [`Event::Search`]）。
+    SearchSessions { query: String },
+    /// 回答一个 [`Event::Approval`]。`request_id` 就是那条审批请求的 id；
+    /// 应答只有「允许这一次」与「拒绝」两种 —— 与 DSH 的 `allowed-once` / `rejected` 一一对应。
+    AnswerApproval {
+        request_id: String,
+        outcome: ApprovalOutcome,
+    },
     /// 收掉后端（进程内：TUI 退出时）。IPC 上只断开本连接，不关服务。
     Shutdown,
     #[serde(other)]
@@ -74,6 +85,15 @@ pub enum Event {
     Conversation { conversation: Box<Conversation> },
     /// 订阅结束（连接断了 / 内核报错 / 被关掉），原因原样带出。
     SessionClosed { session_id: String, reason: String },
+    /// 内核在等一个人回答审批（例如 `confirm` 授权下的提权请求）。
+    ///
+    /// **没应答就一直挂着**：内核那一侧在等，工具调用停在那里。界面必须让人看得见它在等
+    /// （docs/M4_PLAN 判据 3），不能把这条当普通通知冲掉。
+    Approval { request: ApprovalRequest },
+    /// 那条审批请求已经不需要回答了（被取消 / 这一轮结束），界面据此收起等待状态。
+    ApprovalClosed { request_id: String, reason: String },
+    /// 会话内容检索的结果（`session/search`；片段里的 `\u{0}` 会把命中词夹在中间）。
+    Search { query: String, items: Vec<SearchHit> },
     /// 给人看的一句话。`level` 决定颜色，不决定行为。
     Notice { level: NoticeLevel, text: String },
     #[serde(other)]
@@ -145,6 +165,37 @@ mod tests {
         // 已知命令多了一个字段：照常读。
         let prompt: Command = serde_json::from_str(r#"{"op":"prompt","text":"hi","attachments":[]}"#).unwrap();
         assert!(matches!(prompt, Command::Prompt { session_id: None, .. }));
+    }
+
+    /// 审批与检索是「加」，不是改义：老前端读到它们会落进 `Unknown`，
+    /// 新前端读到老后端没有它们的帧也照常工作（PROTOCOL_VERSION 不变）。
+    #[test]
+    fn approval_and_search_frames_are_additive() {
+        let request = ApprovalRequest {
+            request_id: "r1".into(),
+            tool_name: "bash".into(),
+            call_id: Some("c1".into()),
+            reason: Some("hook says ask".into()),
+            display_reason: None,
+            agent: Some("a1".into()),
+        };
+        let event = Event::Approval { request: request.clone() };
+        let raw = serde_json::to_string(&event).unwrap();
+        assert!(raw.contains(r#""event":"approval""#), "{raw}");
+        assert_eq!(serde_json::from_str::<Event>(&raw).unwrap(), event);
+
+        let answer = Command::AnswerApproval { request_id: "r1".into(), outcome: ApprovalOutcome::AllowOnce };
+        let raw = serde_json::to_string(&answer).unwrap();
+        assert!(raw.contains(r#""op":"answer_approval""#) && raw.contains("allow_once"), "{raw}");
+        assert_eq!(serde_json::from_str::<Command>(&raw).unwrap(), answer);
+
+        // 未来的第四种结果不能让整条命令读失败。
+        let future: Command = serde_json::from_str(r#"{"op":"answer_approval","request_id":"r","outcome":"always"}"#).unwrap();
+        assert!(matches!(future, Command::AnswerApproval { outcome: ApprovalOutcome::Unknown, .. }));
+
+        let hit = SearchHit { session_id: "s".into(), title: None, snippet: "a\u{0}b".into() };
+        let raw = serde_json::to_string(&Event::Search { query: "b".into(), items: vec![hit] }).unwrap();
+        assert!(raw.contains(r#""event":"search""#), "{raw}");
     }
 
     #[test]

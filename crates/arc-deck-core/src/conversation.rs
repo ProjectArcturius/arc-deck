@@ -169,6 +169,47 @@ impl TurnState {
     }
 }
 
+/// 内核把一个问题交给人：某个工具调用要执行，但策略要求先问。
+///
+/// 字段全部来自 DSH 的 `approval/request` 载荷（`packages/interaction/user-approval/src/types.ts`）：
+/// `tool_name` / `call_id` / `reason` 原样带出来，界面不去猜参数 —— 工具参数在
+/// 对话视图里已经有一份（[`ToolCall::arguments`]），需要时按 `call_id` 找。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ApprovalRequest {
+    /// 应答时要带回来的 id（Host 的 `eventId`），**不是** DSH 的 `ApprovalRequestId`。
+    pub request_id: String,
+    pub tool_name: String,
+    pub call_id: Option<String>,
+    /// 提问方给的理由（hook 的 `permissionDecision` 之类）。
+    pub reason: Option<String>,
+    /// 本地化过的展示理由；有就优先显示。
+    pub display_reason: Option<String>,
+    /// 发起调用的 Agent（DSH 的 agent id），只用于显示。
+    pub agent: Option<String>,
+}
+
+/// 审批的应答。DSH 有四种结果，我们只答两种：
+/// 「允许这一次」与「拒绝」。`cancelled` / `unavailable` 是内核自己的判断，不是用户的选择。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalOutcome {
+    AllowOnce,
+    Reject,
+    #[serde(other)]
+    Unknown,
+}
+
+/// `session/search` 的一条命中：哪个会话、上下文片段。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SearchHit {
+    pub session_id: String,
+    pub title: Option<String>,
+    /// 命中处的片段。命中词用 `\u{0}` 夹起来（内核的约定），界面负责分段着色。
+    pub snippet: String,
+}
+
 /// provider 实际报告的 token 数。缺的字段是「没报告」，不是 0。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -218,6 +259,11 @@ pub struct SessionSummary {
     pub blank: bool,
     /// 子 agent 会话的父会话。列表默认不显示子会话。
     pub parent_session_id: Option<String>,
+    /// 子 agent 的模式（`one-shot` / `continuable`）。打开子会话必须用**父地址**，
+    /// 而地址里的 `mode` 只有这里有（P13）。
+    pub subagent_mode: Option<String>,
+    /// 子 agent 自己的名字（`subagent.label`）—— 列表上比 id 有用。
+    pub subagent_label: Option<String>,
 }
 
 /// 内核报告的模型目录（§7.2：权威来源是 DSH）。
@@ -246,6 +292,8 @@ pub struct CatalogModel {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
+    /// 内核报的上下文窗口（token 数）。没有报就不显示占用百分比（§7.3）。
+    pub context_window: Option<u64>,
     pub efforts: Vec<CatalogEffort>,
     pub default_effort: Option<String>,
 }

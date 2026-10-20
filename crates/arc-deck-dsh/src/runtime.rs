@@ -99,6 +99,9 @@ pub struct PatchInput<'a> {
     ///
     /// 判定**不在这里做**：这一侧只按 `docs/M3_GUARD.md` 的映射表把 guard 翻成配置行。
     pub guard: &'a ExecutionGuard,
+    /// 打开内核的内容检索索引（`session/search`）。Web 组合默认是 `never`（关着的），
+    /// 交互面要用它做「搜会话内容」，逐次打开；worker 用不到，保持关闭。
+    pub session_search: bool,
 }
 
 /// 生成 `--patch` 文件内容。
@@ -135,11 +138,12 @@ pub fn render_patch_with_routes(input: &PatchInput<'_>, extra_routes: &[RouteSpe
         },
     }));
 
-    // 审批策略恒为 `never`：headless 没有应答者（§5.6 里 `confirm` 被明确拒绝），
-    // 而 `never` 在 `ApprovalService.decide` 里**先于任何 answerer 分派**就返回 rejected ——
-    // 也就是说即使组合里混进了别的应答者，`sandbox_permissions` 那类提权请求也拿不到
-    // `allowed-once`（`packages/interaction/user-approval/src/index.ts` 的 decide()）。
-    rows.push(json!({ "id": "approval", "config": { "policy": "never" } }));
+    // 审批策略：只有 `confirm` 档打开。`never` 在 `ApprovalService.decide` 里**先于任何
+    // answerer 分派**就返回 rejected —— 也就是说即使组合里混进了别的应答者，
+    // `sandbox_permissions` 那类提权请求也拿不到 `allowed-once`
+    // （`packages/interaction/user-approval/src/index.ts` 的 decide()）。
+    // `ask` 则把请求交给连着的客户端（我们的 `$events` 流），人答了才算数。
+    rows.push(json!({ "id": "approval", "config": { "policy": guard.approval.as_str() } }));
 
     // 预设表整块重写（patch 不做深合并）。只留一格，且与上面两行是同一组取值。
     //
@@ -151,18 +155,31 @@ pub fn render_patch_with_routes(input: &PatchInput<'_>, extra_routes: &[RouteSpe
     // （`captureDelegatedPolicyOverrides` 取 `sandboxPolicy.overrideOf(parent.session)`）。
     // 只留一格的第二个作用：`/permission` 没有能切到更宽档的入口。
     // 名字用产品层的级别名而不是 DSH 的档名（§5.6：说给人听的一律用产品名）。
-    let level = guard.sandbox.as_str();
+    // `confirm` 与 `workspace` 同沙箱档，所以档名里认不出它 —— 按审批策略认。
+    let level = match guard.approval {
+        arc_deck_core::authz::ApprovalPolicy::Ask => "confirm",
+        arc_deck_core::authz::ApprovalPolicy::Never => guard.sandbox.as_str(),
+    };
     let mut presets = serde_json::Map::new();
     presets.insert(
         level.to_string(),
         json!({
             "sandbox": guard.sandbox_mode(),
-            "approval": "never",
+            "approval": guard.approval.as_str(),
             "name": level,
             "description": "Arc Deck 本次运行的授权级别；只能由启动配置与任务书收紧",
         }),
     );
     rows.push(json!({ "id": "permission", "config": { "presets": Value::Object(presets) } }));
+
+    // 内容检索默认关着（Web 组合的 `openAt: never`）。交互面要它，改成首搜时再开：
+    // Node 只在第一次搜索时 import `node:sqlite`，不会让每次启动都背上那声实验警告。
+    if input.session_search {
+        rows.push(json!({
+            "id": "session-query-sqlite",
+            "config": { "path": ":memory:", "openAt": "first-search" },
+        }));
+    }
 
     // Arc Deck 的 Plan 由自己管：DSH 的 plan-mode 是**协作状态**，官方 README 就写着
     // 「It does not restrict the agent: every tool stays callable」，它的出口
@@ -377,6 +394,7 @@ mod tests {
             route: &route,
             persona_suffix: "",
             session_log_upload: false,
+            session_search: false,
             guard,
         });
         serde_json::from_str::<Value>(&text).unwrap().as_array().unwrap().clone()
@@ -437,6 +455,7 @@ mod tests {
             route: &route,
             persona_suffix: "守则 {{x}}",
             session_log_upload: false,
+            session_search: false,
             guard: &guard,
         });
         let v: Value = serde_json::from_str(&text).unwrap();
@@ -468,6 +487,7 @@ mod tests {
             route: &route,
             persona_suffix: "",
             session_log_upload: true,
+            session_search: false,
             guard: &guard,
         });
         let v: Value = serde_json::from_str(&text).unwrap();

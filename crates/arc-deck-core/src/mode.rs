@@ -65,6 +65,19 @@ impl Mode {
             Mode::Plan => "plan",
         }
     }
+
+    /// 反解。交互面的重启请求是字符串（一条 UI 消息），到执行层之前必须过这里，
+    /// 让「未知模式」变成一句可读的错，而不是悄悄当成 build。
+    pub fn parse(raw: &str) -> SpecResult<Self> {
+        match raw {
+            "build" => Ok(Mode::Build),
+            "plan" => Ok(Mode::Plan),
+            other => Err(SpecError::new(
+                code::CONFIG_INVALID,
+                format!("未知模式 `{other}`；只有 build / plan"),
+            )),
+        }
+    }
 }
 
 impl std::fmt::Display for Mode {

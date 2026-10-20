@@ -23,6 +23,24 @@ pub(crate) enum Action {
     Tools,
     Usage,
     Evidence,
+    /// 会话内容检索（`session/search`）。
+    Search,
+    /// 本会话的用户消息时间线。
+    Timeline,
+    /// 本会话派出的子 agent 会话（与回到父会话）。
+    Subagents,
+    /// 暂存当前草稿；输入框为空时列出暂存的草稿取回。
+    Stash,
+    /// 还有哪几条审批在等回答。
+    Approvals,
+    /// 本会话的 diff。
+    Diff,
+    /// 某个工具的完整输出。
+    Output,
+    /// 复制最后一条回复（OSC 52）。
+    Copy,
+    /// 内核起不来 / 掉了之后重新拉起。
+    Reconnect,
     Agents,
     Models,
     Effort,
@@ -86,7 +104,10 @@ pub(crate) struct Entry {
     pub title: &'static str,
     pub category: Category,
     pub slash: Option<&'static str>,
-    /// Argument hint shown by completion and help, e.g. `<workspace|full>`.
+    /// Argument hint shown by completion and help. `<…>` = **required** (`/rename <标题>`),
+    /// `[…]` = optional (`/permission [级别]` without one opens the picker). The distinction
+    /// decides whether Enter on a completion runs the command or waits for the argument —
+    /// see [`Entry::arg_required`].
     pub arg: Option<&'static str>,
     pub keys: &'static [&'static str],
     pub context: Context,
@@ -97,24 +118,28 @@ pub(crate) struct Entry {
     pub palette: bool,
 }
 
-pub(crate) const PLAN_REASON: &str =
-    "Plan 需要只读执行限制与确认应答者，本版只有 workspace / full，提示词不能保证只读";
+impl Entry {
+    /// 不带参数就没法执行（`/rename`、`/search`）。补全时 Enter 对这类命令只填进去等参数；
+    /// 其余命令 Enter 直接执行 —— `/per` + Enter 就是 `/permission`，不该再按一次（用户 2026-10-20）。
+    pub(crate) fn arg_required(&self) -> bool {
+        self.arg.is_some_and(|arg| arg.starts_with('<'))
+    }
+}
 
-/// Why `confirm` cannot be selected yet: it needs an approval UI (M4 w4-tui-modes), and quietly
-/// running it as `workspace` would widen "ask me first" into "just do it".
-pub(crate) const CONFIRM_REASON: &str =
-    "confirm 需要审批界面，本版尚未接通；请用 readonly / workspace / full";
-
-/// The authorization levels (§5.6), with the picker's description and, for the level the
-/// execution layer cannot honour yet, the reason. Order is the order the picker shows.
+/// The authorization levels (§5.6), with the picker's description.
 ///
 /// `readonly` became selectable once the M3 live negatives proved the execution layer refuses
 /// writes and commands under it (docs/M3_GUARD.md); its known gap — reads are not confined to
 /// the workspace — is in the description rather than hidden.
-pub(crate) const PERMISSIONS: [(&str, &str, Option<&str>); 3] = [
+///
+/// `confirm` is selectable now that the approval channel is wired (M4 w4-tui-modes):
+/// the kernel asks over `$events` and the TUI answers. It shares `workspace`'s sandbox,
+/// so the only difference is that the kernel waits for a person before acting.
+pub(crate) const PERMISSIONS: [(&str, &str, Option<&str>); 4] = [
     ("readonly", "只读：执行层拒绝写文件（读不限于工作区，见 M3_GUARD）", None),
     ("workspace", "工作区：可读写当前工作区", None),
     ("full", "完全：不受沙箱限制（--worktree 必需）", None),
+    ("confirm", "确认：与 workspace 同权限，但内核问「能不能做」时要你回答", None),
 ];
 
 pub(crate) const ENTRIES: &[Entry] = &[
@@ -229,6 +254,114 @@ pub(crate) const ENTRIES: &[Entry] = &[
         palette: true,
     },
     Entry {
+        action: Action::Search,
+        id: "session.search",
+        title: "检索会话内容",
+        category: Category::Session,
+        slash: Some("/search"),
+        arg: Some("<词>"),
+        keys: &[],
+        context: Context::Composer,
+        unavailable: None,
+        palette: true,
+    },
+    Entry {
+        action: Action::Timeline,
+        id: "session.timeline",
+        title: "跳到本会话的某条消息",
+        category: Category::Session,
+        slash: Some("/timeline"),
+        arg: None,
+        keys: &[],
+        context: Context::Composer,
+        unavailable: None,
+        palette: true,
+    },
+    Entry {
+        action: Action::Subagents,
+        id: "session.subagents",
+        title: "子 agent 会话（打开 / 回到父会话）",
+        category: Category::Session,
+        slash: Some("/subagents"),
+        arg: None,
+        keys: &[],
+        context: Context::Composer,
+        unavailable: None,
+        palette: true,
+    },
+    Entry {
+        action: Action::Stash,
+        id: "prompt.stash",
+        title: "暂存草稿（输入框为空时取回）",
+        category: Category::Session,
+        slash: Some("/stash"),
+        arg: None,
+        keys: &["<leader>s"],
+        context: Context::Composer,
+        unavailable: None,
+        palette: true,
+    },
+    Entry {
+        action: Action::Approvals,
+        id: "session.approvals",
+        title: "查看待答的审批",
+        category: Category::Session,
+        slash: Some("/approvals"),
+        arg: None,
+        keys: &[],
+        context: Context::Composer,
+        unavailable: None,
+        palette: true,
+    },
+    Entry {
+        action: Action::Diff,
+        id: "session.diff",
+        title: "本会话改动的 diff",
+        category: Category::Session,
+        slash: Some("/diff"),
+        arg: None,
+        keys: &[],
+        context: Context::Composer,
+        unavailable: None,
+        palette: true,
+    },
+    Entry {
+        action: Action::Output,
+        id: "session.output",
+        title: "工具的完整输出",
+        category: Category::Session,
+        slash: Some("/output"),
+        arg: Some("[序号，默认最后一条]"),
+        keys: &[],
+        context: Context::Composer,
+        unavailable: None,
+        palette: true,
+    },
+    Entry {
+        action: Action::Copy,
+        id: "session.copy",
+        title: "复制最后一条回复（OSC 52）",
+        category: Category::Session,
+        slash: Some("/copy"),
+        arg: None,
+        keys: &["ctrl+y"],
+        context: Context::Composer,
+        unavailable: None,
+        palette: true,
+    },
+    Entry {
+        action: Action::Reconnect,
+        id: "backend.reconnect",
+        title: "重启交互内核（掉线后重连）",
+        category: Category::Session,
+        slash: Some("/reconnect"),
+        arg: None,
+        keys: &[],
+        context: Context::Composer,
+        unavailable: None,
+        palette: true,
+    },
+    Entry {
         action: Action::Agents,
         id: "agent.list",
         title: "选择 Agent",
@@ -258,7 +391,7 @@ pub(crate) const ENTRIES: &[Entry] = &[
         title: "选择模型强度（effort）",
         category: Category::Model,
         slash: Some("/effort"),
-        arg: Some("<级别|default>"),
+        arg: Some("[级别|default]"),
         keys: &[],
         context: Context::Composer,
         unavailable: None,
@@ -282,7 +415,7 @@ pub(crate) const ENTRIES: &[Entry] = &[
         title: "授权级别（下一次请求生效）",
         category: Category::Model,
         slash: Some("/permission"),
-        arg: Some("<readonly|workspace|full>"),
+        arg: Some("[readonly|workspace|full|confirm]"),
         keys: &[],
         context: Context::Composer,
         unavailable: None,
@@ -297,7 +430,7 @@ pub(crate) const ENTRIES: &[Entry] = &[
         arg: None,
         keys: &[],
         context: Context::Composer,
-        unavailable: Some(PLAN_REASON),
+        unavailable: None,
         palette: true,
     },
     Entry {
@@ -533,6 +666,15 @@ mod tests {
             Action::Tools,
             Action::Usage,
             Action::Evidence,
+            Action::Search,
+            Action::Timeline,
+            Action::Subagents,
+            Action::Stash,
+            Action::Approvals,
+            Action::Diff,
+            Action::Output,
+            Action::Copy,
+            Action::Reconnect,
             Action::Agents,
             Action::Models,
             Action::Effort,
@@ -580,13 +722,21 @@ mod tests {
             "/tools",
             "/latest",
             "/evidence",
+            "/search",
+            "/timeline",
+            "/diff",
+            "/output",
             "/help",
             "/exit",
         ] {
             let entry = by_slash(slap).unwrap_or_else(|| panic!("{slap} is missing"));
             assert_eq!(entry.slash, Some(slap));
         }
-        assert!(by_slash("/plan").unwrap().unavailable.is_some(), "Plan has no read-only path");
+        // Plan 与 confirm 都接通了（M4 w4-tui-modes）：前者落到执行层只读，
+        // 后者走 `$events` 的审批通道。没有哪一条还该挂着「不可用」。
+        assert!(by_slash("/plan").unwrap().unavailable.is_none());
+        assert!(PERMISSIONS.iter().any(|(name, _, _)| *name == "confirm"));
+        assert!(PERMISSIONS.iter().all(|(_, _, reason)| reason.is_none()), "四档都可用");
     }
 
     #[test]

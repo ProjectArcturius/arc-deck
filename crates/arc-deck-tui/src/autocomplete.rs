@@ -13,8 +13,8 @@ use crate::keymap::Keymap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Item {
-    /// What accepting puts into the editor. Commands that take an argument keep a trailing
-    /// space so the next keystroke is the argument.
+    /// What accepting puts into the editor. Commands whose argument is **required** keep a
+    /// trailing space so the next keystroke is the argument; the rest run on Enter.
     pub insert: String,
     pub title: String,
     /// Right-aligned detail: the slash name plus its argument hint.
@@ -107,10 +107,8 @@ pub(crate) fn slash_items(
             score,
             index,
             Item {
-                insert: match entry.arg {
-                    Some(_) => format!("{slash} "),
-                    None => slash.to_string(),
-                },
+                // 末尾空格 = 「等参数，别执行」：只给必需参数的命令（见 `Entry::arg_required`）。
+                insert: if entry.arg_required() { format!("{slash} ") } else { slash.to_string() },
                 title: entry.title.to_string(),
                 detail,
                 available,
@@ -257,14 +255,17 @@ mod tests {
         assert_eq!(items[0].insert, "/tools", "a prefix match ranks first: {:?}", items);
     }
 
+    /// 不可用行仍要**列出来**并带原因 —— 但原因来自调用方的 `availability`，
+    /// 而不是注册表里写死的一条（Plan 接通之后注册表里已经没有恒不可用的行了）。
     #[test]
     fn unavailable_commands_stay_listed_with_their_reason() {
-        let items = slash_items("plan", &keymap(), &available);
+        let items = slash_items("plan", &keymap(), &|action| {
+            (action == Action::Plan).then(|| "现在不能切：这一轮还在进行".to_string())
+        });
         let plan = items.iter().find(|item| item.action == Some(Action::Plan)).unwrap();
         assert!(!plan.available);
-        assert!(plan.reason.as_deref().unwrap().contains("只读"));
+        assert!(plan.reason.as_deref().unwrap().contains("这一轮还在进行"));
     }
-
     #[test]
     fn state_dependent_availability_comes_from_the_caller() {
         let items = slash_items("cancel", &keymap(), &|action| {
@@ -276,11 +277,16 @@ mod tests {
     }
 
     #[test]
-    fn commands_with_arguments_keep_a_trailing_space() {
+    fn only_required_arguments_keep_a_trailing_space() {
+        // 可选参数（`[…]`）：不带空格，Enter 直接执行（没参数时打开选择器）。
         let items = slash_items("effort", &keymap(), &available);
         let effort = items.iter().find(|item| item.action == Some(Action::Effort)).unwrap();
-        assert_eq!(effort.insert, "/effort ");
-        assert!(effort.detail.contains("<级别|default>"));
+        assert_eq!(effort.insert, "/effort");
+        assert!(effort.detail.contains("[级别|default]"));
+        // 必需参数（`<…>`）：带空格，等参数。
+        let items = slash_items("search", &keymap(), &available);
+        let search = items.iter().find(|item| item.action == Some(Action::Search)).unwrap();
+        assert_eq!(search.insert, "/search ");
     }
 
     #[test]

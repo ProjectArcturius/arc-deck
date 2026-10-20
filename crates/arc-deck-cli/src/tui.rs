@@ -14,6 +14,7 @@ use std::time::Duration;
 use arc_deck_core::{
     authz::Permission,
     event::EventEnvelope,
+    mode::{AgentId, Mode},
     paths,
     result::TaskResult,
     service::{BackendState, Command as SessionCommand, Event as SessionEvent},
@@ -148,6 +149,7 @@ pub async fn run() -> i32 {
         preferences: userconfig::data_dir()
             .join("arcdeck")
             .join("tui-preferences.json"),
+        personalization: loaded.config.as_ref().is_some_and(|cfg| cfg.personalization.enabled),
         catalog: loaded.catalog,
         model_prefs: model_prefs_path(),
     };
@@ -200,6 +202,8 @@ fn start_backend(
     cfg: Option<&UserConfig>,
     workspace: &Path,
     permission: Permission,
+    agent: AgentId,
+    mode: Mode,
     updates: &Sender<Update>,
     current: &Arc<Mutex<Option<String>>>,
 ) -> Option<Backend> {
@@ -213,7 +217,7 @@ fn start_backend(
         return fail("没有可用的用户配置；先运行 `arcdeck config init`".into());
     };
     let kernel_id = format!("tui-{}", std::process::id());
-    let (handle, notes) = match crate::serve::spawn_service(cfg, workspace, permission, &kernel_id) {
+    let (handle, notes) = match crate::serve::spawn_service(cfg, workspace, permission, agent, mode, &kernel_id) {
         Ok(started) => started,
         Err(reason) => return fail(reason),
     };
@@ -262,6 +266,8 @@ async fn serve(
         user_config.as_ref(),
         &workspace,
         Permission::Workspace,
+        AgentId::Echo,
+        Mode::Build,
         &updates,
         &current_session,
     );
@@ -374,7 +380,7 @@ async fn serve(
                         }
                     }
                 }
-                Ok(Request::RestartBackend { permission }) => {
+                Ok(Request::RestartBackend { permission, agent, mode }) => {
                     let level = match Permission::parse(&permission) {
                         Ok(level) => level,
                         Err(error) => {
@@ -382,10 +388,25 @@ async fn serve(
                             continue;
                         }
                     };
+                    let (agent, mode) = match (AgentId::parse(&agent), Mode::parse(&mode)) {
+                        (Ok(agent), Ok(mode)) => (agent, mode),
+                        (Err(error), _) | (_, Err(error)) => {
+                            let _ = updates.send(Update::Notice(error.message));
+                            continue;
+                        }
+                    };
                     if let Some(old) = backend.take() {
                         stop_backend(old).await;
                     }
-                    backend = start_backend(user_config.as_ref(), &workspace, level, &updates, &current_session);
+                    backend = start_backend(
+                        user_config.as_ref(),
+                        &workspace,
+                        level,
+                        agent,
+                        mode,
+                        &updates,
+                        &current_session,
+                    );
                     let reopen = current_session.lock().ok().and_then(|c| c.clone());
                     if let (Some(running), Some(session_id)) = (&backend, reopen) {
                         // 命令在服务的队列里等内核就绪，所以现在发就行。

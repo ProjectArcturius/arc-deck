@@ -43,6 +43,9 @@ pub(crate) struct MarkdownPalette {
     pub code: Color,
     pub code_block_fg: Color,
     pub code_block_bg: Color,
+    /// 代码块的语法着色。颜色全部来自主题的 `syntax.*`（OpenCode 自己那套），
+    /// 不在这里发明配色。
+    pub syntax: crate::syntax::SyntaxPalette,
     pub block_quote: Color,
     pub emph: Color,
     pub strong: Color,
@@ -331,7 +334,15 @@ impl Writer {
                     0
                 };
                 if !nested {
-                    self.blank_wanted = true;
+                    // Spend the blank *now*. Asking for it with `blank_wanted` did not work:
+                    // the first `Start(Item)` clears the flag (so a tight list is not
+                    // double-spaced), and the list ran straight under the paragraph above it
+                    // (measured 2026-10-20: `["…旧值。", "• 下一步…"]`).
+                    self.flush_pending();
+                    if self.content && !self.out.is_empty() {
+                        self.out.push(Line::default());
+                    }
+                    self.blank_wanted = false;
                 } else {
                     // A nested list starts its own line. A tight list emits no
                     // `Paragraph` events (measured: `Start(Item) Text(…) Start(List)`
@@ -550,6 +561,8 @@ impl Writer {
         // The `…` needs one cell of its own, hence the two-cell floor: at a width that
         // leaves less than that there is no honest way to show any of the line.
         let content = self.width.saturating_sub(lead + CODE_INDENT).max(2);
+        // 语法状态跨行：块注释与三引号字符串要跟着走，否则第二行开始颜色就散了。
+        let mut highlighter = crate::syntax::Highlighter::default();
         for line in &state.lines {
             // Truncate, never wrap: a wrapped code line reports a line break the code
             // does not have. The trailing `…` is the one honest signal that what is on
@@ -560,11 +573,23 @@ impl Writer {
             // column of ragged highlights. Widening the code indent never widens this
             // padding: it is the slack left over, never negative.
             let pad = " ".repeat(self.width.saturating_sub(lead + CODE_INDENT + used));
-            let style = self.code_style();
             let mut spans = prefix.clone();
             spans.push(Span::raw(" ".repeat(CODE_INDENT)));
-            spans.push(Span::styled(shown, style));
-            spans.push(Span::styled(pad, style));
+            match &state.label {
+                // 有语言标签才着色：缩进代码块没有语言，硬猜会猜错。
+                Some(label) => {
+                    let parts = crate::syntax::line(&mut highlighter, &shown, label);
+                    for (text, token) in parts {
+                        let color = self.palette.syntax.color(token);
+                        spans.push(Span::styled(
+                            text,
+                            Style::default().fg(color).bg(self.palette.code_block_bg),
+                        ));
+                    }
+                }
+                None => spans.push(Span::styled(shown, self.code_style())),
+            }
+            spans.push(Span::styled(pad, self.code_style()));
             self.out.push(Line::from(spans));
         }
         self.blank_wanted = true;
@@ -1154,6 +1179,18 @@ mod tests {
             code: c(0x3d9a57),
             code_block_fg: text,
             code_block_bg: c(0xebebeb),
+            syntax: crate::syntax::SyntaxPalette {
+                plain: text,
+                comment: muted,
+                keyword: action,
+                function: selected,
+                r#type: c(0x9d7cd8),
+                string: c(0x3d9a57),
+                number: c(0xd68c27),
+                variable: c(0xd1383d),
+                operator: c(0x318795),
+                punctuation: text,
+            },
             block_quote: action,
             emph: selected,
             strong: text,
@@ -1189,6 +1226,14 @@ mod tests {
     fn empty_and_whitespace_only_input_render_nothing() {
         assert!(lines("", 40).is_empty());
         assert!(lines("   \n\n  \t \n", 40).is_empty());
+    }
+
+    /// 段落后面紧跟列表时中间空一行，列表项之间不空（紧凑列表）。
+    #[test]
+    fn a_list_after_a_paragraph_gets_one_blank_and_stays_tight() {
+        assert_eq!(texts("说明。\n\n- 甲\n- 乙", 40), vec!["说明。", "", "• 甲", "• 乙"]);
+        assert_eq!(texts("# 题\n\n- 甲", 40), vec!["题", "", "• 甲"]);
+        assert_eq!(texts("- 甲\n- 乙", 40), vec!["• 甲", "• 乙"]);
     }
 
     #[test]
@@ -1367,16 +1412,22 @@ mod tests {
         assert!(content[1].ends_with('…'), "{content:?}");
         // `#` inside a fence is code, never a heading.
         assert!(content[2].contains("# 不是标题"), "{content:?}");
-        assert_eq!(
-            span_of(&rendered[1], "let x"),
-            Style::default()
-                .fg(palette().code_block_fg)
-                .bg(palette().code_block_bg)
-        );
+        // 有语言标签的代码块按 `syntax.*` 着色（OpenCode 的配色），不再是一整行同色。
+        let keyword = rendered[1]
+            .spans
+            .iter()
+            .find(|span| span.content == "let")
+            .expect("`let` 应该是一个独立 span");
+        assert_eq!(keyword.style.fg, Some(palette().syntax.keyword));
         // The padding carries the background too, so the block is a full-width panel.
         assert_eq!(
             rendered[1].spans.last().unwrap().style.bg,
             Some(palette().code_block_bg)
+        );
+        assert_eq!(
+            rendered[1].spans.iter().map(|span| span.content.as_ref()).collect::<String>(),
+            content[1].as_str(),
+            "着色不许改字：拼回去必须等于原文"
         );
     }
 

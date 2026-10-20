@@ -39,12 +39,15 @@ pub const API_PATH: &str = "/api";
 /// 每段的字符集来自 `ENDPOINT_SEGMENT_PATTERN`（`connection/src/rpc-host.ts:36`）。
 /// `.` / `..` 被显式排掉：它们是路径段，进了 URL 会被 HTTP 层重新解释。
 pub fn valid_method(method: &str) -> bool {
-    let mut segments = method.split('/');
-    let (Some(namespace), Some(name), None) = (segments.next(), segments.next(), segments.next())
-    else {
+    // 业务方法都是 `namespace/name`；Gateway 的内部端点（转发事件流 `$events`）只有一段
+    // 且以 `$` 开头。只认「恰好两段」会把这个端点挡在 `open` 之前，报出来的是
+    // 「不是一个合法的 Remote 方法名」—— 与真实原因无关，排查时会被带偏。
+    let segments: Vec<&str> = method.split('/').collect();
+    let shape_ok = segments.len() == 2 || (segments.len() == 1 && method.starts_with('$'));
+    if !shape_ok {
         return false;
-    };
-    [namespace, name].into_iter().all(|segment| {
+    }
+    segments.into_iter().all(|segment| {
         !matches!(segment, "" | "." | "..")
             && segment
                 .bytes()

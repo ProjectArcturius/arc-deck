@@ -300,14 +300,7 @@ async fn cmd_run(argv: &[String]) -> CmdResult {
     prepare_run_dir(&dir, &task_id, flags.has("--rerun"))?;
 
     // 内置 Agent 定义与提示词写进状态目录（顺带留档：这次运行用的是哪一版）。
-    let agents_dir = dir.join("agents");
-    let prompts_dir = dir.join("prompts");
-    for (d, files) in [(&agents_dir, EMBEDDED_AGENTS), (&prompts_dir, EMBEDDED_PROMPTS)] {
-        std::fs::create_dir_all(d).map_err(io_err(d))?;
-        for (name, text) in files {
-            std::fs::write(d.join(name), text).map_err(io_err(&d.join(name)))?;
-        }
-    }
+    let (agents_dir, prompts_dir) = write_embedded_agents(&dir)?;
 
     let timeout = match flags.one("--timeout") {
         Some(t) => parse_duration(t)?,
@@ -496,6 +489,20 @@ fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), SpecErr
 }
 
 /// 返回（指令文本，JSON 任务书（如果是），缺省 ID）。
+/// 把内置 Agent 定义与提示词写到 `dir/agents`、`dir/prompts`。headless 写进任务状态目录（留档），
+/// 交互面写进 DSH home（个性化开着时装配 persona 用，见 `serve::spawn_service`）。
+pub(crate) fn write_embedded_agents(dir: &Path) -> Result<(PathBuf, PathBuf), SpecError> {
+    let agents_dir = dir.join("agents");
+    let prompts_dir = dir.join("prompts");
+    for (d, files) in [(&agents_dir, EMBEDDED_AGENTS), (&prompts_dir, EMBEDDED_PROMPTS)] {
+        std::fs::create_dir_all(d).map_err(io_err(d))?;
+        for (name, text) in files {
+            std::fs::write(d.join(name), text).map_err(io_err(&d.join(name)))?;
+        }
+    }
+    Ok((agents_dir, prompts_dir))
+}
+
 fn load_task_source(arg: &str) -> Result<(String, Option<TaskSpec>, String), SpecError> {
     if arg == "-" {
         let mut raw = String::new();

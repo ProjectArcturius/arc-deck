@@ -118,6 +118,42 @@ pub fn pid_alive(pid: u32) -> bool {
     }
 }
 
+/// 这个 pid 的命令行。读不到（进程不在、平台不支持、没权限）返回 `None`。
+///
+/// 用途是**核对身份**：凭 pid 收进程之前确认它真是我们以为的那一个（pid 会被复用）。
+/// Windows 上走 CIM（`tasklist` 不给命令行），一次要几百毫秒 —— 只在「上一次没有正常收尾」
+/// 这种少见路径上用。输出编码显式设成 UTF-8：用户名里有中文时，按控制台代码页输出会乱码，
+/// 核对就会静默失败。
+pub fn command_line(pid: u32) -> Option<String> {
+    #[cfg(unix)]
+    {
+        let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        let text = String::from_utf8_lossy(&raw).replace('\0', " ");
+        let text = text.trim().to_string();
+        (!text.is_empty()).then_some(text)
+    }
+    #[cfg(windows)]
+    {
+        let script = format!(
+            "[Console]::OutputEncoding=[Text.Encoding]::UTF8; \
+             (Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CommandLine"
+        );
+        let out = no_window(&mut std::process::Command::new("powershell"))
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!text.is_empty()).then_some(text)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 /// 收尾结果。
 #[derive(Debug, Clone)]
 pub struct Termination {
@@ -168,9 +204,16 @@ pub fn kill_tree_by_pid(pid: u32) -> Termination {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
-        // 拿不到「组已空」的可比判据（taskkill 的退出码分不清「本来就没有」与「杀掉了」），
-        // 所以这里如实报「已请求」，不冒充已确认。**本机没有 Windows 目标，未实测。**
-        Termination { exited: false, detail: "已请求 taskkill /T /F（未确认）".into() }
+        // taskkill 的退出码分不清「本来就没有」与「杀掉了」，所以退出与否另外看：有界地等
+        // **根进程**从进程表里消失（2026-10-20 在 Windows 上实测，收孤儿内核那一次）。
+        // 子孙没有逐个确认 —— `/T` 是按树发的，但这里只敢说根进程。
+        for _ in 0..30 {
+            if !pid_alive(pid) {
+                return Termination { exited: true, detail: "taskkill /T /F 之后根进程已退出".into() };
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        Termination { exited: false, detail: "已请求 taskkill /T /F，3 秒内没看到根进程退出".into() }
     }
     #[cfg(not(any(unix, windows)))]
     {

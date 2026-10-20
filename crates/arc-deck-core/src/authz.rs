@@ -226,6 +226,26 @@ pub struct EffectivePolicy {
     pub push: bool,
 }
 
+/// 审批策略：内核要不要把「这件事能不能做」交给人。
+///
+/// 只有 `confirm` 档把它打开 —— 那时**有人坐在界面前面**（TUI / GUI 的审批对话框）。
+/// 其余档位恒为 `never`：headless 无人应答，而 `ask` 在组合里没有应答者时只是
+/// 失败关闭（`unavailable`），比 `never` 的策略层拒绝弱得多（参 docs/M3_GUARD.md §4）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalPolicy {
+    Never,
+    Ask,
+}
+
+impl ApprovalPolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Never => "never",
+            Self::Ask => "ask",
+        }
+    }
+}
+
 /// DSH 执行层真正能表达的限制 —— 由 [`EffectivePolicy`] 投影出来的**可执行**结果。
 ///
 /// 为什么要有这一层（对照见 `docs/M3_GUARD.md`）：`EffectivePolicy` 是产品语义
@@ -246,6 +266,8 @@ pub struct ExecutionGuard {
     pub shell_tools: bool,
     /// `web_search` / `web_fetch` 可不可执行。
     pub web_tools: bool,
+    /// 要不要问人。启动级别是 `confirm` 时才是 [`ApprovalPolicy::Ask`]。
+    pub approval: ApprovalPolicy,
     /// 授权说得比执行层细、因此**只留档**的项。
     ///
     /// 它们会进 `result.unverified` 与事件流：留着是为了让主控看见「这一条没有被
@@ -276,6 +298,12 @@ impl EffectivePolicy {
     /// DSH 没有按 git 子命令区分权限的能力，那两条进 `recorded`（见 `docs/M3_GUARD.md` §3）。
     pub fn execution_guard(&self, startup: Permission) -> SpecResult<ExecutionGuard> {
         // `confirm` 与 `workspace` 同权限，档名里反解不出来；真到手上一律按 workspace 算。
+        // 但它多一件事：审批要问人 —— 这一点在转换之前记下来。
+        let approval = if startup == Permission::Confirm {
+            ApprovalPolicy::Ask
+        } else {
+            ApprovalPolicy::Never
+        };
         let startup = match startup {
             Permission::Confirm => Permission::Workspace,
             other => other,
@@ -368,6 +396,7 @@ impl EffectivePolicy {
             sandbox,
             shell_tools: self.shell,
             web_tools: self.network,
+            approval,
             recorded,
         })
     }

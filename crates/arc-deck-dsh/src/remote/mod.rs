@@ -41,6 +41,7 @@ pub mod mux;
 pub mod rpc;
 pub mod service;
 pub mod session;
+pub mod events;
 pub mod wire;
 
 #[cfg(test)]

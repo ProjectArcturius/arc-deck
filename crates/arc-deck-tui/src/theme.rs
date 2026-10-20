@@ -1113,6 +1113,8 @@ impl Theme {
         self.text_formfield.state_of(active)
     }
 
+    // 输入框改用 promptBg（见 view::prompt_bg）之后只剩 token 映射的测试在读它；token 本身保留。
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn background_formfield(&self, active: &[State]) -> Ink {
         self.background_formfield.state_of(active)
     }
@@ -1201,6 +1203,14 @@ impl Theme {
                 .position(|entry| *entry == rgb)
                 .map(|index| (name.as_str(), HUE_STEPS[index]))
         })
+    }
+
+    /// One step of a named hue scale (`hue.cyan.200`). `None` when the theme has no such scale.
+    /// Agent colours read step 200, the step OpenCode's `local.agent.color` takes from the
+    /// categorical scales.
+    pub fn hue(&self, name: &str, step: u16) -> Option<Rgb> {
+        let index = HUE_STEPS.iter().position(|entry| *entry == step)?;
+        self.hue_scales.get(name)?.get(index).copied()
     }
 
     /// Upstream `increase` / `decrease`: shift by whole steps within the same hue, clamped.

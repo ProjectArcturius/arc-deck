@@ -13,6 +13,8 @@ mod markdown;
 mod model_dialog;
 mod theme;
 mod theme_dialog;
+mod syntax;
+mod toolview;
 mod view;
 
 use std::io::{self, IsTerminal};
@@ -46,6 +48,9 @@ pub struct Boot {
     pub catalog: Vec<catalog::Provider>,
     /// 收藏 / 最近 / 按模型记的 effort，与 `preferences` 同目录，文件名 `model.json`。
     pub model_prefs: PathBuf,
+    /// 配置里的 `personalization.enabled`。开着时 persona 随 Agent 装配进内核（§5.3.1），
+    /// 所以换 Agent 也要重启内核；关着时 Echo 与 Build 在交互面上没有区别。
+    pub personalization: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,9 +102,14 @@ pub enum Request {
     /// 交互会话。消息形状就是 GUI 将来经 IPC 用的那一份（`arc_deck_core::service`）——
     /// TUI 在进程内先用它，等于每天都在给那份契约做验收。
     Session(arc_deck_core::service::Command),
-    /// 授权级别是交互内核**启动时**定的（它决定沙箱档与 patch 里的预设表），改了就要重启内核。
-    /// 会话存在独立的 DSH home 里，重启之后能重新打开，所以这不丢对话。
-    RestartBackend { permission: String },
+    /// 授权级别、Agent 与模式都是交互内核**启动时**定的（它们决定沙箱档、工具行与 patch 里的
+    /// 预设表），改了就要重启内核。会话存在独立的 DSH home 里，重启之后能重新打开，
+    /// 所以这不丢对话 —— 但**正在跑的那一轮会被取消**，所以界面先问一句。
+    RestartBackend {
+        permission: String,
+        agent: String,
+        mode: String,
+    },
     Quit,
 }
 
@@ -131,6 +141,8 @@ pub(crate) struct Preferences {
     recent_files: Vec<String>,
     /// Summarize a large paste into `[粘贴 N 行]` in the draft and expand it on submit.
     paste_summary: bool,
+    /// 暂存的草稿，新的在前（OpenCode 的 prompt stash）。与历史同一个文件，重启不丢。
+    stash: Vec<String>,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -141,6 +153,7 @@ impl Default for Preferences {
             history: Vec::new(),
             recent_files: Vec::new(),
             paste_summary: true,
+            stash: Vec::new(),
         }
     }
 }
@@ -162,10 +175,32 @@ impl Drop for TerminalGuard {
             io::stdout(),
             PopKeyboardEnhancementFlags,
             DisableBracketedPaste,
-            DisableMouseCapture
+            DisableMouseCapture,
+            crossterm::cursor::Show
         );
         ratatui::restore();
     }
+}
+
+/// panic 也要把终端还回去（任务书 w5-polish 第 4 条）。
+///
+/// 为什么不是只靠 `TerminalGuard`：panic 展开时会 drop 它，但 `run` 里的
+/// `spawn_blocking` 线程 panic 之后，进程可能还活着并继续往一个已脱离 alternate screen
+/// 的终端上画；更常见的是 panic 信息本身被画进 alternate screen，用户退出后看不到。
+/// 先恢复、再把原来的 hook 打一遍，两件事都做。
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(
+            io::stdout(),
+            PopKeyboardEnhancementFlags,
+            DisableBracketedPaste,
+            DisableMouseCapture,
+            crossterm::cursor::Show
+        );
+        ratatui::restore();
+        previous(info);
+    }));
 }
 
 /// Hands the terminal back to an external editor and returns the edited draft.
@@ -217,19 +252,21 @@ pub fn run(boot: Boot, requests: Sender<Request>, updates: Receiver<Update>) -> 
         .unwrap_or_default();
     // 模型偏好与 UI 偏好分开存：坏掉的 `model.json` 只该丢掉收藏与最近，不该动别的。
     let model_prefs = catalog::ModelPrefs::load(&boot.model_prefs);
+    install_panic_hook();
     // try_init may enter raw mode before failing to switch screens.
     let _guard = TerminalGuard;
     let mut terminal = ratatui::try_init()?;
     execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
     // Kitty keyboard protocol (where the terminal supports it) is what makes Shift+Enter
-    // distinguishable from Enter. Terminals that don't implement it ignore the sequence; the
-    // existing keys (F6/Enter on Windows, Enter/Ctrl+J elsewhere) keep working either way.
+    // distinguishable from Enter. Terminals that don't implement it ignore the sequence; on
+    // Windows the Win32 input records already carry SHIFT_PRESSED, and Ctrl+J is the fallback.
     let _ = execute!(
         io::stdout(),
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     );
     let mut app = app::App::new(boot, preferences, model_prefs);
     let _ = requests.send(Request::Refresh);
+    let mut window_title = String::new();
     let result = (|| {
         loop {
             while let Ok(update) = updates.try_recv() {
@@ -265,11 +302,30 @@ pub fn run(boot: Boot, requests: Sender<Request>, updates: Receiver<Update>) -> 
                 continue;
             }
             if app.dirty {
+                // 会话页没有标题栏（照 OpenCode），标题交给终端窗口 / 标签页 —— 窄终端上
+                // 信息栏收起时，这是唯一还看得见「这是哪个会话」的地方。只在变了时写。
+                let title = app.window_title();
+                if title != window_title {
+                    let _ = execute!(io::stdout(), crossterm::terminal::SetTitle(&title));
+                    window_title = title;
+                }
                 terminal.draw(|frame| view::draw(frame, &mut app))?;
                 app.dirty = false;
             }
-            if event::poll(Duration::from_millis(50))? && app.input(event::read()?, &requests) {
-                return Ok(());
+            // 一次 poll 之后把**已经排队**的按键一起收走：Windows 上粘贴就是一整串按键
+            // （没有 `Event::Paste`），只有看到整批才能把其中的 Enter 当换行而不是提交。
+            if event::poll(Duration::from_millis(50))? {
+                let mut batch = vec![event::read()?];
+                while event::poll(Duration::ZERO)? {
+                    batch.push(event::read()?);
+                    // 上限只是防病态输入：正常粘贴不会有一万个按键排在队列里。
+                    if batch.len() >= 4096 {
+                        break;
+                    }
+                }
+                if app.input_batch(batch, &requests) {
+                    return Ok(());
+                }
             }
         }
     })();

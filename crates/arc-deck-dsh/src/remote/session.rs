@@ -11,10 +11,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use arc_deck_core::conversation::{
     CatalogEffort, CatalogFailure, CatalogModel, CatalogProvider, Conversation, ModelCatalog,
-    ModelChoice, SessionSummary,
+    ModelChoice, SearchHit, SessionSummary,
 };
 use serde_json::{json, Value};
 
+use super::events::{self, Answer, EventSubscription};
 use super::fold::{model_choice, ConversationFold};
 use super::{RemoteError, RemoteFrame, RemoteMux, RemoteRpc, RemoteStream, WebKernel};
 
@@ -108,6 +109,27 @@ impl SessionClient {
             .map(|_| ())
     }
 
+    /// 检索会话内容（`session/search`）。命中片段由内核给，命中词用 `\u{0}` 夹起来。
+    pub async fn search(&self, query: &str) -> Result<Vec<SearchHit>, RemoteError> {
+        let value = self.rpc.call("session/search", json!({ "request": { "query": query } })).await?;
+        Ok(parse_search(&value))
+    }
+
+    /// 打开转发事件流。审批请求走这条流（见 `events.rs`）。
+    pub async fn subscribe_events(&self) -> Result<EventSubscription, RemoteError> {
+        EventSubscription::open(&self.mux).await
+    }
+
+    /// 回答一条转发事件。`client_id` 是订阅建立时 Host 给的世代 id。
+    pub async fn answer_event(
+        &self,
+        client_id: &str,
+        request_id: &str,
+        answer: Answer,
+    ) -> Result<(), RemoteError> {
+        events::answer(&self.rpc, client_id, request_id, answer).await
+    }
+
     /// 改名。返回内核规范化之后的标题。
     pub async fn rename(&self, session_id: &str, title: &str) -> Result<String, RemoteError> {
         let value = self
@@ -122,7 +144,11 @@ impl SessionClient {
     /// **follow 会接管冷会话**（P15）：这正是我们要的（之后才能继续对话），但也意味着
     /// 这个内核绝不能指向 DSH Desktop 的 home —— 见 `launch.rs`。
     pub async fn open(&self, session_id: &str) -> Result<OpenSession, RemoteError> {
-        let address = json!({ "kind": "session", "sessionId": session_id });
+        self.open_at(address(session_id, None)).await
+    }
+
+    /// 按地址打开（子 agent 会话要 [`address`] 给的父地址）。
+    pub async fn open_at(&self, address: Value) -> Result<OpenSession, RemoteError> {
         let mut stream = self
             .mux
             .open("session/follow", json!({ "request": { "address": address, "assistantStream": true } }))
@@ -216,12 +242,51 @@ impl OpenSession {
     }
 }
 
+fn parse_search(value: &Value) -> Vec<SearchHit> {
+    value["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let session_id = item["sessionId"].as_str().filter(|id| !id.is_empty())?;
+            Some(SearchHit {
+                session_id: session_id.to_string(),
+                // `session/search` 的条目只有 id 与片段；标题由调用方从会话列表里补。
+                title: None,
+                snippet: item["snippet"].as_str().unwrap_or_default().to_string(),
+            })
+        })
+        .collect()
+}
+
+/// 会话地址。子 agent 会话**必须**用父地址，否则内核拒绝：
+/// `subagent Sessions require their durable parent address`（P13，C# 那条路实测）。
+/// 列表项里没有 mode 时退回普通地址 —— 那是内核没说，不猜。
+pub fn address(session_id: &str, summary: Option<&SessionSummary>) -> Value {
+    match summary {
+        Some(SessionSummary { parent_session_id: Some(parent), subagent_mode: Some(mode), .. }) => json!({
+            "kind": "subagent",
+            "parentSessionId": parent,
+            "childSessionId": session_id,
+            "mode": mode,
+        }),
+        _ => json!({ "kind": "session", "sessionId": session_id }),
+    }
+}
+
 fn parse_list(value: &Value) -> Vec<SessionSummary> {
     let mut out: Vec<SessionSummary> = value["items"]
         .as_array()
         .into_iter()
         .flatten()
-        .map(|item| SessionSummary {
+        .map(|item| {
+            // 子 agent 描述符在 `projections.values.subagent`（`{ mode, label?, seq }`），**不是**
+            // 列表项的顶层字段 —— schema 的缩进骗过 C# 那条路一次（P13）。顶层只作回退。
+            let subagent = match &item["projections"]["values"]["subagent"] {
+                Value::Object(_) => &item["projections"]["values"]["subagent"],
+                _ => &item["subagent"],
+            };
+            SessionSummary {
             session_id: item["sessionId"].as_str().unwrap_or_default().to_string(),
             // 标题在 projections 里（P13 的那条更正：内核给的列表**带标题**）。
             title: item["projections"]["values"]["title"].as_str().map(str::to_string),
@@ -230,7 +295,9 @@ fn parse_list(value: &Value) -> Vec<SessionSummary> {
             running: item["running"].as_bool().unwrap_or(false),
             blank: item["blank"].as_bool().unwrap_or(false),
             parent_session_id: item["parentSessionId"].as_str().map(str::to_string),
-        })
+            subagent_mode: subagent["mode"].as_str().map(str::to_string),
+            subagent_label: subagent["label"].as_str().map(str::to_string),
+        }})
         .filter(|s| !s.session_id.is_empty())
         .collect();
     out.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
@@ -256,6 +323,8 @@ fn parse_catalog(value: &Value) -> ModelCatalog {
                         id: text(&model["id"]).unwrap_or_default(),
                         name: text(&model["name"]).unwrap_or_default(),
                         description: text(&model["description"]),
+                        // 形状按 0.2.1 的目录：窗口在模型自己身上，强度档在 `reasoning` 下。
+                        context_window: model["contextWindow"].as_u64(),
                         efforts: model["reasoning"]["efforts"]
                             .as_array()
                             .into_iter()
@@ -288,6 +357,81 @@ fn parse_catalog(value: &Value) -> ModelCatalog {
 mod tests {
     use super::*;
 
+    /// 一条真实的 WS + 一个真实的 HTTP 假内核：审批流开出来、请求送到、回答回去。
+    ///
+    /// 为什么两边都要真的：开流走 WS（`$events`），回答走一元 HTTP（`$events/result`），
+    /// 任何一边写错参数名，另一端都会以「读不到 / 参数非法」的形式暴露出来。
+    #[tokio::test]
+    async fn an_approval_request_is_answered_through_the_event_stream() {
+        use crate::remote::fake::{FakeMux, FakeRpc};
+        use crate::remote::{events::Forwarded, Secret};
+
+        let mut mux = FakeMux::start();
+        let mut rpc = FakeRpc::start();
+        let cookie = Secret::new("dsh-auth-test=v1.a.b");
+        let mux_client = RemoteMux::connect_to(&mux.origin(), mux.port(), &cookie).await.unwrap();
+        let rpc_client = RemoteRpc::new(&rpc.origin(), &cookie).unwrap();
+        let client = SessionClient::from_parts(rpc_client, mux_client);
+
+        let mut opening = Box::pin(client.subscribe_events());
+        // 两个 future 要同时推进：`subscribe_events` 发出 open 之后等 ready，
+        // 而 open 帧只有在内核那一侧被读到之后才会有 ready。
+        let open = tokio::select! {
+            frame = mux.recv() => frame.expect("内核没收到 open"),
+            _ = &mut opening => panic!("ready 之前不该开成"),
+        };
+        assert_eq!(open["type"], "open");
+        assert_eq!(open["endpoint"], "$events");
+        assert_eq!(open["payload"], serde_json::json!({ "args": {} }));
+        let stream_id = open["streamId"].as_str().unwrap().to_string();
+        mux.send(serde_json::json!({
+            "type": "item",
+            "streamId": stream_id,
+            "value": { "type": "ready", "clientId": "client-1", "host": { "home": "/h" } },
+        }));
+        let mut subscription = opening.await.expect("ready 之后应该开成");
+        assert_eq!(subscription.client_id(), "client-1");
+
+        mux.send(serde_json::json!({
+            "type": "item",
+            "streamId": stream_id,
+            "value": {
+                "type": "waterfall",
+                "event": "approval/request",
+                "eventId": "evt-9",
+                "agentId": "agent-1",
+                "request": { "toolName": "bash", "callId": "call-1", "reason": "hook says ask" },
+            },
+        }));
+        let Forwarded::Approval(request) = subscription.next().await else {
+            panic!("第一帧应该是审批");
+        };
+        assert_eq!(request.tool_name, "bash");
+        assert_eq!(request.request_id, "evt-9");
+
+        client
+            .answer_event(subscription.client_id(), &request.request_id, events::Answer::AllowOnce)
+            .await
+            .expect("回答应该发出去");
+        let raw = rpc.request().await.expect("假一元接口没收到回答");
+        assert!(raw.contains("$events/result"), "{raw}");
+        assert!(raw.contains("allowed-once"), "{raw}");
+        assert!(raw.contains("client-1") && raw.contains("evt-9"), "{raw}");
+    }
+
+    #[test]
+    fn search_keeps_the_highlight_markers_and_drops_entries_without_an_id() {
+        // 片段里的 \u{0} 是内核夹命中词的约定，原样留着给界面分段着色。
+        let value = json!({ "items": [
+            { "sessionId": "s1", "snippet": "改\u{0}会话\u{0}列表" },
+            { "snippet": "没有 id" },
+        ], "hasMore": false });
+        let hits = parse_search(&value);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session_id, "s1");
+        assert!(hits[0].snippet.contains('\u{0}'));
+    }
+
     #[test]
     fn the_list_reads_titles_from_projections_and_orders_by_activity() {
         let value = json!({ "items": [
@@ -303,6 +447,26 @@ mod tests {
         assert_eq!(list[0].title, None, "没有标题就是没有，不编");
         assert!(list[0].running);
         assert_eq!(list[1].parent_session_id.as_deref(), Some("new"));
+        assert_eq!(list[1].subagent_mode, None, "列表项没说 mode 就是没有");
+    }
+
+    /// 子 agent 的 mode 在 `projections.values.subagent`（P13）；有了它才能配出父地址。
+    #[test]
+    fn subagent_sessions_get_the_parent_address() {
+        let value = json!({ "items": [
+            { "sessionId": "child", "updatedAt": 5, "parentSessionId": "p", "origin": "subagent",
+              "projections": { "values": { "subagent": { "mode": "one-shot", "label": "查依赖", "seq": 3 } } } },
+            { "sessionId": "p", "updatedAt": 4, "projections": { "values": { "subagent": null } } },
+        ] });
+        let list = parse_list(&value);
+        assert_eq!(list[0].subagent_mode.as_deref(), Some("one-shot"));
+        assert_eq!(list[0].subagent_label.as_deref(), Some("查依赖"));
+        assert_eq!(
+            address("child", Some(&list[0])),
+            json!({ "kind": "subagent", "parentSessionId": "p", "childSessionId": "child", "mode": "one-shot" })
+        );
+        assert_eq!(address("p", Some(&list[1])), json!({ "kind": "session", "sessionId": "p" }));
+        assert_eq!(address("x", None), json!({ "kind": "session", "sessionId": "x" }));
     }
 
     #[test]

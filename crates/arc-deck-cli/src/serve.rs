@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use arc_deck_core::authz::Permission;
 use arc_deck_core::conversation::ModelChoice;
 use arc_deck_core::error::{code, SpecError};
+use arc_deck_core::mode::{AgentId, Mode};
 use arc_deck_core::service::{self, BackendState, Command, Event, NoticeLevel};
 use arc_deck_core::userconfig::UserConfig;
 use arc_deck_dsh::remote::{launch, service as session_service};
@@ -27,17 +28,20 @@ pub(crate) fn spawn_service(
     cfg: &UserConfig,
     workspace: &Path,
     permission: Permission,
+    agent: AgentId,
+    mode: Mode,
     kernel_id: &str,
 ) -> Result<(session_service::ServiceHandle, Vec<String>), String> {
     let home = launch::default_dsh_home();
+    let persona = interactive_persona(cfg, &home, agent, mode)?;
     let launch = launch::interactive(launch::InteractiveInput {
         config: cfg,
         workspace,
         permission,
+        agent,
+        mode,
         dsh_home: &home,
-        // 个性化（§5.3.1）还没接进交互面：关着时本来就一段都不注入，开着时这里**尚未**注入 ——
-        // 如实记在 docs/M4_PLAN.md，不假装生效。
-        persona_suffix: "",
+        persona_suffix: &persona,
         kernel_id,
     })
     .map_err(|error| error.message)?;
@@ -49,6 +53,22 @@ pub(crate) fn spawn_service(
         lock: Some(launch.lock),
     });
     Ok((handle, notes))
+}
+
+/// 交互面的 persona（§5.3.1）。个性化**关着时一段都不注入**（空串 —— 按模型本体行事）；开着时
+/// 与 headless 一般模式同一份装配：工程规则 → Agent → 模式 → 风格（`compose_system_prompt`）。
+/// 换 Agent / 模式本来就要重启内核（Plan 落在执行层），所以 persona 跟着重新装配，不会过期。
+pub(crate) fn interactive_persona(cfg: &UserConfig, home: &Path, agent: AgentId, mode: Mode) -> Result<String, String> {
+    if !cfg.personalization.enabled {
+        return Ok(String::new());
+    }
+    let (agents, prompts) = crate::commands::write_embedded_agents(&home.join("arcdeck-agents"))
+        .map_err(|error| error.message)?;
+    let registry = arc_deck_core::agent::AgentRegistry::load(&agents, &prompts).map_err(|error| error.message)?;
+    let prompt = registry
+        .compose_system_prompt(arc_deck_core::agent::PromptScope::Personalized, agent, mode, None)
+        .map_err(|error| error.message)?;
+    Ok(prompt.text())
 }
 
 /// 一行输入的判定。单独成函数是为了离线可测：编解码与握手不需要内核。
@@ -160,7 +180,7 @@ pub(crate) async fn cmd_serve(argv: &[String]) -> Result<i32, SpecError> {
         }
     };
     let kernel_id = format!("serve-{}", std::process::id());
-    let (handle, notes) = match spawn_service(&cfg, &workspace, permission, &kernel_id) {
+    let (handle, notes) = match spawn_service(&cfg, &workspace, permission, AgentId::Echo, Mode::Build, &kernel_id) {
         Ok(started) => started,
         Err(reason) => {
             let failed = Event::Backend { state: BackendState::Failed { reason } };
@@ -218,6 +238,21 @@ pub(crate) async fn cmd_serve(argv: &[String]) -> Result<i32, SpecError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// §5.3.1：个性化关着时交互面一段提示词都不注入；开着时装配 Agent + 模式 + 风格。
+    #[test]
+    fn the_interactive_persona_follows_the_personalization_switch() {
+        let home = tempfile::tempdir().unwrap();
+        let mut cfg = UserConfig::parse(&arc_deck_core::userconfig::starter_config(), Path::new("arcdeck.json")).unwrap();
+        assert_eq!(interactive_persona(&cfg, home.path(), AgentId::Echo, Mode::Build).unwrap(), "");
+        assert!(!home.path().join("arcdeck-agents").exists(), "关着时连文件都不写");
+
+        cfg.personalization.enabled = true;
+        let echo = interactive_persona(&cfg, home.path(), AgentId::Echo, Mode::Build).unwrap();
+        assert!(echo.contains("Echo 风格"), "开着时带上风格：{echo}");
+        let plan = interactive_persona(&cfg, home.path(), AgentId::Echo, Mode::Plan).unwrap();
+        assert_ne!(plan, echo, "模式那一段跟着变");
+    }
 
     #[test]
     fn the_first_line_must_be_a_compatible_hello() {

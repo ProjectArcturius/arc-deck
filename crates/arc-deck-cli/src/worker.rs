@@ -279,6 +279,7 @@ fn dsh_runtime_command(input: DshCommandInput<'_>) -> Result<RuntimeCommand, Spe
         route,
         persona_suffix: &persona,
         session_log_upload: input.session_log_upload,
+        session_search: false,
         guard: &guard,
     });
 

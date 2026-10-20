@@ -146,23 +146,60 @@ $screenHome = Snapshot "home"
 $checks.home_has_brand = $screenHome.Contains("Arc Deck")
 
 # 交互内核在后台起（几秒到几十秒）；就绪之前提交会排队，但探针要的是「就绪」这个事实。
+# 「就绪」不再有通知（2026-10-20 去掉了常驻通知行）：页脚右边的「内核启动中」消失、
+# 且没有出现「内核不可用」，就是就绪。
 $ready = $false
 for ($i = 0; $i -lt 60; $i++) {
     $now = Screen
-    if ($now.Contains("交互内核就绪")) { $ready = $true; break }
-    if ($now.Contains("交互会话不可用")) { break }
+    if ($now.Contains("内核不可用") -or $now.Contains("交互会话不可用")) { break }
+    if ($now.Contains("Arc Deck") -and -not $now.Contains("内核启动中")) { $ready = $true; break }
     Start-Sleep -Seconds 1
 }
 $checks.kernel_ready = $ready
-[void](Snapshot "ready")
+$readyScreen = Snapshot "ready"
+# 页脚只有一行：右边是键位，不再是八个键位的说明书。
+$checks.footer_is_one_line = $readyScreen.Contains("ctrl+p 命令") -and -not $readyScreen.Contains("PgUp 上滚")
+$checks.placeholder_says_enter = $readyScreen.Contains("Enter 发送")
 
-# `@` alone at the start of an empty draft opens the file popup.
+# `@` 打开文件补全。弹层没有标题了（照 OpenCode），所以断言候选本身：打 `@AGENTS` 要列出 AGENTS.md。
 Send-Key 0x1B ([char]0x1B) 0
-Send-Text "@"
+Send-Text "@AGENTS"
 $at = Snapshot "at"
-$checks.at_popup = $at.Contains("文件引用")
+$checks.at_popup = $at.Contains("AGENTS.md")
 Send-Key 0x1B ([char]0x1B) 0
 Send-Key 0x1B ([char]0x1B) 0
+# 清掉草稿里的 `@AGENTS`（Esc 只收弹层）。
+for ($i = 0; $i -lt 8; $i++) { Send-Key 0x08 ([char]8) 0 }
+
+# 暂存：有字时 Ctrl+X S 收起草稿；`/stash` 列出来，Enter 取回。不碰模型。
+Send-Text "stashed draft"
+Send-Key 0x58 ([char]0x18) 8
+Send-Text "s"
+$checks.stash_clears_composer = -not (Screen).Contains("stashed draft")
+Send-Text "/stash"
+Send-Key 0x0D ([char]0x0D) 0
+$stash = Snapshot "stash"
+$checks.stash_dialog = $stash.Contains("暂存的草稿") -and $stash.Contains("stashed draft")
+Send-Key 0x0D ([char]0x0D) 0
+$checks.stash_restores = (Screen).Contains("stashed draft")
+for ($i = 0; $i -lt 14; $i++) { Send-Key 0x08 ([char]8) 0 }
+
+# 补全里**一次** Enter 就执行（`/per` → `/permission` → 授权对话框）。用真的 Enter（0x0D），
+# 不是 F6 —— 用户报的就是 Enter 要按两次（2026-10-20）。
+Send-Text "/per"
+Send-Key 0x0D ([char]0x0D) 0
+$checks.one_enter_runs_completion = (Screen).Contains("授权级别")
+[void](Snapshot "permission")
+Send-Key 0x1B ([char]0x1B) 0
+
+# Shift+Tab 换 Agent：输入框下面的名字跟着变（Echo → Build），再从 Agent 对话框选回 Echo。
+Send-Key 0x09 ([char]9) 0x10
+$checks.shift_tab_switches_agent = (Screen).Contains("Build ·")
+Send-Text "/agents"
+Send-Key 0x0D ([char]0x0D) 0
+Send-Key 0x0D ([char]0x0D) 0
+Start-Sleep -Seconds 1
+$checks.agent_back_to_echo = (Screen).Contains("Echo ·")
 
 # F1 opens help; Esc closes it; typing lands in the composer.
 Send-Key 0x70 ([char]0) 0
@@ -176,14 +213,28 @@ $checks.typed_shows_hi = $typed.Contains("hi")
 # `/sessions` 是会话列表、`/runs` 是工人运行；两个都不碰模型。
 Send-Key 0x1B ([char]0x1B) 0
 Send-Text "/sessions"
-Send-Key 0x75 ([char]0) 0
+Send-Key 0x0D ([char]0x0D) 0
 $sessionsScreen = Snapshot "sessions"
 $checks.sessions_dialog = $sessionsScreen.Contains("会话（当前工作区）")
 Send-Key 0x1B ([char]0x1B) 0
 Send-Text "/runs"
-Send-Key 0x75 ([char]0) 0
+Send-Key 0x0D ([char]0x0D) 0
 $runsScreen = Snapshot "runs"
 $checks.runs_dialog = $runsScreen.Contains("工人运行")
+Send-Key 0x1B ([char]0x1B) 0
+
+# 内容检索走真内核的 `session/search`（本地 FTS，不碰模型）。命中几条取决于本机会话，
+# 判据只是「检索结果弹层出来了」—— 没有命中也是一个合法的结果（「0 条命中」）。
+Send-Text "/search OK"
+Send-Key 0x0D ([char]0x0D) 0
+$searched = $false
+for ($i = 0; $i -lt 30; $i++) {
+    $now = Screen
+    if ($now.Contains("条命中")) { $searched = $true; break }
+    Start-Sleep -Seconds 1
+}
+$checks.search_real_kernel = $searched
+[void](Snapshot "search")
 Send-Key 0x1B ([char]0x1B) 0
 
 function Wait-Screen($needle, $seconds) {
@@ -199,12 +250,12 @@ function Wait-Screen($needle, $seconds) {
 if ($Submit) {
     Send-Key 0x1B ([char]0x1B) 0
     Send-Text "7 乘以 6 等于多少？只回复阿拉伯数字"
-    Send-Key 0x75 ([char]0) 0
+    Send-Key 0x0D ([char]0x0D) 0
     $checks.turn1_answer_42 = Wait-Screen "42" 120
     [void](Snapshot "turn1")
     Start-Sleep -Seconds 2
     Send-Text "再加 1 呢？只回复阿拉伯数字"
-    Send-Key 0x75 ([char]0) 0
+    Send-Key 0x0D ([char]0x0D) 0
     $checks.turn2_answer_43 = Wait-Screen "43" 120
     $final = Snapshot "turn2"
     $checks.submit_has_error = $final.Contains("模型失败") -or $final.Contains("错误：")
@@ -216,10 +267,23 @@ if ($Cancel) {
     Send-Key 0x1B ([char]0x1B) 0
     # 要足够长：flash 6 秒内就能数完 300（实测），那时 Esc 已经没有进行中的一轮可取消。
     Send-Text "从 1 数到 5000，每行一个数字，不要省略"
-    Send-Key 0x75 ([char]0) 0
+    Send-Key 0x0D ([char]0x0D) 0
     Start-Sleep -Seconds 2
+    # 跑着的时候页脚左边是扫描条 + `esc 中断`（OpenCode 的「还在工作」）。
+    $running = Screen
+    # 只认「中断」与 `■`：中文代码页的 conhost 把歧义宽度字符（`■`、`·`）画成两格，同一行后面的字会
+    # 错位（实测 `esc 中断` 读回来是 `■中断`）。Windows Terminal 按一格画，没有这个问题。
+    $checks.scanner_while_running = $running.Contains("中断") -and $running.Contains([string][char]0x25A0)
+    [void](Snapshot "running")
     Send-Key 0x1B ([char]0x1B) 0
-    $checks.cancel_shown = Wait-Screen "已取消" 60
+    # 一轮的页脚是「▣ Echo · 模型 · 已取消」；conhost 里前面的 `·` 会挤掉一个字（见上），读回来是
+    # 「· 取消」。只认这两种形状 —— 光认「取消」会被通知里的「Esc 取消这一轮」骗过。
+    $checks.cancel_shown = $false
+    for ($i = 0; $i -lt 60; $i++) {
+        $now = Screen
+        if ($now.Contains("已取消") -or $now.Contains("· 取消")) { $checks.cancel_shown = $true; break }
+        Start-Sleep -Seconds 1
+    }
     [void](Snapshot "cancel")
     Send-Text "still here"
     $checks.composer_usable_after_cancel = (Screen).Contains("still here")
@@ -229,12 +293,21 @@ if ($Resume) {
     # 跨进程恢复：会话列表的第一行是最近的那个（上一次 -Cancel 留下的），打开后历史要回来。
     Send-Key 0x1B ([char]0x1B) 0
     Send-Text "/sessions"
-    Send-Key 0x75 ([char]0) 0
+    Send-Key 0x0D ([char]0x0D) 0
     Start-Sleep -Seconds 2
     Send-Key 0x0D ([char]0x0D) 0
-    $checks.resume_history = Wait-Screen "数到 5000" 30
-    $checks.resume_shows_cancelled = (Screen).Contains("已取消")
+    # 最近的会话不一定是 -Cancel 留下的那个（用户自己的会话更新时就不是），所以判据是
+    # 「打开后出现了一轮的页脚 `▣`」—— 任何有历史的会话都有。「已取消」只在同一次跑过 -Cancel 时才查。
+    $checks.resume_history = Wait-Screen "▣ " 30
+    if ($Cancel) { $checks.resume_shows_cancelled = (Screen).Contains("已取消") }
     [void](Snapshot "resume")
+    # 子 agent 对话框：有子会话就列出来，没有就明说没有 —— 两种都算对话框起来了。
+    Send-Text "/subagents"
+    Send-Key 0x0D ([char]0x0D) 0
+    Start-Sleep -Seconds 1
+    $checks.subagents_dialog = (Screen).Contains("子 agent 会话")
+    [void](Snapshot "subagents")
+    Send-Key 0x1B ([char]0x1B) 0
 }
 
 # Ctrl+C quits (and cancels an active run); the supervisor may take a while to clean up.

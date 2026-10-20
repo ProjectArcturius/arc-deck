@@ -103,8 +103,8 @@ fn runtime_layout() -> Result<crate::runtime::RuntimeLayout, String> {
 ///
 /// 两件事分开是有原因的：`Termination::exited` 说的是「我们自己 wait 到了子进程
 /// 结束」，那对 node 直接子进程成立；而内核还会拉起工具子进程，`kill_tree` 那条路
-/// 在 Windows 上**报不出确认**（`process::kill_tree_by_pid` 只有 Unix 有「组空了」
-/// 这个判据，Windows 那边如实回 `exited: false`）。所以这里自己走一遍：
+/// 在 Windows 上只确认得了**根进程**（`process::kill_tree_by_pid` 只有 Unix 有「组空了」
+/// 这个判据，Windows 那边看的是根 pid 有没有从进程表里消失）。所以这里自己走一遍：
 /// 先请求收树，再轮询进程表。
 async fn shutdown_and_confirm(kernel: &mut WebKernel, what: &str) {
     let pid = kernel.pid().expect("内核该有 pid");
@@ -313,4 +313,29 @@ async fn remote_live_diagnostics_never_carry_the_launch_token() {
 
     mux.shutdown().await;
     shutdown_and_confirm(&mut kernel, "凭据测试之后").await;
+}
+
+/// 审批通道的**真实**那一半：`$events` 这条 Gateway 内部流在 0.2.1-alpha.2 上开得起来，
+/// 第一帧是 `ready` 且带 `clientId`。
+///
+/// 为什么这条必须对真内核跑：`$events` 只有一段（其余 Remote 方法都是 `ns/name`），
+/// 我们自己的 `valid_method` 就因此把它挡下来一次；假服务端不会替我们回答
+/// 「真实的 Gateway 认不认这个端点」。**不发 prompt、不需要密钥**。
+#[tokio::test]
+#[ignore = "起真实 web 内核（几十秒）；需要本机装了钉住运行时的机器"]
+async fn remote_live_forwarded_events_stream_is_ready() {
+    use crate::remote::session::SessionClient;
+
+    let Some((mut kernel, _home)) = start_kernel("remote_live_forwarded_events_stream_is_ready").await
+    else {
+        return;
+    };
+    let client = SessionClient::connect(&kernel).await.expect("连上内核");
+    let subscription = client.subscribe_events().await.expect("$events 应该开得起来");
+    assert!(
+        !subscription.client_id().is_empty(),
+        "ready 帧必须带 clientId，否则之后没法回答任何 waterfall"
+    );
+    drop(subscription);
+    shutdown_and_confirm(&mut kernel, "转发事件流之后").await;
 }

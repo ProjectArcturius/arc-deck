@@ -2,7 +2,11 @@ use std::collections::HashMap;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use arc_deck_core::conversation::{Conversation, Message, ModelCatalog, ModelChoice, SessionSummary};
+use arc_deck_core::conversation::{
+    ApprovalOutcome, ApprovalRequest, Conversation, Message, ModelCatalog, ModelChoice, SearchHit,
+    SessionSummary,
+};
+use arc_deck_core::mode::{AgentId, Mode};
 use arc_deck_core::service::{self, BackendState, Command, NoticeLevel};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 
@@ -17,6 +21,7 @@ use crate::{
     editor::Editor,
     theme::{DEFAULT_THEME, Theme},
     theme_dialog::{ThemeDialog, ThemeDialogAction},
+    toolview,
 };
 
 /// 弹层。带状态的那几个（模型 / provider / effort）的渲染与选择规则都在
@@ -29,10 +34,41 @@ pub(crate) enum Dialog {
     Agents,
     Permissions,
     Help,
+    /// 运行中改模式 / Agent 之前的一句确认（§7.4 最后一段：先结束/取消再影响下一轮）。
+    Confirm(ConfirmKind),
+    /// 内核在等一个人回答的审批。`Esc` 只是收起它，**不等于允许**。
+    Approval(Box<ApprovalRequest>),
+    /// 会话内容检索的结果。
+    Search,
+    /// 本会话的用户消息时间线，选中后滚到那一条。
+    Timeline,
+    /// 子 agent 会话：当前会话派出的子会话；在子会话里时第一行是「回到父会话」。
+    Subagents,
+    /// 暂存的草稿，Enter 取回到输入框。
+    Stash,
+    /// 工具的完整输出 / 本会话的 diff（可滚动、可搜索）。
+    Viewer(Viewer),
     Models(ModelDialogState),
     Providers(ProviderDialogState),
     Efforts(EffortDialogState),
     Theme,
+}
+
+/// 哪个改动在等确认。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfirmKind {
+    Mode(Mode),
+    Agent(AgentId),
+}
+/// 全屏查看器里的内容。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Viewer {
+    pub title: String,
+    pub lines: Vec<String>,
+    /// 已经滚到第几行（0 = 顶部）。
+    pub scroll: usize,
+    /// 过滤串：只显示命中的行。空串显示全部。
+    pub filter: String,
 }
 
 /// One `/help` row: the chord(s) the keymap actually binds, the registry title, where the
@@ -46,8 +82,42 @@ pub(crate) struct HelpRow {
     pub reason: Option<String>,
 }
 
-pub(crate) struct App {
-    pub boot: Boot,
+/// 一条短暂提示。错误不过期 —— 「复制失败」这种话说一遍就没了，等于没说。
+/// 子 agent 对话框的一行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SubagentRow {
+    pub session_id: String,
+    pub label: String,
+    pub running: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Toast {
+    pub text: String,
+    pub error: bool,
+    pub until: Instant,
+}
+
+/// 工作区的 git 概况。只用来显示，不参与判定。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GitStatus {
+    pub branch: String,
+    /// `git status --porcelain` 的行数（未跟踪也算，因为它同样是「工作区不干净」）。
+    pub changed: usize,
+}
+
+/// 正文渲染缓存。
+///
+/// 为什么要有：一次绘制本该只处理可见区域，但 Markdown 排版是按宽度整体折行的，
+/// 没法从中间开始算。缓存把「重排全文」降成「只在内容 / 宽度 / 展开态变了时重排」，
+/// 滚动、按键、toast 到期都不再重算几百条消息（任务书 w5-polish 第 7 条）。
+pub(crate) struct RenderCache {
+    pub key: (u64, u16, bool, Option<String>, String, bool),
+    pub lines: Vec<ratatui::text::Line<'static>>,
+    pub offsets: Vec<(u32, usize)>,
+}
+
+pub(crate) struct App {    pub boot: Boot,
     pub preferences: Preferences,
     /// Resolved theme tokens. Re-resolved only when the theme name or mode changes, never per
     /// frame: `Theme::load` parses and resolves the whole document, and the draw path runs on
@@ -91,6 +161,11 @@ pub(crate) struct App {
     pub sidebar_overlay: bool,
     pub expanded: HashMap<String, bool>,
     pub notice: String,
+    /// 扫描条的时钟（`spinner_frame`）与上一次画到第几帧：只在「在干活」时按帧重画。
+    spinner_epoch: Instant,
+    spinner_seen: usize,
+    /// 通知上一次变化的时刻：普通通知 8 秒后收起（见 `tick`），**故障不收**。
+    notice_seen: Option<(String, Instant)>,
     pub dirty: bool,
     serial: u64,
     /// 交互内核的状态。`Failed` 时提交退回独立运行（headless 那条路），界面说清楚为什么。
@@ -101,6 +176,26 @@ pub(crate) struct App {
     /// 已发出、还没在会话视图里出现的那条（乐观回显）。看到同样的用户消息就清掉。
     pub pending: Option<String>,
     pub sessions: Vec<SessionSummary>,
+    /// 当前工作模式。Plan 落到执行层是只读（改它要重启内核）。
+    pub mode: Mode,
+    /// 内核在等人回答的审批，按到达顺序。`Esc` 收起界面不会把请求从这里删掉。
+    pub approvals: Vec<ApprovalRequest>,
+    /// 上一次内容检索的结果。
+    pub search: Vec<SearchHit>,
+    pub search_query: String,
+    /// 每条用户消息在正文里的起始行（渲染时填，时间线跳转用）。
+    pub message_offsets: Vec<(u32, usize)>,
+    /// 短暂提示（toast）。错误类不自动消失。
+    pub toasts: Vec<Toast>,
+    /// 当前工作区的 git 分支与脏文件数。`None` = 不是 git 仓库 / 读不到。
+    pub git: Option<GitStatus>,
+    /// 正文渲染缓存（见 [`RenderCache`]）。
+    pub render_cache: Option<RenderCache>,
+    /// 内容变一次加一；缓存键的一部分。
+    pub render_revision: u64,
+    /// 正文全文重排过几次。**诊断计数**：缓存是否真的生效靠它判定
+    /// （测试 `the_body_is_only_rebuilt_when_it_changed`）。
+    pub render_builds: u64,
 }
 
 impl App {
@@ -116,12 +211,23 @@ impl App {
         // `keybinds.json` 是手改的文件：写坏了要报出来并回退默认，不能因此起不来。
         let keymap = Keymap::load(&boot.preferences);
         let keymap_notice = (!keymap.warnings().is_empty()).then(|| keymap.warnings().join("；"));
+        // NO_COLOR 是标准（no-color.org）；crossterm 会照它关掉所有颜色。TUI 只剩黑白时
+        // 这是**第一嫌疑**，所以在界面上直接说出来 —— 我们自己的截图就被它坑过一次（2026-10-20）。
+        let no_color_notice = std::env::var_os("NO_COLOR")
+            .is_some_and(|value| !value.is_empty())
+            .then(|| "NO_COLOR 已设置：界面不发颜色；清掉这个环境变量再启动即可".to_string());
         let notice = boot
             .config_error
-            .clone()
+            .as_ref()
+            .map(|error| match failure_hint(error) {
+                Some(hint) => format!("{error}；{hint}"),
+                None => error.clone(),
+            })
             .or(theme_notice)
             .or(keymap_notice)
-            .unwrap_or_else(|| "交互内核启动中；可以先输入；/help 查看键位".into());
+            .or(no_color_notice)
+            // 没有要说的就不说：内核状态在页脚右边，键位在占位符里（2026-10-20 用户：字太多）。
+            .unwrap_or_default();
         let backend = match &boot.config_error {
             Some(reason) => BackendState::Failed { reason: reason.clone() },
             None => BackendState::Starting,
@@ -131,8 +237,14 @@ impl App {
         let mut editor = Editor::default();
         let keep = preferences.history.len().saturating_sub(200);
         editor.history = preferences.history[keep..].to_vec();
+        // git 概况在启动时读一次；之后每一轮结束再读（见 `update`）。**不在绘制路径上跑**：
+        // `git status` 在大会话里几十毫秒，放每帧里就是肉眼可见的卡顿。
+        let git = git_status(&boot.workspace);
         Self {
             notice,
+            notice_seen: None,
+            spinner_epoch: Instant::now(),
+            spinner_seen: 0,
             effort,
             boot,
             preferences,
@@ -168,6 +280,42 @@ impl App {
             conversation: None,
             pending: None,
             sessions: Vec::new(),
+            mode: Mode::Build,
+            approvals: Vec::new(),
+            search: Vec::new(),
+            search_query: String::new(),
+            message_offsets: Vec::new(),
+            toasts: Vec::new(),
+            git,
+            render_cache: None,
+            render_revision: 0,
+            render_builds: 0,
+        }
+    }
+
+    /// 测试用：把「通知上一次变化」的时刻往回拨。
+    #[cfg(test)]
+    pub(crate) fn notice_seen_at_for_test(&mut self, at: Instant) {
+        if let Some((_, seen)) = &mut self.notice_seen {
+            *seen = at;
+        }
+    }
+
+    /// 扫描条的帧号（40 ms 一帧，与 OpenCode 的 `interval={40}` 一致）。
+    pub(crate) fn spinner_frame(&self) -> usize {
+        (self.spinner_epoch.elapsed().as_millis() / 40) as usize
+    }
+
+    /// 有东西在跑：会话这一轮还没结束、消息还在发、或者有工人运行。
+    pub(crate) fn working(&self) -> bool {
+        self.conversation_running() || self.pending.is_some() || self.active.is_some()
+    }
+
+    /// 终端窗口标题：`会话标题 · Arc Deck`，没有会话时只有产品名。
+    pub fn window_title(&self) -> String {
+        match self.conversation.as_ref().and_then(|c| c.title.as_deref()) {
+            Some(title) if self.in_conversation() => format!("{} · Arc Deck", crate::markdown::clean(title)),
+            _ => "Arc Deck".into(),
         }
     }
 
@@ -177,11 +325,11 @@ impl App {
     }
 
     /// 交互会话能不能用。`Starting` 也算：命令会在服务的队列里等内核就绪。
-    fn sessions_usable(&self) -> bool {
+    pub(crate) fn sessions_usable(&self) -> bool {
         matches!(self.backend, BackendState::Starting | BackendState::Ready { .. })
     }
 
-    fn conversation_running(&self) -> bool {
+    pub(crate) fn conversation_running(&self) -> bool {
         self.conversation.as_ref().is_some_and(|c| c.running)
     }
 
@@ -218,10 +366,13 @@ impl App {
                                 model_id: choice.model.clone(),
                             });
                         }
-                        self.notice = "交互内核就绪：同一会话可以多轮继续；/sessions 打开以前的会话".into();
+                        // 就绪不另发通知：页脚右边的「内核启动中」消失就是信号。
                     }
                     BackendState::Failed { reason } => {
-                        self.notice = format!("交互会话不可用（{}）；提交改为独立请求", first_line(reason));
+                        // 首次运行 / 故障时给一条**可复制**的命令，而不是只把内核的原文贴出来
+                        // （任务书 w5-polish 第 3 条）。
+                        let hint = failure_hint(reason).map(|hint| format!("；{hint}")).unwrap_or_default();
+                        self.notice = format!("交互会话不可用（{}）{hint}；提交改为独立请求", first_line(reason));
                         // 新会话还没建好就失败：那条消息没有去处，放回输入框而不是吞掉。
                         if self.session_id.is_none()
                             && let Some(text) = self.pending.take()
@@ -230,9 +381,22 @@ impl App {
                         }
                     }
                     BackendState::Stopped if self.session_id.is_some() => {
-                        self.notice = "交互内核已停止".into();
+                        self.notice = "交互内核已停止；/reconnect 重新拉起".into();
                     }
                     _ => {}
+                }
+                // 内核重启 / 停掉时，挂着的审批请求已经不可能被回答了 —— 留着只会让人
+                // 对着一份死请求按 y。清掉，并在需要时说明。
+                if matches!(
+                    state,
+                    BackendState::Starting | BackendState::Failed { .. } | BackendState::Stopped
+                ) && !self.approvals.is_empty()
+                {
+                    self.approvals.clear();
+                    if matches!(self.dialog, Some(Dialog::Approval(_))) {
+                        self.dialog = None;
+                    }
+                    self.notice = format!("{}；待答的审批已随内核重启作废", self.notice);
                 }
                 self.backend = state;
             }
@@ -265,6 +429,12 @@ impl App {
                     {
                         self.pending = None;
                     }
+                    // 一轮结束时刷一次 git：会话里刚改过的文件要让信息栏跟上。
+                    // 放在这里而不是绘制里 —— `git status` 不是每帧都该跑的东西。
+                    let was_running = self.conversation.as_ref().is_some_and(|c| c.running);
+                    if was_running && !conversation.running {
+                        self.git = git_status(&self.boot.workspace);
+                    }
                     self.conversation = Some(*conversation);
                 }
             }
@@ -272,6 +442,38 @@ impl App {
                 if self.session_id.as_deref() == Some(session_id.as_str()) {
                     self.notice = format!("会话订阅已结束：{}", first_line(&reason));
                 }
+            }
+            E::Approval { request } => {
+                // 审批不是通知：它**必须在屏幕上**。有弹层开着时先排队，但要说清楚有几个在等。
+                let name = request.tool_name.clone();
+                self.approvals.push(request.clone());
+                if self.dialog.is_none() {
+                    self.open_dialog(Dialog::Approval(Box::new(request)));
+                } else {
+                    self.notice = format!(
+                        "内核在等审批：{}（共 {} 个待答，Esc 关闭当前弹层后会出现）",
+                        name,
+                        self.approvals.len()
+                    );
+                }
+                self.toast(format!("审批请求：{name}"), true);
+            }
+            E::ApprovalClosed { request_id, reason } => {
+                self.approvals.retain(|item| item.request_id != request_id);
+                if matches!(&self.dialog, Some(Dialog::Approval(request)) if request.request_id == request_id)
+                {
+                    self.dialog = None;
+                }
+                self.notice = reason;
+            }
+            E::Search { query, items } => {
+                self.search_query = query;
+                self.search = items;
+                let count = self.search.len();
+                if self.dialog.is_none() {
+                    self.open_dialog(Dialog::Search);
+                }
+                self.notice = format!("检索命中 {count} 条（Enter 打开；没有命中是正常的）");
             }
             E::Notice { level, text } => {
                 self.notice = match level {
@@ -310,6 +512,7 @@ impl App {
         match update {
             Update::Runs(runs) if self.runs != runs => {
                 self.runs = runs;
+                self.render_revision = self.render_revision.wrapping_add(1);
                 self.dirty = true;
             }
             Update::Detail(detail)
@@ -317,6 +520,7 @@ impl App {
                     && self.detail.as_ref() != Some(&detail) =>
             {
                 self.detail = Some(detail);
+                self.render_revision = self.render_revision.wrapping_add(1);
                 self.dirty = true;
             }
             Update::Finished(id) if self.active.as_ref() == Some(&id) => {
@@ -332,6 +536,7 @@ impl App {
                 self.dirty = true;
             }
             Update::Session(event) => {
+                self.render_revision = self.render_revision.wrapping_add(1);
                 self.session_event(event);
                 self.dirty = true;
             }
@@ -395,6 +600,11 @@ impl App {
             Some(Dialog::Runs) => self.filtered_runs().len(),
             Some(Dialog::Agents) => 3,
             Some(Dialog::Permissions) => commands::PERMISSIONS.len(),
+            Some(Dialog::Search) => self.search.len(),
+            Some(Dialog::Timeline) => self.user_messages().len(),
+            Some(Dialog::Subagents) => self.subagent_rows().len(),
+            Some(Dialog::Stash) => self.preferences.stash.len(),
+            Some(Dialog::Confirm(_) | Dialog::Approval(_) | Dialog::Viewer(_)) => 1,
             // Help scrolls instead of selecting; non-zero keeps the generic clamp harmless.
             Some(Dialog::Help) => 1,
             Some(Dialog::Models(state)) => self.model_rows(*state).len(),
@@ -405,6 +615,23 @@ impl App {
             Some(Dialog::Theme) => 1,
             None => 0,
         }
+    }
+
+    /// 本会话的用户消息（时间线用）。带 turn 与正文，界面只取首行。
+    pub fn user_messages(&self) -> Vec<(u32, String)> {
+        self.conversation
+            .as_ref()
+            .map(|conversation| {
+                conversation
+                    .messages
+                    .iter()
+                    .filter_map(|message| match message {
+                        Message::User(user) => Some((user.turn, user.text.clone())),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
     /// The state-dependent half of availability. `Entry::unavailable` covers what this build
     /// cannot do at all; this covers what cannot be done *right now*.
@@ -427,6 +654,13 @@ impl App {
             {
                 Some("先开始一个会话，或在 /runs 里选一条工人运行".to_string())
             }
+            Action::Timeline | Action::Diff | Action::Output | Action::Subagents if !self.in_conversation() => {
+                Some("先打开一个会话".to_string())
+            }
+            Action::Search if !self.sessions_usable() => {
+                Some("交互会话不可用；内容检索需要内核".to_string())
+            }
+            Action::Approvals if self.approvals.is_empty() => Some("没有待答的审批".to_string()),
             Action::Permission if self.conversation_running() => {
                 Some("这一轮还在进行；先取消或等它结束，再修改授权（要重启交互内核）".to_string())
             }
@@ -470,7 +704,10 @@ impl App {
             return false;
         }
         let arg = arg.map(str::trim).filter(|arg| !arg.is_empty());
-        if arg.is_some() && !matches!(action, Action::Effort | Action::Permission | Action::Rename) {
+        // 收不收参数看**注册表**的 `arg`，不另写一份名单：原来这里手写了
+        // `Effort | Permission | Rename`，后加的 `/search <词>` 与 `/output <序号>` 都没进名单，
+        // 敲出来一律被拒成「不接受参数」（console-probe 对着真内核实测出来，2026-10-20）。
+        if arg.is_some() && commands::entry(action).arg.is_none() {
             let entry = commands::entry(action);
             self.notice = format!(
                 "{} 不接受参数；Ctrl+P 查看命令用法",
@@ -529,10 +766,7 @@ impl App {
                         .unwrap_or(0);
                 }
             },
-            Action::Build => {
-                self.agent = "build".into();
-                self.notice = "下一次独立请求使用 Build".into();
-            }
+            Action::Build => self.change_mode(Mode::Build, requests),
             Action::Theme => self.open_dialog(Dialog::Theme),
             Action::Mode => {
                 self.preferences.light = !self.preferences.light;
@@ -642,9 +876,81 @@ impl App {
                     .unwrap_or_else(|| "先选择一条运行记录".into())
             }
             Action::Quit => return true,
-            // `/plan` is behind `Entry::unavailable`, so this arm is unreachable from every
-            // surface; it stays explicit instead of `_ =>`, which would hide a future mistake.
-            Action::Plan => unreachable!("Plan is unavailable and filtered by availability"),
+            Action::Plan => self.change_mode(Mode::Plan, requests),
+            Action::Search => match arg {
+                Some(query) => {
+                    if !self.sessions_usable() {
+                        self.notice = "交互会话不可用；内容检索需要内核".into();
+                    } else {
+                        let _ = requests.send(Request::Session(Command::SearchSessions {
+                            query: query.to_string(),
+                        }));
+                        self.notice = format!("正在检索「{query}」…");
+                    }
+                }
+                None => self.notice = "用法：/search <词>".into(),
+            },
+            Action::Timeline => {
+                if self.in_conversation() {
+                    self.open_dialog(Dialog::Timeline);
+                } else {
+                    self.notice = "先打开一个会话".into();
+                }
+            }
+            Action::Stash => {
+                // 输入框里有字：收起来，输入框清空（OpenCode 的 stash）。空的：列出来取回。
+                // 斜杠命令走到这里时输入框已经被 `/stash` 自己清掉了，所以 `/stash` = 取回，
+                // `<leader>s` / 命令面板 = 暂存。
+                let draft = self.editor.text.trim().to_string();
+                if !draft.is_empty() {
+                    self.editor.take();
+                    self.autocomplete = None;
+                    self.preferences.stash.retain(|item| *item != draft);
+                    self.preferences.stash.insert(0, draft);
+                    self.preferences.stash.truncate(20);
+                    self.toast("已暂存草稿（/stash 取回）", false);
+                } else if self.preferences.stash.is_empty() {
+                    self.notice = "没有暂存的草稿；输入框里有字时按 ".to_string()
+                        + &self.keymap.display(Action::Stash).unwrap_or_else(|| "/stash".into())
+                        + " 暂存";
+                } else {
+                    self.open_dialog(Dialog::Stash);
+                }
+            }
+            Action::Subagents => {
+                if self.session_id.is_none() {
+                    self.notice = "先打开一个会话".into();
+                } else {
+                    // 子会话是内核在这一轮里建的；打开前刷新一次列表，否则刚派出的那个不在里面。
+                    let _ = requests.send(Request::Session(Command::ListSessions));
+                    self.open_dialog(Dialog::Subagents);
+                }
+            }
+            Action::Approvals => match self.approvals.first().cloned() {
+                Some(request) => self.open_dialog(Dialog::Approval(Box::new(request))),
+                None => self.notice = "没有待答的审批".into(),
+            },
+            Action::Diff => match &self.conversation {
+                Some(conversation) => {
+                    let lines = toolview::session_diff(conversation);
+                    if lines.is_empty() {
+                        self.notice = "本会话还没有带 diff 的编辑（write / edit）".into();
+                    } else {
+                        self.open_viewer("本会话的改动（/diff）", lines);
+                    }
+                }
+                None => self.notice = "先打开一个会话".into(),
+            },
+            Action::Output => self.show_output(arg),
+            Action::Copy => self.copy_last(),
+            Action::Reconnect => {
+                if !self.sessions_usable() && matches!(self.backend, BackendState::Starting) {
+                    self.notice = "内核正在启动；等它给出结果再重连".into();
+                } else {
+                    self.notice = "正在重启交互内核…".into();
+                    self.restart_backend(requests);
+                }
+            }
             Action::Favorite => self.toggle_favorite(),
             Action::ProviderList => {
                 if let Some(Dialog::Models(back)) = self.dialog {
@@ -653,31 +959,247 @@ impl App {
             }
             Action::CycleModelNext => self.cycle_model(1),
             Action::CycleModelReverse => self.cycle_model(-1),
-            Action::CycleAgent => self.cycle_agent(),
+            Action::CycleAgent => self.cycle_agent(requests),
         }
         false
     }
+    /// 一条短暂提示。错误不过期（`until` 放到一天之后），普通提示 4 秒后消失。
+    ///
+    /// 为什么错误不过期：`确认`/`复制失败` 这类话说一遍就没了，等于没说 ——
+    /// 而用户这时通常正低头看别处。
+    pub fn toast(&mut self, text: impl Into<String>, error: bool) {
+        let until = if error {
+            Instant::now() + Duration::from_secs(86_400)
+        } else {
+            Instant::now() + Duration::from_secs(4)
+        };
+        // 同一句话在短时间里重复出现时只刷新计时，不叠成一列。
+        let text = text.into();
+        if let Some(existing) = self.toasts.iter_mut().find(|toast| toast.text == text) {
+            existing.until = until;
+            return;
+        }
+        self.toasts.push(Toast { text, error, until });
+        if self.toasts.len() > 3 {
+            self.toasts.remove(0);
+        }
+    }
+
+    /// 换模式（§7.4 的六种转换）。运行中先问一句 —— 换模式要重启内核，会打断这一轮。
+    fn change_mode(&mut self, mode: Mode, requests: &Sender<Request>) {
+        if self.mode == mode {
+            self.notice = format!("已经是 {} 模式", mode.as_str());
+            return;
+        }
+        if self.conversation_running() {
+            self.open_dialog(Dialog::Confirm(ConfirmKind::Mode(mode)));
+            return;
+        }
+        self.apply_mode(mode, requests);
+    }
+
+    /// §7.4：`/plan` 对 Echo 只切为 echo+plan、对 Build 切为 plan+plan、对 Plan 不变；
+    /// `/build` 对 Echo 只切为 echo+build、对 Plan 切为 build+build。
+    fn apply_mode(&mut self, mode: Mode, requests: &Sender<Request>) {
+        match (self.agent.as_str(), mode) {
+            ("build", Mode::Plan) => self.agent = "plan".into(),
+            ("plan", Mode::Build) => self.agent = "build".into(),
+            _ => {}
+        }
+        self.mode = mode;
+        self.restart_backend(requests);
+        self.notice = match mode {
+            Mode::Plan => {
+                "Plan：执行层只读（写入与 shell 都会被拒，参 §5.6）；交互内核重启中，当前会话会自动重新打开".into()
+            }
+            Mode::Build => {
+                "Build：可以实施变更（仍受授权级别约束）；交互内核重启中，当前会话会自动重新打开".into()
+            }
+        };
+    }
+
+    fn select_agent(&mut self, agent: AgentId, requests: &Sender<Request>) {
+        if agent.as_str() == self.agent {
+            self.notice = format!("已经是 {} Agent", agent.as_str());
+            return;
+        }
+        if self.conversation_running() {
+            self.open_dialog(Dialog::Confirm(ConfirmKind::Agent(agent)));
+            return;
+        }
+        self.apply_agent(agent, requests);
+    }
+
+    /// 显式选一个 Agent 取它的默认模式（Echo / Build → build，Plan → plan）。
+    ///
+    /// 个性化关着时交互面一段提示词都不注入（§5.3.1），Echo 与 Build 行为相同；开着时 persona
+    /// 按 Agent 装进内核（`serve::interactive_persona`），所以换 Agent 也要重启内核 —— 只换名字
+    /// 不重启，内核里就还是上一个 Agent 的提示词。Plan 的差别在执行层（只读）。
+    fn apply_agent(&mut self, agent: AgentId, requests: &Sender<Request>) {
+        let mode = if agent == AgentId::Plan { Mode::Plan } else { Mode::Build };
+        let mode_changed = mode != self.mode;
+        let restart = mode_changed || (self.boot.personalization && agent.as_str() != self.agent);
+        self.agent = agent.as_str().into();
+        self.mode = mode;
+        if restart {
+            self.restart_backend(requests);
+        }
+        let name = crate::view::agent_label(self);
+        self.notice = match (agent, restart) {
+            (AgentId::Plan, _) => format!("{name}：执行层只读；交互内核重启中"),
+            (_, true) => format!("{name}：交互内核重启中，当前会话会自动重新打开"),
+            // 说一句，不让人以为换了 Agent 就换了做法。
+            (_, false) => format!("{name}：下一轮生效（个性化未开，Echo 与 Build 在交互面上行为相同）"),
+        };
+    }
+
+    /// 授权级别 / Agent / 模式都写在交互内核的 patch 里，改了就重启内核。
+    fn restart_backend(&mut self, requests: &Sender<Request>) {
+        if !self.sessions_usable() {
+            return;
+        }
+        let _ = requests.send(Request::RestartBackend {
+            permission: self.permission.clone(),
+            agent: self.agent.clone(),
+            mode: self.mode.as_str().into(),
+        });
+        self.backend = BackendState::Starting;
+    }
+
+
+    /// 回答当前这条审批。答完立刻弹出下一条 —— 内核可能同时挂了几条。
+    fn answer_approval(&mut self, outcome: ApprovalOutcome, requests: &Sender<Request>) {
+        let Some(request) = self.approvals.first().cloned() else {
+            self.notice = "没有待答的审批".into();
+            return;
+        };
+        let _ = requests.send(Request::Session(Command::AnswerApproval {
+            request_id: request.request_id.clone(),
+            outcome,
+        }));
+        self.notice = match outcome {
+            ApprovalOutcome::AllowOnce => format!("已允许一次：{}", request.tool_name),
+            _ => format!("已拒绝：{}", request.tool_name),
+        };
+        self.toast(self.notice.clone(), false);
+        self.approvals.retain(|item| item.request_id != request.request_id);
+        self.dialog = None;
+        if let Some(next) = self.approvals.first().cloned() {
+            self.open_dialog(Dialog::Approval(Box::new(next)));
+        }
+    }
+
+    /// 打开全屏查看器（工具的完整输出 / 本会话的 diff）。
+    pub fn open_viewer(&mut self, title: impl Into<String>, lines: Vec<String>) {
+        self.dialog = Some(Dialog::Viewer(Viewer { title: title.into(), lines, scroll: 0, filter: String::new() }));
+        self.filter.clear();
+    }
+
+    /// 把用户消息时间线滚到第 `index` 条（`message_offsets` 由渲染时填）。
+    fn jump_to_message(&mut self, index: usize) {
+        match self.message_offsets.get(index) {
+            Some((_, line)) => {
+                self.scroll = Some((*line).min(self.scroll_max));
+                self.notice = format!("已跳到第 {} 条消息", index + 1);
+            }
+            None => self.notice = "这条消息还没渲染出来；先等会话打开".into(),
+        }
+        self.dialog = None;
+    }
+
+    /// `/output [n]`：第 n 个工具调用的完整输出（1 起数；默认最后一条）。
+    ///
+    /// 为什么是序号而不是「选中的工具块」：对话视图没有块级光标（鼠标命中还没做），
+    /// 编一个「选中态」会让人以为方向键能选。序号是诚实的：列表由 `/diff` 与工具行给出。
+    fn show_output(&mut self, arg: Option<&str>) {
+        let Some(conversation) = &self.conversation else {
+            self.notice = "先打开一个会话".into();
+            return;
+        };
+        let calls = toolview::tool_calls(conversation);
+        if calls.is_empty() {
+            self.notice = "本会话还没有工具调用".into();
+            return;
+        }
+        let index = match arg {
+            Some(raw) => match raw.parse::<usize>() {
+                Ok(n) if n >= 1 && n <= calls.len() => n - 1,
+                _ => {
+                    self.notice = format!("序号要在 1..={} 之间；/output 不带参数看最后一条", calls.len());
+                    return;
+                }
+            },
+            None => calls.len() - 1,
+        };
+        let call = calls[index];
+        let title = format!("工具输出 {}/{} · {}", index + 1, calls.len(), call.name);
+        let lines = toolview::output_text(call);
+        self.open_viewer(title, lines);
+    }
+
+    /// 复制最后一条助手回复（没回复时复制输入框）。走 OSC 52 —— 不引剪贴板依赖。
+    ///
+    /// Windows Terminal / tmux 支持它；不支持的终端会**静默忽略**这条序列（不是错误），
+    /// 所以提示里说清楚「终端不支持时剪贴板不会变」，不假装一定成功。
+    fn copy_last(&mut self) {
+        let text = self
+            .conversation
+            .as_ref()
+            .and_then(|conversation| {
+                conversation.messages.iter().rev().find_map(|message| match message {
+                    Message::Assistant(turn) if !turn.text().trim().is_empty() => Some(turn.text()),
+                    _ => None,
+                })
+            })
+            .or_else(|| (!self.editor.text.is_empty()).then(|| self.editor.text.clone()));
+        let Some(text) = text else {
+            self.notice = "没有可复制的内容".into();
+            return;
+        };
+        use std::io::Write as _;
+        let sequence = format!("\x1b]52;c;{}\x07", base64(text.as_bytes()));
+        let result = std::io::stdout()
+            .write_all(sequence.as_bytes())
+            .and_then(|()| std::io::stdout().flush());
+        match result {
+            Ok(()) => {
+                self.notice = format!(
+                    "已用 OSC 52 复制 {} 字符（终端不支持时剪贴板不会变）",
+                    text.chars().count()
+                );
+                self.toast("已复制", false);
+            }
+            Err(error) => {
+                self.notice = format!("复制失败：{error}");
+                self.toast("复制失败", true);
+            }
+        }
+    }
+
     fn set_permission(&mut self, arg: &str, requests: &Sender<Request>) {
         match arg {
-            "readonly" | "workspace" | "full" => {
+            "readonly" | "workspace" | "full" | "confirm" => {
                 if self.permission == arg {
                     self.notice = format!("授权级别已经是 {arg}");
                     return;
                 }
                 self.permission = arg.into();
                 if self.sessions_usable() {
-                    // 授权级别落在交互内核的启动参数里（沙箱档 + 预设表），只能重启内核。
+                    // 授权级别落在交互内核的启动参数里（沙箱档 + 预设表 + 审批策略），只能重启内核。
                     // 会话在独立的 DSH home 里，重启后桥会把当前会话重新打开。
-                    let _ = requests.send(Request::RestartBackend { permission: arg.into() });
-                    self.backend = BackendState::Starting;
-                    self.notice = format!("授权级别改为 {arg}：交互内核重启中，当前会话会自动重新打开");
+                    self.restart_backend(requests);
+                    self.notice = if arg == "confirm" {
+                        "授权级别改为 confirm：内核问「能不能做」时会弹出审批界面；交互内核重启中"
+                            .into()
+                    } else {
+                        format!("授权级别改为 {arg}：交互内核重启中，当前会话会自动重新打开")
+                    };
                 } else {
                     self.notice = format!("下一次独立请求的授权级别：{arg}");
                 }
             }
-            "confirm" => self.notice = commands::CONFIRM_REASON.into(),
             other => {
-                self.notice = format!("未知授权级别 `{other}`；支持 readonly / workspace / full")
+                self.notice = format!("未知授权级别 `{other}`；支持 readonly / workspace / full / confirm")
             }
         }
     }
@@ -756,9 +1278,17 @@ impl App {
             None => "下一次请求使用模型缺省强度".into(),
         };
     }
-    fn cycle_agent(&mut self) {
-        self.agent = if self.agent == "echo" { "build" } else { "echo" }.into();
-        self.notice = format!("下一次独立请求的 Agent：{}", self.agent);
+    /// Shift+Tab：Echo → Build → Plan → Echo，走与 Agent 对话框同一条路（运行中先确认、
+    /// Plan 落到执行层）。之前它只在 echo / build 之间翻、不经过 `select_agent`，提示还写着
+    /// 「下一次独立请求」—— 那是工人运行那条路的说法（2026-10-20 可用性检查发现）。
+    fn cycle_agent(&mut self, requests: &Sender<Request>) {
+        let current = if self.mode == Mode::Plan { "plan" } else { self.agent.as_str() };
+        let next = match current {
+            "echo" => AgentId::Build,
+            "build" => AgentId::Plan,
+            _ => AgentId::Echo,
+        };
+        self.select_agent(next, requests);
     }
     fn selected_is_running(&self) -> bool {
         self.detail
@@ -873,6 +1403,12 @@ impl App {
             };
         }
         if self.boot.config_error.is_none() && self.sessions_usable() {
+            // 子 agent 会话由父会话驱动；在这里发消息要么被内核拒（one-shot），要么绕过父会话
+            // 的编排。界面先说清楚，草稿留在输入框里。
+            if self.parent_session().is_some() {
+                self.notice = "这是子 agent 会话，只能看；/subagents 回到父会话".into();
+                return false;
+            }
             return self.submit_to_session(requests);
         }
         if self.active.is_some() {
@@ -953,6 +1489,148 @@ impl App {
         false
     }
 
+    /// 打开一个已有会话：先把旧的关掉（一个前端只订阅一个），再让后端打开新的。
+    /// 当前会话若是子 agent 会话，它的父会话 id。
+    pub(crate) fn parent_session(&self) -> Option<&str> {
+        let id = self.session_id.as_deref()?;
+        self.sessions
+            .iter()
+            .find(|s| s.session_id == id)
+            .and_then(|s| s.parent_session_id.as_deref())
+    }
+
+    /// 子 agent 对话框的行：在子会话里时先是「回到父会话」，然后是当前会话的子会话（新的在前）。
+    pub(crate) fn subagent_rows(&self) -> Vec<SubagentRow> {
+        let mut rows = Vec::new();
+        if let Some(parent) = self.parent_session() {
+            let title = self
+                .sessions
+                .iter()
+                .find(|s| s.session_id == parent)
+                .and_then(|s| s.title.clone())
+                .unwrap_or_else(|| "父会话".into());
+            rows.push(SubagentRow { session_id: parent.to_string(), label: format!("↩ 回到 {title}"), running: false });
+        }
+        if let Some(id) = self.session_id.as_deref() {
+            rows.extend(
+                self.sessions
+                    .iter()
+                    .filter(|s| s.parent_session_id.as_deref() == Some(id))
+                    .map(|s| SubagentRow {
+                        session_id: s.session_id.clone(),
+                        label: s
+                            .subagent_label
+                            .clone()
+                            .or_else(|| s.title.clone())
+                            .unwrap_or_else(|| s.session_id.clone()),
+                        running: s.running,
+                    }),
+            );
+        }
+        rows
+    }
+
+    fn open_session(&mut self, id: String, requests: &Sender<Request>) {
+        if let Some(old) = self.session_id.replace(id.clone())
+            && old != id
+        {
+            let _ = requests.send(Request::Session(Command::CloseSession { session_id: old }));
+        }
+        self.conversation = None;
+        self.pending = None;
+        self.selected = None;
+        self.detail = None;
+        self.scroll = None;
+        self.message_offsets.clear();
+        let _ = requests.send(Request::Session(Command::OpenSession { session_id: id }));
+    }
+
+    /// 运行中改动的确认：接受就执行，拒绝就什么都不改。
+    fn resolve_confirm(&mut self, kind: ConfirmKind, accept: bool, requests: &Sender<Request>) {
+        self.dialog = None;
+        if !accept {
+            self.notice = "已取消改动；这一轮继续".into();
+            return;
+        }
+        match kind {
+            ConfirmKind::Mode(mode) => self.apply_mode(mode, requests),
+            ConfirmKind::Agent(agent) => self.apply_agent(agent, requests),
+        }
+    }
+
+    /// 本会话的上下文占用：最近一轮 provider 实报的输入 token / 当前模型的窗口。
+    /// 窗口没报就不算（§7.3：有模型 contextWindow 时才算百分比，没有就不显示）。
+    pub fn context_usage(&self) -> Option<(u64, u64)> {
+        let conversation = self.conversation.as_ref()?;
+        let model = self.model.as_ref()?;
+        let window = self
+            .boot
+            .catalog
+            .iter()
+            .find(|provider| provider.id == model.provider_id)?
+            .models
+            .iter()
+            .find(|entry| entry.id == model.model_id)?
+            .context_window?;
+        let used = conversation
+            .messages
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                Message::Assistant(turn) => turn.usage.as_ref().and_then(|usage| {
+                    // 上下文 = 这一轮送进去的输入（含缓存命中）；缺就退回总和。
+                    usage.input.map(|input| input + usage.cache_read.unwrap_or(0))
+                }),
+                _ => None,
+            })?;
+        (window > 0).then_some((used, window))
+    }
+
+    /// 本会话最后的 todo 清单（DSH 的 `todo_write` 工具参数）。状态只有 done / 其余。
+    pub fn task_todos(&self) -> Vec<(String, bool)> {
+        let Some(conversation) = &self.conversation else {
+            return Vec::new();
+        };
+        let Some(call) = toolview::tool_calls(conversation)
+            .into_iter()
+            .rev()
+            .find(|call| call.name == "todo_write" || call.name == "todowrite")
+        else {
+            return Vec::new();
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&call.arguments) else {
+            return Vec::new();
+        };
+        let items = value
+            .get("todos")
+            .and_then(|todos| todos.as_array())
+            .cloned()
+            .unwrap_or_default();
+        items
+            .iter()
+            .filter_map(|item| {
+                let text = item
+                    .get("content")
+                    .or_else(|| item.get("text"))
+                    .or_else(|| item.get("title"))
+                    .and_then(|value| value.as_str())?;
+                let done = item
+                    .get("status")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|status| status == "completed" || status == "done");
+                Some((text.to_string(), done))
+            })
+            .collect()
+    }
+
+    /// 本会话改动过的文件（信息栏用）。
+    pub fn changed_files(&self) -> Vec<String> {
+        self.conversation
+            .as_ref()
+            .map(toolview::changed_files)
+            .unwrap_or_default()
+    }
+
     fn select(&mut self, requests: &Sender<Request>) -> bool {
         // 克隆而不是借用：下面几个分支都要 &mut self（打开新对话框、改偏好）。
         match self.dialog.clone() {
@@ -967,21 +1645,36 @@ impl App {
             }
             Some(Dialog::Sessions) => {
                 if let Some(id) = self.filtered_sessions().get(self.choice).map(|s| s.session_id.clone()) {
-                    if let Some(old) = self.session_id.replace(id.clone())
-                        && old != id
-                    {
-                        let _ = requests.send(Request::Session(Command::CloseSession { session_id: old }));
-                    }
-                    self.conversation = None;
-                    self.pending = None;
-                    self.selected = None;
-                    self.detail = None;
-                    self.scroll = None;
-                    let _ = requests.send(Request::Session(Command::OpenSession { session_id: id }));
+                    self.open_session(id, requests);
                     self.dialog = None;
                     self.notice = "正在打开会话（历史较长时要翻页）…".into();
                 }
             }
+            Some(Dialog::Search) => {
+                if let Some(hit) = self.search.get(self.choice).cloned() {
+                    self.open_session(hit.session_id, requests);
+                    self.dialog = None;
+                    self.notice = "正在打开检索命中的会话…".into();
+                }
+            }
+            Some(Dialog::Timeline) => self.jump_to_message(self.choice),
+            Some(Dialog::Stash) if self.choice < self.preferences.stash.len() => {
+                let draft = self.preferences.stash.remove(self.choice);
+                self.dialog = None;
+                // 取回不覆盖正在写的东西：输入框里有字时接在后面。
+                if !self.editor.text.is_empty() {
+                    self.editor.insert("\n");
+                }
+                self.editor.insert(&draft);
+            }
+            Some(Dialog::Stash) => {}
+            Some(Dialog::Subagents) => {
+                if let Some(row) = self.subagent_rows().get(self.choice).cloned() {
+                    self.dialog = None;
+                    self.open_session(row.session_id, requests);
+                }
+            }
+            Some(Dialog::Confirm(kind)) => self.resolve_confirm(kind, true, requests),
             Some(Dialog::Runs) => {
                 if let Some(id) = self.filtered_runs().get(self.choice).map(|r| r.id.clone()) {
                     // 看工人运行时离开会话视图（会话照常在后台订阅着，/sessions 能回去）。
@@ -996,29 +1689,14 @@ impl App {
                 }
             }
             Some(Dialog::Agents) => {
-                if self.active.is_some() {
-                    self.notice = "请先取消并等待当前运行结束，再切换 Agent".into();
-                } else {
-                    match self.choice {
-                        0 => {
-                            self.agent = "echo".into();
-                            self.dialog = None;
-                            self.notice = "下一次独立请求的 Agent：echo".into();
-                        }
-                        1 => {
-                            self.agent = "build".into();
-                            self.dialog = None;
-                            self.notice = "下一次独立请求的 Agent：build".into();
-                        }
-                        // Plan has no read-only execution path; the reason comes from the
-                        // registry, so this row and `/plan` cannot drift apart.
-                        _ => {
-                            self.notice = commands::entry(Action::Plan)
-                                .unavailable
-                                .unwrap_or_default()
-                                .into();
-                        }
-                    }
+                let agent = match self.choice {
+                    0 => Some(AgentId::Echo),
+                    1 => Some(AgentId::Build),
+                    _ => Some(AgentId::Plan),
+                };
+                self.dialog = None;
+                if let Some(agent) = agent {
+                    self.select_agent(agent, requests);
                 }
             }
             Some(Dialog::Permissions) => {
@@ -1031,6 +1709,10 @@ impl App {
                         }
                     }
                 }
+            }
+            Some(Dialog::Approval(_) | Dialog::Viewer(_)) => {
+                // 这两个的键在 `input` 里就地处理（审批的 y/n 与查看器的滚动/过滤），
+                // 走到这里说明只是一个 Enter —— 不做事，免得把它当成「确认」。
             }
             Some(Dialog::Help) => self.dialog = None,
             Some(Dialog::Models(state)) => self.select_model(state),
@@ -1120,7 +1802,41 @@ impl App {
         };
         self.dialog = None;
     }
+    /// 一次 poll 里连续到达的事件。**Windows 的粘贴没有 `Event::Paste`**：crossterm 的
+    /// bracketed-paste 解析只在 unix 侧（`event/sys/unix/parse.rs`），Windows 走的是
+    /// `INPUT_RECORD`，整段文本会作为**一串按键**到达，其中每个换行都是一个 `Enter`。
+    ///
+    /// 所以一批里多于一个事件时按「粘贴」处理：Enter 插入换行而不是提交。否则多行粘贴会在
+    /// 第一个换行处发出半句话 —— 当年正是为了这个把发送键改成了 F6，代价是没人找得到发送键
+    /// （用户 2026-10-20：「哪个神人会用 F6 发送」）。现在 Enter 发送，粘贴靠批处理分辨。
+    ///
+    /// 代价说清楚：人手极快地在同一个批里同时打出字符与 Enter 时，那一下会被当成粘贴
+    /// （插入换行、不发送）。再按一次 Enter 即可 —— 这比「粘贴把半句话发出去」便宜得多。
+    pub fn input_batch(&mut self, events: Vec<Event>, requests: &Sender<Request>) -> bool {
+        // 「粘贴」= 一批里**按下**的键不止一个。Release 不算：Windows 上每个键都是 Press +
+        // Release 两条，按得快时两条落在同一次 poll 里 —— 原来按事件条数判，一次 Enter 就被当成
+        // 粘贴，Enter 变换行、补全弹层被绕过（console-probe 实测，2026-10-20）。
+        let presses = events
+            .iter()
+            .filter(|event| matches!(event, Event::Key(key) if key.kind != KeyEventKind::Release))
+            .count();
+        let pasted = presses > 1;
+        for event in events {
+            if self.input_inner(event, requests, pasted) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 单个事件的入口（测试与「一次只有一个键」的调用方用）。运行循环走
+    /// [`App::input_batch`]，因为 Windows 的粘贴要靠整批才分得出来。
+    #[cfg(test)]
     pub fn input(&mut self, event: Event, requests: &Sender<Request>) -> bool {
+        self.input_inner(event, requests, false)
+    }
+
+    fn input_inner(&mut self, event: Event, requests: &Sender<Request>, pasted: bool) -> bool {
         self.dirty = true;
         let key = match event {
             Event::Paste(text) => {
@@ -1137,6 +1853,8 @@ impl App {
                 return false;
             }
             Event::Mouse(mouse) => {
+                // 鼠标**只**用来滚轮。点选消息 / 块级命中**刻意不做**：用户 2026-10-20 裁定
+                // 自己是纯键盘习惯，加鼠标点选既复杂又讨厌。要复制用 `/copy`（OSC 52）。
                 let delta = match mouse.kind {
                     MouseEventKind::ScrollUp => -3,
                     MouseEventKind::ScrollDown => 3,
@@ -1170,6 +1888,21 @@ impl App {
                 && let Some(back) = state.back
             {
                 self.swap_dialog(Dialog::Models(back));
+                return false;
+            }
+            // 审批的 Esc 只收起界面，**不回答**。把它当成「拒绝」会让一次误按替内核做了决定；
+            // 当成「允许」更糟。请求留在 `approvals` 里，`/approvals` 能再打开。
+            if matches!(self.dialog, Some(Dialog::Approval(_))) {
+                self.dialog = None;
+                self.notice = format!(
+                    "审批还没回答：内核仍在等待（{} 个待答，/approvals 重新打开；Esc 不等于允许）",
+                    self.approvals.len()
+                );
+                return false;
+            }
+            if matches!(self.dialog, Some(Dialog::Confirm(_))) {
+                self.dialog = None;
+                self.notice = "已取消改动；这一轮继续".into();
                 return false;
             }
             if self.dialog.take().is_some() {
@@ -1245,8 +1978,61 @@ impl App {
                 }
                 return false;
             }
-            // Permissions is a fixed three-row list; typing must not filter it.
-            let filterable = !matches!(self.dialog, Some(Dialog::Permissions));
+            // 审批与确认只有「准 / 不准」两种回答，键位写在对话框里。
+            if let Some(Dialog::Confirm(kind)) = self.dialog {
+                match key.code {
+                    KeyCode::Enter | KeyCode::Char('y') => self.resolve_confirm(kind, true, requests),
+                    KeyCode::Char('n') => self.resolve_confirm(kind, false, requests),
+                    _ => {}
+                }
+                return false;
+            }
+            if matches!(self.dialog, Some(Dialog::Approval(_))) {
+                match key.code {
+                    KeyCode::Enter | KeyCode::Char('y') => {
+                        self.answer_approval(ApprovalOutcome::AllowOnce, requests)
+                    }
+                    KeyCode::Char('n') | KeyCode::Backspace => {
+                        self.answer_approval(ApprovalOutcome::Reject, requests)
+                    }
+                    _ => {}
+                }
+                return false;
+            }
+            if matches!(self.dialog, Some(Dialog::Viewer(_))) {
+                let total = match &self.dialog {
+                    Some(Dialog::Viewer(viewer)) => viewer.lines.len(),
+                    _ => 0,
+                };
+                if let Some(Dialog::Viewer(viewer)) = self.dialog.as_mut() {
+                    match key.code {
+                        KeyCode::Up => viewer.scroll = viewer.scroll.saturating_sub(1),
+                        KeyCode::Down => {
+                            viewer.scroll = (viewer.scroll + 1).min(total.saturating_sub(1))
+                        }
+                        KeyCode::PageUp => viewer.scroll = viewer.scroll.saturating_sub(10),
+                        KeyCode::PageDown => {
+                            viewer.scroll = (viewer.scroll + 10).min(total.saturating_sub(1))
+                        }
+                        KeyCode::Backspace => {
+                            viewer.filter.pop();
+                            viewer.scroll = 0;
+                        }
+                        KeyCode::Char(c) if !ctrl && !alt => {
+                            viewer.filter.push(c);
+                            viewer.scroll = 0;
+                        }
+                        _ => {}
+                    }
+                }
+                return false;
+            }
+            // Permissions is a fixed four-row list; typing must not filter it. The same holds
+            // for the approval/confirm/search/timeline dialogs, which have their own cursors.
+            let filterable = !matches!(
+                self.dialog,
+                Some(Dialog::Permissions | Dialog::Search | Dialog::Timeline | Dialog::Confirm(_) | Dialog::Approval(_) | Dialog::Viewer(_))
+            );
             match key.code {
                 KeyCode::Up => self.choice = self.choice.saturating_sub(1),
                 KeyCode::Down => {
@@ -1272,8 +2058,9 @@ impl App {
         }
 
         // Completion owns ↑↓/Tab/Enter while it is open, so those keys do not reach history
-        // or the submit path.
-        if self.autocomplete.is_some() {
+        // or the submit path. A paste bypasses it: the popup is about the draft, and a pasted
+        // blob is not a command being typed.
+        if self.autocomplete.is_some() && !pasted {
             match key.code {
                 KeyCode::Up => {
                     if let Some(popup) = self.autocomplete.as_mut() {
@@ -1291,10 +2078,7 @@ impl App {
                     self.accept_autocomplete(false, requests);
                     return false;
                 }
-                // Windows keeps Enter as a newline (F6 submits), so accepting with Enter there
-                // would be the only place Enter submits — §4 of the audit says F6 is the send
-                // key, and completion must not quietly reintroduce the ambiguity.
-                KeyCode::Enter if !cfg!(windows) => {
+                KeyCode::Enter => {
                     self.accept_autocomplete(true, requests);
                     return false;
                 }
@@ -1312,14 +2096,19 @@ impl App {
 
         match key.code {
             KeyCode::Char('j') if ctrl => self.editor.insert("\n"),
+            // Shift+Enter 换行：Windows 的 `INPUT_RECORD` 带 SHIFT_PRESSED，所以 crossterm
+            // 能区分它（不需要 kitty 协议）；终端分不出来时会当成普通 Enter 发送。
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.editor.insert("\n");
                 self.refresh_autocomplete();
             }
-            KeyCode::Enter if cfg!(windows) => {
+            // 一次粘贴里的换行：插入，不提交。
+            KeyCode::Enter if pasted => {
                 self.editor.insert("\n");
                 self.refresh_autocomplete();
             }
+            // Enter 发送（§7.4 的「Enter 提交」；OpenCode 同）。F6 保留成兼容别名，
+            // 不再出现在任何提示里。
             KeyCode::Enter | KeyCode::F(6) => return self.submit(requests),
             KeyCode::Char(c) if !ctrl && !alt => {
                 self.editor.insert(&c.to_string());
@@ -1427,8 +2216,12 @@ impl App {
             return;
         }
         self.editor.replace_range(popup.start, end, &item.insert);
+        let takes_arg = item.action.is_some_and(|action| commands::entry(action).arg.is_some());
         if run && !item.insert.ends_with(' ') {
             let _ = self.submit(requests);
+        } else if !run && takes_arg && !item.insert.ends_with(' ') {
+            // Tab 是「补全、我还要写」：能带参数的命令补一个空格，接着就能打参数。
+            self.editor.insert(" ");
         }
     }
 
@@ -1475,6 +2268,38 @@ impl App {
             self.leader_until = None;
             self.dirty = true;
         }
+        // 扫描条要动就得重画；只在干活时 —— 空闲时一帧都不多画（参 K4 的重绘门控）。
+        if self.working() {
+            let frame = self.spinner_frame();
+            if frame != self.spinner_seen {
+                self.spinner_seen = frame;
+                self.dirty = true;
+            }
+        }
+        // 通知到期。`notice` 有六十多处直接赋值，所以不在每处记时间，而是在这里看它变没变。
+        // 内核不可用 / 配置坏了的那条不收：那是「现在用不了」，不是「刚刚发生了什么」。
+        // 后端报的错误（`错误：…`）也不收：探针实测过，8 秒一到错误就没了，事后只剩一个空页脚。
+        let sticky = matches!(self.backend, BackendState::Failed { .. })
+            || self.boot.config_error.is_some()
+            || self.notice.starts_with("错误");
+        match &self.notice_seen {
+            _ if self.notice.is_empty() => self.notice_seen = None,
+            Some((text, at)) if *text == self.notice => {
+                if !sticky && at.elapsed() >= Duration::from_secs(8) {
+                    self.notice.clear();
+                    self.notice_seen = None;
+                    self.dirty = true;
+                }
+            }
+            _ => self.notice_seen = Some((self.notice.clone(), Instant::now())),
+        }
+        // toast 到期。错误类把 `until` 放到一天之后，这里不会收掉它们。
+        let now = Instant::now();
+        let before = self.toasts.len();
+        self.toasts.retain(|toast| toast.until > now);
+        if self.toasts.len() != before {
+            self.dirty = true;
+        }
     }
 
     pub fn leader_active(&self) -> bool {
@@ -1499,7 +2324,12 @@ impl App {
                 .iter()
                 .filter(|entry| entry.category == category)
             {
-                let keys = self.keymap.display(entry.action).unwrap_or_else(|| "—".into());
+                // 没有键位时写它的斜杠命令 —— 那才是「怎么用」；一列「—」只是噪声。
+                let keys = self
+                    .keymap
+                    .display(entry.action)
+                    .or_else(|| entry.slash.map(str::to_string))
+                    .unwrap_or_default();
                 // Only the build-level reason belongs in a reference page; "nothing is
                 // running right now" would change under the reader's feet.
                 let reason = entry.unavailable.map(str::to_string);
@@ -1564,13 +2394,80 @@ pub(crate) fn token(n: Option<u64>) -> String {
     n.map(|n| n.to_string()).unwrap_or_else(|| "未报告".into())
 }
 
+/// 工作区的 git 概况。不是 git 仓库、没装 git、命令失败都返回 `None` ——
+/// 信息栏据此整块省掉，**不显示一个「unknown」占位**（§7.3：没有数据的区域省略）。
+pub(crate) fn git_status(workspace: &std::path::Path) -> Option<GitStatus> {
+    fn run(workspace: &std::path::Path, args: &[&str]) -> Option<String> {
+        let mut command = std::process::Command::new("git");
+        command
+            .args(args)
+            .current_dir(workspace)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        // Windows 上不带这个标志会闪一个控制台窗口（用户明确不接受，见 b227176）。
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000);
+        }
+        let output = command.output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        String::from_utf8(output.stdout).ok()
+    }
+    let branch = run(workspace, &["rev-parse", "--abbrev-ref", "HEAD"])?.trim().to_string();
+    if branch.is_empty() {
+        return None;
+    }
+    let changed = run(workspace, &["status", "--porcelain"])
+        .map(|text| text.lines().filter(|line| !line.trim().is_empty()).count())
+        .unwrap_or(0);
+    Some(GitStatus { branch, changed })
+}
+
 /// 路径比较用：大小写与分隔符不算差别（Windows 上 `C:\\ws` 与 `c:/ws` 是同一个目录）。
 fn normalize_path(path: &str) -> String {
     path.replace('\\', "/").trim_end_matches('/').to_lowercase()
 }
 
+/// 标准 base64（RFC 4648）。只为了 OSC 52 —— 为一行复制引一个依赖不值得。
+pub(crate) fn base64(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(TABLE[(n >> 18) as usize & 63] as char);
+        out.push(TABLE[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
 fn first_line(text: &str) -> &str {
     text.lines().find(|line| !line.trim().is_empty()).unwrap_or(text)
+}
+
+/// 故障原因 → 一条可直接执行的命令。
+///
+/// 为什么按关键词而不是错误码：这些原因来自**运行时进程的 stderr 尾部**（DSH 没起来、
+/// 密钥缺失、目录被占），不是我们自己的 `SpecError`，没有稳定码可匹配。命中不了就返回
+/// `None`，原文照常显示 —— 不编一条可能不对的命令。
+pub(crate) fn failure_hint(reason: &str) -> Option<&'static str> {
+    let lower = reason.to_lowercase();
+    if reason.contains("runtime install") || reason.contains("运行时") || lower.contains("dsh-runtime") || lower.contains("未安装") {
+        Some("先运行 `arcdeck runtime install`（把钉住的 DSH 装进本机数据目录）")
+    } else if lower.contains("api key") || lower.contains("auth") || reason.contains("密钥") || reason.contains("凭据") {
+        Some("先运行 `arcdeck auth set <provider>` 存密钥")
+    } else if reason.contains("config init") || lower.contains("arcdeck.json") || reason.contains("用户配置") {
+        Some("先运行 `arcdeck config init` 生成配置")
+    } else if reason.contains("另一个 arcdeck") {
+        Some("先关掉占着会话目录的那个 arcdeck，再 /reconnect")
+    } else {
+        None
+    }
 }
 
 /// 内核报告的目录 → 模型对话框的形状。权威来源是 DSH（§7.2）；没有的数据（发布日期、免费与否）留空，不编。
@@ -1588,6 +2485,7 @@ fn catalog_from_kernel(catalog: &ModelCatalog) -> Vec<catalog::Provider> {
                     id: model.id.clone(),
                     name: Some(model.name.clone()).filter(|n| !n.is_empty()),
                     efforts: model.efforts.iter().map(|e| e.id.clone()).collect(),
+                    context_window: model.context_window,
                     ..catalog::Model::default()
                 })
                 .collect(),
@@ -1648,6 +2546,7 @@ mod tests {
             preferences: "unused".into(),
             catalog: catalog(),
             model_prefs: prefs,
+            personalization: false,
         }
     }
 
@@ -1763,13 +2662,13 @@ mod tests {
         );
         assert!(text.find("Recent").unwrap() < text.find("Provider P").unwrap());
         // Free 页脚要落在这条对话框里最靠右的位置（右对齐），不是紧跟在标题后面。
-        // 行形如 `│␣␣␣␣␣␣Free Model␣…␣Free␣␣␣│`：页脚右边只剩 3 格内边距 + 边框。
+        // 行形如 `␣␣␣␣Free Model␣…␣Free␣␣`：面板没有边框（照 OpenCode），页脚右边只剩内边距。
         let line = text
             .lines()
             .find(|line| line.contains("Free Model"))
             .expect("免费模型那一行");
         assert!(
-            line.trim_end().ends_with("Free   │"),
+            line.trim_end().ends_with("Free"),
             "footer 必须右对齐，还留在对话框最右侧：{line:?}"
         );
         let head_end = line.find("Free Model").unwrap() + "Free Model".len();
@@ -2021,6 +2920,16 @@ mod tests {
         assert_eq!(app.model, Some(second));
     }
 
+    /// 模型对话框里敲的字要画出来（此前只有光标在动）。
+    #[test]
+    fn the_model_dialog_shows_what_was_typed() {
+        let mut app = model_dialog_app();
+        assert!(buffer_text(&mut app, 120, 30).contains("搜索"), "空着时有占位");
+        app.filter = "flash".into();
+        let text = buffer_text(&mut app, 120, 30);
+        assert!(text.contains("flash"), "{text}");
+    }
+
     #[test]
     fn dialog_render_says_the_model_switch_applies_to_the_next_request() {
         let mut app = model_dialog_app();
@@ -2031,8 +2940,8 @@ mod tests {
         );
         assert!(text.contains("不会热切换"));
         // 对话框底部要说清这两个上下文键位（§7.4）以及 Esc 之后仍然用哪个模型。
-        assert!(text.contains("^F 收藏"));
-        assert!(text.contains("^A provider"));
+        assert!(text.contains("ctrl+f 收藏"));
+        assert!(text.contains("ctrl+a provider"));
         assert!(text.contains("仍用 Model M"), "要说清 Esc 关闭后当前模型是谁");
     }
 
@@ -2118,18 +3027,6 @@ mod tests {
         assert!(matches!(rx.recv().unwrap(), Request::Cancel(id) if id == "r"));
     }
     #[test]
-    fn plan_and_confirm_do_not_pretend_to_be_supported() {
-        let mut app = app();
-        let (tx, rx) = mpsc::channel();
-        for cmd in ["/plan", "/permission confirm"] {
-            app.editor.insert(cmd);
-            app.input(key(KeyCode::F(6)), &tx);
-            assert!(rx.try_recv().is_err());
-            assert_eq!(app.agent, "echo");
-            assert_eq!(app.permission, "workspace");
-        }
-    }
-    #[test]
     fn scrolling_stays_anchored_when_new_data_arrives() {
         let mut app = app();
         let (tx, _) = mpsc::channel();
@@ -2140,19 +3037,54 @@ mod tests {
         app.update(Update::Runs(Vec::new()));
         assert_eq!(app.scroll, Some(22));
     }
-    #[cfg(windows)]
+    /// Enter 就是发送（§7.4；OpenCode 同）。F6 那套只在 2026-10-14 的临时代码里存在过，
+    /// 用户的原话是「哪个神人会用 F6 发送」。
     #[test]
-    fn native_multiline_paste_cannot_dispatch_a_prompt() {
+    fn enter_sends_and_shift_enter_or_ctrl_j_inserts_a_newline() {
+        let mut app = app();
+        app.backend = BackendState::Failed { reason: "测试走独立请求那条路".into() };
+        let (tx, rx) = mpsc::channel();
+        app.editor.insert("跑一条");
+        assert!(!app.input(key(KeyCode::Enter), &tx));
+        let Request::Start(request) = rx.recv().unwrap() else { panic!("Enter 应该发送") };
+        assert_eq!(request.prompt, "跑一条");
+
+        app.editor.insert("第一行");
+        app.input(key_with(KeyCode::Enter, KeyModifiers::SHIFT), &tx);
+        app.input(key(KeyCode::Char('第')), &tx);
+        app.input(key(KeyCode::Char('二')), &tx);
+        app.input(key(KeyCode::Char('行')), &tx);
+        app.input(key_with(KeyCode::Char('j'), KeyModifiers::CONTROL), &tx);
+        assert_eq!(app.editor.text, "第一行\n第二行\n");
+        assert!(rx.try_recv().is_err(), "换行不该发送");
+    }
+
+    /// Windows 的粘贴是一串按键（没有 `Event::Paste`）：同一批里的 Enter 必须是换行，
+    /// 否则多行粘贴会在第一个换行处发出半句话。
+    #[test]
+    fn a_pasted_batch_inserts_newlines_instead_of_submitting() {
         let mut app = app();
         let (tx, rx) = mpsc::channel();
-        for text in ["第一行", "第二行", "", "/exit"] {
-            for c in text.chars() {
-                app.input(key(KeyCode::Char(c)), &tx);
-            }
-            assert!(!app.input(key(KeyCode::Enter), &tx));
+        let mut batch = Vec::new();
+        for c in "第一行\n第二行\n/exit".chars() {
+            batch.push(if c == '\n' { key(KeyCode::Enter) } else { key(KeyCode::Char(c)) });
         }
-        assert!(rx.try_recv().is_err());
-        assert_eq!(app.editor.text, "第一行\n第二行\n\n/exit\n");
+        assert!(!app.input_batch(batch, &tx));
+        assert_eq!(app.editor.text, "第一行\n第二行\n/exit");
+        assert!(rx.try_recv().is_err(), "多行粘贴不能提交：{:?}", app.notice);
+
+        // 单独一次 Enter 仍然发送。
+        app.input(key(KeyCode::Enter), &tx);
+        assert!(matches!(rx.recv().unwrap(), Request::Session(Command::Prompt { .. })));
+
+        // Windows 上一次按键是 Press + Release 两条，按得快就同一批到 —— 那不是粘贴：
+        // `/per` 之后这样一批 Enter 要执行补全（打开授权对话框），而不是换行。
+        let mut app = self::app();
+        type_text(&mut app, "/per", &tx);
+        let mut release = crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        release.kind = KeyEventKind::Release;
+        assert!(!app.input_batch(vec![key(KeyCode::Enter), Event::Key(release)], &tx));
+        assert_eq!(app.dialog, Some(Dialog::Permissions), "editor={:?}", app.editor.text);
     }
 
     fn with_theme(theme: Option<&str>, light: bool) -> App {
@@ -2165,6 +3097,7 @@ mod tests {
                 preferences: "unused".into(),
                 catalog: Vec::new(),
                 model_prefs: "unused".into(),
+                personalization: false,
             },
             Preferences { light, theme: theme.map(str::to_string), ..Preferences::default() },
             crate::catalog::ModelPrefs::default(),
@@ -2337,51 +3270,74 @@ mod tests {
         assert_eq!(app.editor.text, "");
     }
 
-    /// On Windows Enter is a newline, so F6 is the "accept and run" chord there. Both must
-    /// route through the completion popup or the popup would stay open over the next screen.
+    /// `/per` + **一次** Enter 就是 `/permission`（打开授权对话框）；可选参数的命令不等参数。
+    /// 必需参数的（`/search`）Enter 只填进去、等参数。Tab 永远只补全，能带参数的补一个空格。
+    #[test]
+    fn one_enter_on_a_completion_runs_commands_with_optional_arguments() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = self::app();
+        type_text(&mut app, "/per", &tx);
+        assert_eq!(app.autocomplete.as_ref().unwrap().current().unwrap().insert, "/permission");
+        app.input(key(KeyCode::Enter), &tx);
+        assert_eq!(app.dialog, Some(Dialog::Permissions), "一次 Enter 就执行：{}", app.notice);
+        assert!(app.editor.text.is_empty());
+
+        let mut app = self::app();
+        type_text(&mut app, "/sear", &tx);
+        app.input(key(KeyCode::Enter), &tx);
+        assert_eq!(app.editor.text, "/search ", "必需参数：填进去等参数");
+        assert_eq!(app.dialog, None);
+
+        let mut app = self::app();
+        type_text(&mut app, "/per", &tx);
+        app.input(key(KeyCode::Tab), &tx);
+        assert_eq!(app.editor.text, "/permission ", "Tab 只补全，补一个空格接参数");
+    }
+
+    /// Enter and F6 both accept-and-run through the completion popup, or the popup would stay
+    /// open over the next screen. (F6 is only a compatibility alias now; Enter is the send key.)
     #[test]
     fn accepting_completion_with_the_send_key_runs_the_command() {
-        let mut app = app();
+        let mut app = self::app();
         let (tx, _rx) = mpsc::channel();
         type_text(&mut app, "/the", &tx);
         assert!(app.autocomplete.is_some());
+        app.input(key(KeyCode::Enter), &tx);
+        assert_eq!(app.dialog, Some(Dialog::Theme));
+        assert!(app.autocomplete.is_none());
+
+        let mut app = self::app();
+        let (tx, _rx) = mpsc::channel();
+        type_text(&mut app, "/the", &tx);
         app.input(key(KeyCode::F(6)), &tx);
         assert_eq!(app.dialog, Some(Dialog::Theme));
         assert!(app.autocomplete.is_none());
     }
 
-    /// A command the build cannot serve still executes — and says why. Silently doing nothing
-    /// is the failure mode §7.4 calls out.
+    /// `/plan` 与 `/permission confirm` 不再是「有能力但写着不可用」的占位：
+    /// Plan 切到执行层只读，confirm 切到审批通道（M4 w4-tui-modes）。
     #[test]
-    fn unavailable_commands_report_their_reason_instead_of_doing_nothing() {
-        for (command, action) in [("/plan", Action::Plan), ("/permission confirm", Action::Permission)] {
-            let mut app = app();
-            let (tx, _rx) = mpsc::channel();
-            app.editor.insert(command);
-            app.input(key(KeyCode::F(6)), &tx);
-            let expected = app.availability(action).or_else(|| {
-                (action == Action::Permission).then(|| commands::CONFIRM_REASON.to_string())
-            });
-            assert_eq!(
-                Some(app.notice.clone()),
-                expected,
-                "{command} must explain itself, got {}",
-                app.notice
-            );
-        }
-        // The same reason is what the palette shows when the row is selected.
+    fn plan_and_confirm_are_wired_instead_of_being_stubbed() {
         let mut app = app();
-        let (tx, _rx) = mpsc::channel();
-        app.open_dialog(Dialog::Commands);
-        app.filter = "plan".into();
-        app.choice = app
-            .filtered_commands()
-            .iter()
-            .position(|entry| entry.action == Action::Plan)
-            .unwrap();
-        app.select(&tx);
-        assert_eq!(app.notice, commands::PLAN_REASON);
-        assert_eq!(app.dialog, None, "the palette closes so the reason is readable");
+        ready(&mut app);
+        let (tx, rx) = mpsc::channel();
+        app.editor.insert("/plan");
+        app.input(key(KeyCode::F(6)), &tx);
+        assert_eq!(app.mode, Mode::Plan);
+        assert_eq!(app.agent, "echo", "Echo 只切模式，保留角色（§7.4）");
+        assert!(
+            matches!(rx.recv().unwrap(), Request::RestartBackend { mode, .. } if mode == "plan"),
+            "Plan 要落到执行层（重启内核）"
+        );
+
+        let mut app = self::app();
+        ready(&mut app);
+        let (tx, rx) = mpsc::channel();
+        app.editor.insert("/permission confirm");
+        app.input(key(KeyCode::F(6)), &tx);
+        assert_eq!(app.permission, "confirm");
+        assert!(matches!(rx.recv().unwrap(), Request::RestartBackend { permission, .. } if permission == "confirm"));
+        assert!(app.notice.contains("审批"), "{}", app.notice);
     }
 
     /// Walks every palette row through the palette. A row that panics, or that is present but
@@ -2424,6 +3380,19 @@ mod tests {
         app.editor.insert("/theme now");
         app.input(key(KeyCode::F(6)), &tx);
         assert!(app.notice.contains("不接受参数"), "{}", app.notice);
+
+        // 收参数与否看注册表：`/search <词>` 敲出来要真的发检索（曾被手写名单拒掉）。
+        let (tx, rx) = mpsc::channel();
+        app.editor.insert("/search OK");
+        app.input(key(KeyCode::Enter), &tx);
+        assert!(
+            rx.try_iter().any(|r| matches!(r, Request::Session(Command::SearchSessions { ref query }) if query == "OK")),
+            "{}",
+            app.notice
+        );
+        app.editor.insert("/output 1");
+        app.input(key(KeyCode::Enter), &tx);
+        assert!(!app.notice.contains("不接受参数"), "{}", app.notice);
     }
 
     /// `/effort` without an argument opens the picker; an argument is checked against what the
@@ -2635,7 +3604,7 @@ mod tests {
         let quit = rows.iter().find(|row| row.title.contains("退出")).unwrap();
         assert!(quit.keys.contains("Ctrl+C"), "{}", quit.keys);
         let plan = rows.iter().find(|row| row.title.contains("Plan")).unwrap();
-        assert_eq!(plan.reason.as_deref(), Some(commands::PLAN_REASON));
+        assert_eq!(plan.reason, None, "Plan 已经接通，不再挂「不可用」");
         // Context is part of the row: Ctrl+F is a model-dialog binding, not a global one.
         let favorite = rows.iter().find(|row| row.title.contains("收藏")).unwrap();
         assert_eq!(favorite.context, commands::Context::ModelDialog);
@@ -2737,7 +3706,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         app.editor.insert("/permission readonly");
         app.input(key(KeyCode::F(6)), &tx);
-        assert!(matches!(rx.recv().unwrap(), Request::RestartBackend { permission } if permission == "readonly"));
+        assert!(matches!(rx.recv().unwrap(), Request::RestartBackend { permission, .. } if permission == "readonly"));
         assert_eq!(app.permission, "readonly");
         assert_eq!(app.backend, BackendState::Starting);
         // 一轮进行中不能改：要重启内核，会打断它。
@@ -2830,10 +3799,381 @@ mod tests {
         app.update(conversation("s1", false, vec![user("写个文件"), Message::Assistant(turn)]));
         let text = buffer_text(&mut app, 120, 30);
         assert!(text.contains("写个文件") && text.contains("写不了"), "{text}");
-        assert!(text.contains("思考 · 4 字"), "思考默认折叠：{text}");
+        assert!(text.contains("+ 思考"), "思考默认折叠：{text}");
         assert!(!text.contains("先想一想"), "折叠时不显示思考原文：{text}");
-        assert!(text.contains("write x.txt · 失败"), "{text}");
+        assert!(text.contains("✗ Write x.txt"), "{text}");
         assert!(text.contains("file access denied"), "失败在折叠态也要看得见：{text}");
         assert!(text.contains("[QUOTA] Insufficient Balance"), "模型失败原文要到界面上（P3）：{text}");
+    }
+
+    /// Shift+Tab：Echo → Build → Plan → Echo；Plan 重启内核（执行层只读），颜色跟着 Agent 走。
+    /// 个性化开着时 Echo ↔ Build 也重启（persona 是按 Agent 装进内核的）。
+    #[test]
+    fn shift_tab_cycles_all_three_agents_through_the_real_path() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = app();
+        ready(&mut app);
+        let restarts = |rx: &mpsc::Receiver<Request>| {
+            rx.try_iter().filter(|r| matches!(r, Request::RestartBackend { .. })).count()
+        };
+        let colour = |app: &App| crate::view::agent_color(app, &app.theme);
+        let echo = colour(&app);
+        app.input(key(KeyCode::BackTab), &tx);
+        assert_eq!((app.agent.as_str(), app.mode), ("build", Mode::Build));
+        assert_eq!(restarts(&rx), 0, "个性化关着：Echo → Build 不重启");
+        assert_ne!(colour(&app), echo);
+        app.backend = BackendState::Ready { model: None };
+        app.input(key(KeyCode::BackTab), &tx);
+        assert_eq!(app.mode, Mode::Plan);
+        assert_eq!(restarts(&rx), 1, "Plan 落到执行层，要重启");
+        app.backend = BackendState::Ready { model: None };
+        app.input(key(KeyCode::BackTab), &tx);
+        assert_eq!((app.agent.as_str(), app.mode), ("echo", Mode::Build));
+        assert_eq!(colour(&app), echo);
+
+        let mut app = self::app();
+        app.boot.personalization = true;
+        ready(&mut app);
+        while rx.try_recv().is_ok() {}
+        app.input(key(KeyCode::BackTab), &tx);
+        assert_eq!(restarts(&rx), 1, "个性化开着：换 Agent 就换 persona，要重启");
+    }
+
+    /// stash：有字时收起草稿并清空输入框；`/stash` 列出来，Enter 取回且从暂存里拿掉。
+    #[test]
+    fn a_draft_can_be_stashed_and_brought_back() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = app();
+        app.editor.insert("写到一半的问题");
+        let _ = app.execute(Action::Stash, None, &tx);
+        assert!(app.editor.text.is_empty());
+        assert_eq!(app.preferences.stash, ["写到一半的问题"]);
+        // 斜杠命令先把输入框里的 `/stash` 吃掉，所以它总是「取回」。
+        app.editor.insert("/stash");
+        app.submit(&tx);
+        assert_eq!(app.dialog, Some(Dialog::Stash));
+        app.select(&tx);
+        assert_eq!(app.editor.text, "写到一半的问题");
+        assert!(app.preferences.stash.is_empty());
+        let saved = serde_json::to_string(&app.preferences).unwrap();
+        assert!(saved.contains("\"stash\""), "暂存跟偏好一起落盘：{saved}");
+    }
+
+    /// 子 agent：父会话里列出子会话；进了子会话第一行是回父会话，且不能直接发消息。
+    #[test]
+    fn subagent_sessions_open_from_the_parent_and_are_read_only() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = app();
+        ready(&mut app);
+        app.session_id = Some("p".into());
+        let summary = |id: &str, parent: Option<&str>, label: Option<&str>| SessionSummary {
+            session_id: id.into(),
+            parent_session_id: parent.map(str::to_string),
+            subagent_mode: parent.map(|_| "one-shot".to_string()),
+            subagent_label: label.map(str::to_string),
+            title: Some(format!("{id} 的标题")),
+            ..SessionSummary::default()
+        };
+        app.update(Update::Session(service::Event::Sessions {
+            sessions: vec![summary("p", None, None), summary("c1", Some("p"), Some("查依赖")), summary("other", Some("x"), None)],
+        }));
+        let _ = app.execute(Action::Subagents, None, &tx);
+        assert_eq!(app.dialog, Some(Dialog::Subagents));
+        let rows = app.subagent_rows();
+        assert_eq!(rows.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(), ["查依赖"], "只列本会话的子会话");
+        while rx.try_recv().is_ok() {}
+        app.select(&tx);
+        assert_eq!(app.session_id.as_deref(), Some("c1"));
+        let sent: Vec<_> = rx.try_iter().collect();
+        assert!(
+            sent.iter().any(|r| matches!(r, Request::Session(Command::OpenSession { session_id }) if session_id == "c1")),
+            "{sent:?}"
+        );
+        // 子会话里：回父会话在第一行，发消息被挡下且草稿保留。
+        assert_eq!(app.subagent_rows()[0].session_id, "p");
+        app.editor.insert("你好");
+        assert!(!app.submit(&tx));
+        assert_eq!(app.editor.text, "你好");
+        assert!(app.notice.contains("子 agent 会话"), "{}", app.notice);
+    }
+
+    // ── M4 w4-tui-modes：模式、授权与审批 ────────────────────────────────────
+
+    fn approval(id: &str, tool: &str) -> ApprovalRequest {
+        ApprovalRequest {
+            request_id: id.into(),
+            tool_name: tool.into(),
+            call_id: Some(format!("call-{id}")),
+            reason: Some("hook says ask".into()),
+            display_reason: None,
+            agent: Some("agent-1".into()),
+        }
+    }
+
+    /// §7.4 的六种转换。矩阵是规格的一部分，逐格断言。
+    #[test]
+    fn plan_and_build_follow_the_six_transitions() {
+        let cases = [
+            ("echo", Mode::Build, "/plan", "echo", Mode::Plan),
+            ("build", Mode::Build, "/plan", "plan", Mode::Plan),
+            ("plan", Mode::Plan, "/plan", "plan", Mode::Plan),
+            ("echo", Mode::Build, "/build", "echo", Mode::Build),
+            ("plan", Mode::Plan, "/build", "build", Mode::Build),
+            ("build", Mode::Build, "/build", "build", Mode::Build),
+        ];
+        for (agent, mode, command, expected_agent, expected_mode) in cases {
+            let mut app = self::app();
+            ready(&mut app);
+            app.agent = agent.into();
+            app.mode = mode;
+            let (tx, rx) = mpsc::channel();
+            app.editor.insert(command);
+            app.input(key(KeyCode::F(6)), &tx);
+            assert_eq!(
+                (app.agent.as_str(), app.mode),
+                (expected_agent, expected_mode),
+                "{command} from {agent}+{mode:?}"
+            );
+            if (agent, mode) == (expected_agent, expected_mode) {
+                assert!(rx.try_recv().is_err(), "没变化就不该重启内核");
+            } else {
+                assert!(
+                    matches!(rx.recv().unwrap(), Request::RestartBackend { agent, mode, .. }
+                        if agent == expected_agent && mode == expected_mode.as_str()),
+                    "模式与 Agent 都要带到执行层"
+                );
+            }
+        }
+    }
+
+    /// 运行中切换要先问：n 不改任何东西，y 才重启内核。
+    #[test]
+    fn changing_mode_mid_turn_asks_and_n_keeps_the_turn() {
+        let mut app = self::app();
+        ready(&mut app);
+        app.session_id = Some("s1".into());
+        app.update(conversation("s1", true, vec![user("hi")]));
+        let (tx, rx) = mpsc::channel();
+        app.editor.insert("/plan");
+        app.input(key(KeyCode::F(6)), &tx);
+        assert_eq!(app.dialog, Some(Dialog::Confirm(ConfirmKind::Mode(Mode::Plan))));
+        assert_eq!(app.mode, Mode::Build, "还没确认");
+        assert!(rx.try_recv().is_err(), "确认之前不发请求");
+        app.input(key(KeyCode::Char('n')), &tx);
+        assert_eq!(app.dialog, None);
+        assert_eq!(app.mode, Mode::Build);
+        assert!(rx.try_recv().is_err());
+
+        app.editor.insert("/plan");
+        app.input(key(KeyCode::F(6)), &tx);
+        app.input(key(KeyCode::Char('y')), &tx);
+        assert_eq!(app.mode, Mode::Plan);
+        assert!(matches!(rx.recv().unwrap(), Request::RestartBackend { mode, .. } if mode == "plan"));
+    }
+
+    /// 审批必须在屏幕上；Esc 只是收起，不是允许。
+    #[test]
+    fn an_approval_is_visible_and_esc_is_not_consent() {
+        let mut app = self::app();
+        ready(&mut app);
+        let (tx, rx) = mpsc::channel();
+        app.update(Update::Session(service::Event::Approval { request: approval("e1", "bash") }));
+        assert!(matches!(app.dialog, Some(Dialog::Approval(_))), "{:?}", app.dialog);
+        let text = buffer_text(&mut app, 120, 30);
+        assert!(text.contains("bash") && text.contains("允许"), "{text}");
+
+        app.input(key(KeyCode::Esc), &tx);
+        assert_eq!(app.dialog, None, "Esc 收起界面");
+        assert_eq!(app.approvals.len(), 1, "请求还在等");
+        assert!(rx.try_recv().is_err(), "Esc 不能替用户回答");
+        assert!(app.notice.contains("不等于允许"), "{}", app.notice);
+
+        app.editor.insert("/approvals");
+        app.input(key(KeyCode::F(6)), &tx);
+        assert!(matches!(app.dialog, Some(Dialog::Approval(_))), "能重新打开");
+        app.input(key(KeyCode::Char('y')), &tx);
+        assert!(matches!(
+            rx.recv().unwrap(),
+            Request::Session(Command::AnswerApproval { outcome: ApprovalOutcome::AllowOnce, .. })
+        ));
+        assert!(app.approvals.is_empty());
+    }
+
+    /// 拒绝要发 `rejected`；同时挂着的下一条立刻接上。
+    #[test]
+    fn rejecting_an_approval_pops_the_next_queued_one() {
+        let mut app = self::app();
+        ready(&mut app);
+        let (tx, rx) = mpsc::channel();
+        app.update(Update::Session(service::Event::Approval { request: approval("e1", "bash") }));
+        app.update(Update::Session(service::Event::Approval { request: approval("e2", "write") }));
+        assert_eq!(app.approvals.len(), 2);
+        assert!(matches!(&app.dialog, Some(Dialog::Approval(request)) if request.request_id == "e1"));
+        app.input(key(KeyCode::Char('n')), &tx);
+        assert!(matches!(
+            rx.recv().unwrap(),
+            Request::Session(Command::AnswerApproval { outcome: ApprovalOutcome::Reject, ref request_id })
+                if request_id == "e1"
+        ));
+        assert_eq!(app.approvals.len(), 1);
+        assert!(matches!(&app.dialog, Some(Dialog::Approval(request)) if request.request_id == "e2"));
+        // 内核撤回：收掉等待状态。
+        app.update(Update::Session(service::Event::ApprovalClosed {
+            request_id: "e2".into(),
+            reason: "这一轮结束了".into(),
+        }));
+        assert!(app.approvals.is_empty());
+        assert_eq!(app.dialog, None);
+    }
+
+    /// 内核重启会作废挂着的审批：不能让人对着一份死请求按 y。
+    #[test]
+    fn restarting_the_kernel_drops_pending_approvals() {
+        let mut app = self::app();
+        ready(&mut app);
+        app.update(Update::Session(service::Event::Approval { request: approval("e1", "bash") }));
+        assert_eq!(app.approvals.len(), 1);
+        app.update(Update::Session(service::Event::Backend { state: BackendState::Starting }));
+        assert!(app.approvals.is_empty());
+        assert_eq!(app.dialog, None, "死请求的弹层要收起来");
+    }
+
+    #[test]
+    fn search_hits_open_the_matching_session() {
+        let mut app = self::app();
+        ready(&mut app);
+        let (tx, rx) = mpsc::channel();
+        app.update(Update::Session(service::Event::Search {
+            query: "会话".into(),
+            items: vec![SearchHit {
+                session_id: "hit-1".into(),
+                title: None,
+                snippet: "改\u{0}会话\u{0}列表".into(),
+            }],
+        }));
+        assert_eq!(app.dialog, Some(Dialog::Search));
+        let text = buffer_text(&mut app, 120, 30);
+        assert!(text.contains("会话"), "{text}");
+        app.input(key(KeyCode::Enter), &tx);
+        assert!(matches!(rx.recv().unwrap(), Request::Session(Command::OpenSession { session_id }) if session_id == "hit-1"));
+        assert_eq!(app.session_id.as_deref(), Some("hit-1"));
+    }
+
+    #[test]
+    fn diff_and_output_open_the_scrollable_viewer() {
+        use arc_deck_core::conversation::{AssistantTurn, Block, ToolCall, ToolStatus, TurnState};
+        let mut app = self::app();
+        ready(&mut app);
+        app.session_id = Some("s1".into());
+        let mut edit = ToolCall {
+            call_id: "c1".into(),
+            name: "edit".into(),
+            arguments: r#"{"file_path":"x.rs"}"#.into(),
+            status: ToolStatus::Done,
+            output: Some("改好了".into()),
+            ..ToolCall::default()
+        };
+        edit.detail = Some(serde_json::json!({
+            "diffs": [{ "path": "x.rs", "oldText": "a\nb", "newText": "a\nB" }]
+        }));
+        app.update(conversation(
+            "s1",
+            false,
+            vec![user("改一下"), Message::Assistant(AssistantTurn {
+                turn: 1,
+                blocks: vec![Block::Tool(edit)],
+                state: TurnState::Completed,
+                ..AssistantTurn::default()
+            })],
+        ));
+        let (tx, _rx) = mpsc::channel();
+        app.editor.insert("/diff");
+        app.input(key(KeyCode::F(6)), &tx);
+        let Some(Dialog::Viewer(viewer)) = &app.dialog else { panic!("{:?}", app.dialog) };
+        assert!(viewer.lines.iter().any(|line| line.contains("+ B")), "{:?}", viewer.lines);
+        // 滚动与过滤都改 viewer 自己的状态。
+        app.input(key(KeyCode::Char('B')), &tx);
+        let Some(Dialog::Viewer(viewer)) = &app.dialog else { panic!() };
+        assert_eq!(viewer.filter, "B");
+        app.input(key(KeyCode::Backspace), &tx);
+        let Some(Dialog::Viewer(viewer)) = &app.dialog else { panic!() };
+        assert_eq!(viewer.filter, "");
+        app.input(key(KeyCode::Esc), &tx);
+        assert_eq!(app.dialog, None);
+
+        app.editor.insert("/output");
+        app.input(key(KeyCode::F(6)), &tx);
+        let Some(Dialog::Viewer(viewer)) = &app.dialog else { panic!("{:?}", app.dialog) };
+        assert!(viewer.title.contains("edit"), "{}", viewer.title);
+        assert!(viewer.lines.iter().any(|line| line.contains("改好了")));
+    }
+
+    /// 时间线选中之后要滚到那条消息的行（偏移由正文渲染填）。
+    #[test]
+    fn timeline_jumps_to_the_message_row() {
+        let mut app = self::app();
+        ready(&mut app);
+        app.session_id = Some("s1".into());
+        // 消息要多到超过一屏，`scroll_max` 才不是 0（否则跳转会被夹到 0，测不出偏移）。
+        let messages: Vec<Message> = (0..10)
+            .map(|index| user(&format!("第 {index} 条\n第二行\n第三行")))
+            .collect();
+        app.update(conversation("s1", false, messages));
+        let _ = buffer_text(&mut app, 120, 30);
+        assert_eq!(app.message_offsets.len(), 10);
+        let target = app.message_offsets[2].1;
+        let (tx, _rx) = mpsc::channel();
+        app.editor.insert("/timeline");
+        app.input(key(KeyCode::F(6)), &tx);
+        assert_eq!(app.dialog, Some(Dialog::Timeline));
+        app.input(key(KeyCode::Down), &tx);
+        app.input(key(KeyCode::Down), &tx);
+        app.input(key(KeyCode::Enter), &tx);
+        assert_eq!(app.dialog, None);
+        assert_eq!(app.scroll, Some(target));
+    }
+
+    /// toast：普通提示会到期，错误提示不会自己消失。
+    #[test]
+    fn toasts_expire_except_errors() {
+        let mut app = self::app();
+        app.toast("已复制", false);
+        assert_eq!(app.toasts.len(), 1);
+        app.toasts[0].until = Instant::now() - Duration::from_secs(1);
+        app.tick();
+        assert!(app.toasts.is_empty(), "普通提示到期就收");
+
+        app.toast("复制失败", true);
+        app.tick();
+        assert_eq!(app.toasts.len(), 1, "错误不自动消失");
+
+        // 同一句话重复出现只刷新，不叠成一列。
+        app.toast("复制失败", true);
+        assert_eq!(app.toasts.len(), 1);
+    }
+
+    #[test]
+    fn failures_come_with_a_copyable_next_command() {
+        assert!(failure_hint("DSH 运行时未安装：先运行 `arcdeck runtime install`").unwrap().contains("runtime install"));
+        assert!(failure_hint("invalid api key for provider").unwrap().contains("auth set"));
+        assert!(failure_hint("另一个 arcdeck（pid 42）正在使用交互会话目录").unwrap().contains("关掉"));
+        assert_eq!(failure_hint("内核在启动时崩了"), None, "认不出就只显示原文，不编命令");
+    }
+
+    #[test]
+    fn base64_encodes_osc52_payloads() {
+        for (input, expected) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64(input.as_bytes()), expected, "{input:?}");
+        }
+        // 中文是多字节：按字节编码，不按字符。
+        assert_eq!(base64("中".as_bytes()), "5Lit");
     }
 }
