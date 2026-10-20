@@ -50,6 +50,8 @@ pub(crate) mod fake;
 mod live;
 #[cfg(test)]
 mod quota;
+#[cfg(all(test, feature = "test-runtime"))]
+mod daily;
 
 pub use host::{WebKernel, WebKernelOptions};
 pub use mux::{RemoteFrame, RemoteMux, RemoteStream};

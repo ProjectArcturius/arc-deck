@@ -48,6 +48,8 @@ public static class Probe {
     [DllImport("kernel32.dll", SetLastError=true)] public static extern bool CloseHandle(IntPtr h);
     [DllImport("kernel32.dll", SetLastError=true)]
     public static extern bool GetConsoleScreenBufferInfo(IntPtr h, out CONSOLE_SCREEN_BUFFER_INFO info);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern bool GetConsoleCursorInfo(IntPtr h, out CONSOLE_CURSOR_INFO info);
     [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
     public static extern bool ReadConsoleOutputCharacterW(IntPtr h, [Out] char[] buf, uint len, COORD coord, out uint read);
     [DllImport("kernel32.dll", SetLastError=true)]
@@ -55,6 +57,7 @@ public static class Probe {
 
     [StructLayout(LayoutKind.Sequential)] public struct COORD { public short X; public short Y; }
     [StructLayout(LayoutKind.Sequential)] public struct SMALL_RECT { public short Left; public short Top; public short Right; public short Bottom; }
+    [StructLayout(LayoutKind.Sequential)] public struct CONSOLE_CURSOR_INFO { public uint size; public bool visible; }
     [StructLayout(LayoutKind.Sequential)] public struct CONSOLE_SCREEN_BUFFER_INFO {
         public COORD dwSize; public COORD dwCursorPosition; public ushort wAttributes;
         public SMALL_RECT srWindow; public COORD dwMaximumWindowSize;
@@ -89,6 +92,19 @@ public static class Probe {
             sb.Append("\n");
         }
         return sb.ToString();
+    }
+
+    public static bool CursorOnComposer(IntPtr h) {
+        CONSOLE_CURSOR_INFO cursor;
+        CONSOLE_SCREEN_BUFFER_INFO screen;
+        if (!GetConsoleCursorInfo(h, out cursor) || !GetConsoleScreenBufferInfo(h, out screen)) return false;
+        if (!cursor.visible) return true;
+        var row = new char[screen.dwSize.X];
+        uint read;
+        if (!ReadConsoleOutputCharacterW(h, row, (uint)row.Length,
+            new COORD { X = 0, Y = screen.dwCursorPosition.Y }, out read)) return false;
+        var text = new string(row).Replace("\0", "");
+        return text.Contains("输入下一条") || text.Contains("继续这个会话") || text.Contains("输入消息");
     }
 
     public static bool Key(IntPtr h, ushort vk, char ch, uint state, bool down) {
@@ -262,18 +278,29 @@ if ($Submit) {
 }
 
 if ($Cancel) {
-    # 一条要写很久的；Esc 取消这一轮，界面上要看得到「已取消」，输入区还能用。
+    # 必须等正文已开始，覆盖「Esc abort 后再发一轮」的用户现场。
     Send-Key 0x1B ([char]0x1B) 0
     Send-Key 0x1B ([char]0x1B) 0
-    # 要足够长：flash 6 秒内就能数完 300（实测），那时 Esc 已经没有进行中的一轮可取消。
     Send-Text "从 1 数到 5000，每行一个数字，不要省略"
     Send-Key 0x0D ([char]0x0D) 0
-    Start-Sleep -Seconds 2
+    # 等正文真的开始流式输出；启动后固定等 2 秒往往只取消了尚未开始的模型请求。
+    $streaming = $false
+    for ($i = 0; $i -lt 90; $i++) {
+        # Markdown 把连续的纯数字行合并成一个段落，因此不能只匹配单独一行的 1。
+        if ((Screen) -match '(?m)^\s+[0-9]+(\s+[0-9]+){2,}') { $streaming = $true; break }
+        Start-Sleep -Milliseconds 500
+    }
+    $checks.streaming_before_cancel = $streaming
     # 跑着的时候页脚左边是扫描条 + `esc 中断`（OpenCode 的「还在工作」）。
     $running = Screen
     # 只认「中断」与 `■`：中文代码页的 conhost 把歧义宽度字符（`■`、`·`）画成两格，同一行后面的字会
     # 错位（实测 `esc 中断` 读回来是 `■中断`）。Windows Terminal 按一格画，没有这个问题。
     $checks.scanner_while_running = $running.Contains("中断") -and $running.Contains([string][char]0x25A0)
+    $checks.cursor_stays_in_composer = $true
+    for ($sample = 0; $sample -lt 500; $sample++) {
+        if (-not [Probe]::CursorOnComposer($out)) { $checks.cursor_stays_in_composer = $false }
+        Start-Sleep -Milliseconds 1
+    }
     [void](Snapshot "running")
     Send-Key 0x1B ([char]0x1B) 0
     # 一轮的页脚是「▣ Echo · 模型 · 已取消」；conhost 里前面的 `·` 会挤掉一个字（见上），读回来是
@@ -285,8 +312,22 @@ if ($Cancel) {
         Start-Sleep -Seconds 1
     }
     [void](Snapshot "cancel")
-    Send-Text "still here"
-    $checks.composer_usable_after_cancel = (Screen).Contains("still here")
+    # 取消后必须真的再发一轮；只检查能打字抓不到 1.0 前发现的后端挂死。
+    Send-Text "只回复英文单词 RECOVERED"
+    $checks.composer_usable_after_cancel = (Screen).Contains("RECOVERED")
+    Send-Key 0x0D ([char]0x0D) 0
+    $checks.next_turn_after_cancel = $false
+    for ($i = 0; $i -lt 90; $i++) {
+        $now = Screen
+        # 用户题面里也有 RECOVERED，必须看到第二次，且扫描条已经停下。
+        if ([regex]::Matches($now, "RECOVERED").Count -ge 2 -and -not $now.Contains("中断")) {
+            $checks.next_turn_after_cancel = $true
+            break
+        }
+        if ($now.Contains("错误：")) { break }
+        Start-Sleep -Seconds 1
+    }
+    [void](Snapshot "after-cancel-turn")
 }
 
 if ($Resume) {
@@ -299,7 +340,10 @@ if ($Resume) {
     # 最近的会话不一定是 -Cancel 留下的那个（用户自己的会话更新时就不是），所以判据是
     # 「打开后出现了一轮的页脚 `▣`」—— 任何有历史的会话都有。「已取消」只在同一次跑过 -Cancel 时才查。
     $checks.resume_history = Wait-Screen "▣ " 30
-    if ($Cancel) { $checks.resume_shows_cancelled = (Screen).Contains("已取消") }
+    if ($Cancel) {
+        $resumed = Screen
+        $checks.resume_shows_cancelled = $resumed.Contains("已取消") -or $resumed.Contains("· 取消")
+    }
     [void](Snapshot "resume")
     # 子 agent 对话框：有子会话就列出来，没有就明说没有 —— 两种都算对话框起来了。
     Send-Text "/subagents"
@@ -320,7 +364,12 @@ $kernels = @(Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAct
     Where-Object { $_.CommandLine -and $_.CommandLine.Contains("--profile web") -and $_.CommandLine.Contains("arcdeck") })
 $checks.no_kernel_left = ($kernels.Count -eq 0)
 
-$checks | ConvertTo-Json | Tee-Object -FilePath $Log -Append
+$json = $checks | ConvertTo-Json
+$json | Out-File -FilePath $Log -Append -Encoding utf8
+$json
+if (@($checks.GetEnumerator() | Where-Object { $_.Value -is [bool] -and -not $_.Value -and $_.Key -ne 'submit_has_error' }).Count -gt 0 -or $checks.submit_has_error) {
+    throw 'console probe failed; see log'
+}
 } finally {
     if (-not $process.HasExited) { & taskkill /PID $process.Id /T /F | Out-Null }
 }

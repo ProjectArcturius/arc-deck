@@ -69,6 +69,8 @@ pub struct ConversationFold {
     cursor: Option<u64>,
     /// 正在进行的轮次。
     current_turn: u32,
+    /// 取消后的旧流帧不能把已经结束的轮次重新标成 running。
+    ended_turn: u32,
     /// 已经有权威全文的 step —— 之后到的流式 chunk 丢掉。
     committed: BTreeSet<(u32, u32)>,
     /// 流式 attempt：id → 它属于哪一轮哪一步。
@@ -199,6 +201,9 @@ impl ConversationFold {
         match frame["type"].as_str() {
             Some("start") => {
                 let key = AttemptKey { turn: as_u32(&frame["turn"]), step: as_u32(&frame["step"]) };
+                if key.turn <= self.ended_turn {
+                    return;
+                }
                 self.attempts.insert(attempt_id.to_string(), key);
                 self.pending_stream.retain(|(id, _)| id != attempt_id);
                 self.current_turn = self.current_turn.max(key.turn);
@@ -264,6 +269,7 @@ impl ConversationFold {
         };
         self.committed.clear();
         self.current_turn = 0;
+        self.ended_turn = 0;
         let events: Vec<Value> = self.events.values().cloned().collect();
         for event in &events {
             self.fold(event);
@@ -354,6 +360,7 @@ impl ConversationFold {
             }
             "turn/end" => {
                 let turn = as_u32(&data["turn"]);
+                self.ended_turn = self.ended_turn.max(turn);
                 let state = turn_state(&data["reason"]);
                 let message = self.assistant(turn);
                 for block in &mut message.blocks {
@@ -369,6 +376,8 @@ impl ConversationFold {
                 if turn >= self.current_turn {
                     self.view.running = false;
                 }
+                self.attempts.retain(|_, key| key.turn > turn);
+                self.pending_stream.retain(|(id, _)| self.attempts.contains_key(id));
             }
             "session/title" => {
                 if let Some(title) = data["title"].as_str() {
@@ -642,6 +651,20 @@ mod tests {
         assert_eq!(view.title.as_deref(), Some("简单确认回复测试"));
         assert_eq!(view.model.as_ref().map(|m| m.provider.as_str()), Some("opencode-go"));
         assert!(view.history_complete);
+    }
+
+    #[test]
+    fn a_late_stream_start_cannot_revive_an_aborted_turn() {
+        let mut fold = ConversationFold::new();
+        fold.apply_event(&json!({"type":"turn/start","seq":0,"data":{"turn":1}}));
+        fold.apply_stream(&json!({"type":"start","attemptId":"original","turn":1,"step":1}));
+        fold.apply_event(&json!({"type":"turn/end","seq":1,"data":{"turn":1,"reason":{"kind":"aborted","reason":{"kind":"user"}}}}));
+        fold.apply_stream(&json!({"type":"chunk","attemptId":"original","chunk":{"type":"text-delta","text":"ghost"}}));
+        assert!(fold.view().messages.iter().all(|m| !matches!(m, Message::Assistant(a) if a.blocks.iter().any(is_streaming))));
+        fold.apply_stream(&json!({"type":"start","attemptId":"late","turn":1,"step":1}));
+        assert!(!fold.view().running, "取消后迟到的流不能重新启动扫描条");
+        fold.apply_stream(&json!({"type":"start","attemptId":"next","turn":2,"step":1}));
+        assert!(fold.view().running, "新一轮仍然必须启动");
     }
 
     #[test]

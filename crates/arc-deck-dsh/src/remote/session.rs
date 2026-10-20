@@ -8,6 +8,7 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_deck_core::conversation::{
     CatalogEffort, CatalogFailure, CatalogModel, CatalogProvider, Conversation, ModelCatalog,
@@ -23,11 +24,11 @@ use super::{RemoteError, RemoteFrame, RemoteMux, RemoteRpc, RemoteStream, WebKer
 const MAX_PAGES: usize = 500;
 /// 每页最多多少条消息。大一点少几次往返；内核默认 50。
 const PAGE_MESSAGES: u64 = 200;
+static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 pub struct SessionClient {
     rpc: RemoteRpc,
     mux: RemoteMux,
-    next_request: AtomicU64,
 }
 
 impl SessionClient {
@@ -36,7 +37,7 @@ impl SessionClient {
     }
 
     pub fn from_parts(rpc: RemoteRpc, mux: RemoteMux) -> Self {
-        Self { rpc, mux, next_request: AtomicU64::new(1) }
+        Self { rpc, mux }
     }
 
     /// 会话列表。子 agent 会话也在里面（`parent_session_id` 有值），由界面决定要不要显示。
@@ -82,9 +83,13 @@ impl SessionClient {
     /// 回执只表示「进了收件箱」，不表示答完了：要看 follow 流里的 `turn/end`。
     pub async fn prompt(&self, session_id: &str, text: &str) -> Result<String, RemoteError> {
         let request_id = format!(
-            "arcdeck-{}-{}",
+            "arcdeck-{}-{}-{}",
             std::process::id(),
-            self.next_request.fetch_add(1, Ordering::SeqCst)
+            // requestId 会落入会话历史。内核重连会重建 SessionClient；旧的实例计数器
+            // 从 1 重来，DSH 会把新消息去重并回 accepted=true，前端于是一直转扫描条。
+            // 时间戳还区分后续进程复用同一个 Windows pid 的情况。
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos(),
+            NEXT_REQUEST.fetch_add(1, Ordering::Relaxed)
         );
         self.rpc
             .call(
@@ -356,6 +361,28 @@ fn parse_catalog(value: &Value) -> ModelCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rebuilding_a_client_never_reuses_a_durable_prompt_id() {
+        use crate::remote::fake::{FakeMux, FakeRpc};
+        use crate::remote::Secret;
+        let cookie = Secret::new("test=v1.a.b");
+        let mut rpc = FakeRpc::start();
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let mux = FakeMux::start();
+            let client = SessionClient::from_parts(
+                RemoteRpc::new(&rpc.origin(), &cookie).unwrap(),
+                RemoteMux::connect_to(&mux.origin(), mux.port(), &cookie).await.unwrap(),
+            );
+            ids.push(client.prompt("restored-session", "next turn").await.unwrap());
+            let raw = rpc.request().await.unwrap();
+            let body: Value = serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(body["payload"]["args"]["request"]["requestId"], *ids.last().unwrap());
+        }
+        // DSH 以 requestId 在历史里去重；重复 id 会回 accepted=true，却永远不开新轮。
+        assert_ne!(ids[0], ids[1], "内核重连后的新 prompt 被当成旧请求，前端会一直等");
+    }
 
     /// 一条真实的 WS + 一个真实的 HTTP 假内核：审批流开出来、请求送到、回答回去。
     ///

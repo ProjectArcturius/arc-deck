@@ -32,7 +32,7 @@ use crossterm::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
-    execute,
+    execute, SynchronizedUpdate,
 };
 use serde::{Deserialize, Serialize};
 
@@ -310,7 +310,13 @@ pub fn run(boot: Boot, requests: Sender<Request>, updates: Receiver<Update>) -> 
                     let _ = execute!(io::stdout(), crossterm::terminal::SetTitle(&title));
                     window_title = title;
                 }
-                terminal.draw(|frame| view::draw(frame, &mut app))?;
+                // 扫描条每 40 ms 改页脚；可见光标跟随 buffer diff 的末尾移动，就会在
+                // 左下角闪。先隐藏再画，并让支持同步刷新的终端一次提交整帧与输入框光标。
+                io::stdout().sync_update(|_| -> io::Result<()> {
+                    terminal.hide_cursor()?;
+                    terminal.draw(|frame| view::draw(frame, &mut app))?;
+                    Ok(())
+                })??;
                 app.dirty = false;
             }
             // 一次 poll 之后把**已经排队**的按键一起收走：Windows 上粘贴就是一整串按键

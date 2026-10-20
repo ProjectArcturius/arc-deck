@@ -280,6 +280,11 @@ async fn run(input: ServiceInput, mut commands: mpsc::UnboundedReceiver<Command>
                     // 已打开的会话没有指定模型就沿用它自己的；只有新会话才套默认值。
                     if pumps.contains_key(&session_id) { None } else { default_model.clone() }
                 });
+                // follow 在取消/断流后可能已结束；HashMap 里的句柄存在不等于仍有读者。
+                // 重开订阅后再发，避免请求已经被内核执行而前端永远等不到更新。
+                if pumps.get(&session_id).is_some_and(|pump| pump.task.is_finished()) {
+                    close_pump(&mut pumps, &session_id).await;
+                }
                 if !pumps.contains_key(&session_id) {
                     // 先选模型再打开：打开时的快照里就是选好的那条，界面不会先闪一下出厂默认。
                     if let Some(choice) = &wanted {
