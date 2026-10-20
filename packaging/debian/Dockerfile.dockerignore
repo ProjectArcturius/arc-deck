@@ -1,0 +1,12 @@
+.git
+.cargo
+REFS
+target
+**/target
+.oc
+.venv
+**/bin
+**/obj
+*.log
+*.zip
+*.exe

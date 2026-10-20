@@ -11,6 +11,15 @@ description = "Arc Deck headless worker 命令"
 name = "arcdeck"
 path = "src/main.rs"
 
+# 这些套件直接依赖夹具实现；默认构建不编译夹具，不能让 all-targets 反向要求它。
+[[test]]
+name = "m3_negative_live"
+required-features = ["test-runtime"]
+
+[[test]]
+name = "worker_offline"
+required-features = ["test-runtime"]
+
 [features]
 # 打开假 SDK 对端与 `__fixture-sdk` 隐藏子命令。离线验收必须显式开启它。
 test-runtime = ["arc-deck-dsh/test-runtime"]

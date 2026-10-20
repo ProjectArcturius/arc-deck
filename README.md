@@ -1,5 +1,8 @@
 # Arc Deck
 
+**1.0.0 发布准备**：[安装](docs/INSTALL.md) · [修复与验收记录](docs/releases/v1.0.0.md) ·
+[Arch 上构建 AUR/deb 与补传 Linux 资产](docs/LINUX_RELEASE.md)。本版范围是 TUI + headless；Linux 本轮尚未构建，桌面 GUI 继续冻结。
+
 基于 DeepSeek Harness（DSH）的编码 Agent 产品，目标分为两部分：
 
 | 部分 | 编码方向 | 使用者 | 状态 |

@@ -25,7 +25,7 @@ dependencies = [
 
 [[package]]
 name = "arc-deck-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "arc-deck-core",
  "arc-deck-dsh",
@@ -38,7 +38,7 @@ dependencies = [
 
 [[package]]
 name = "arc-deck-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -48,7 +48,7 @@ dependencies = [
 
 [[package]]
 name = "arc-deck-dsh"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "arc-deck-core",
  "reqwest",
@@ -62,14 +62,14 @@ dependencies = [
 
 [[package]]
 name = "arc-deck-shell"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "windows-sys",
 ]
 
 [[package]]
 name = "arc-deck-tui"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "arc-deck-core",
  "crossterm",
@@ -720,7 +720,7 @@ dependencies = [
 
 [[package]]
 name = "ime-probe"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "flate2",
  "windows-sys",
@@ -793,7 +793,7 @@ dependencies = [
 
 [[package]]
 name = "layout-bench"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "fontdue",
  "rustybuzz",
