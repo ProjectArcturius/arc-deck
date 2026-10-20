@@ -10,6 +10,10 @@
 [CORE_HEADLESS_AUDIT_2026-10-14.md](CORE_HEADLESS_AUDIT_2026-10-14.md)。无参数入口已替换为
 独立运行 TUI；这不代表 M2c/M2d/M3 或完整 M4 已通过。Remote 会话和执行 guard 仍待接通。
 
+**2026-10-20 补记**：Remote 会话、执行 guard、TUI 的工具视图 / 模式与 confirm 审批 / 时间线与内容检索 /
+收尾都已接通并留下证据（[M4_PLAN](M4_PLAN.md) 第五、六轮）。**M4 只差 §7.5 的人工视觉对照**；
+M2c 的 Ether 真派工、M2d 的对照门、M5 与 M6 仍未做。
+
 本节是 0.2 版的变化摘要，与后文冲突时以本节为准；后文已按本节同步。
 
 | 编号 | 决定 | 依据 |
@@ -870,7 +874,7 @@ OpenCode Go 走的也是 Anthropic Messages 协议，缓存命中实测有效，
 | **M2c：接进 Ether**（焦点） | Markdown 任务书、`--accept`、`--worktree`、env 模板、`allow_commit`；**Arch 构建与运行**（2026-10-14 修订，原为 Debian）；`examples/ether/` 派工示例 | 一批真实 Ether 任务在 Windows 与 Arch 各派至少一件，调度者**只用 `status` 与 `report`** 完成跟踪与是否细看的判断；与旧 runner 的结果并排对照一次。**Ether 侧脚本改动在 Ether 仓做** |
 | M2d：对照门 | DSH_FINDINGS §5 的 E1–E3 | 有样本量、有数据地回答：官方路由 DSML 是否为 0；`sdk` vs `sdk-minimal` 谁做缺省；非 DS 是否需要第二内核（预期否） |
 | M3：Agent 与权限实装 | Echo/Build/Plan 组合矩阵在执行层生效；工具映射与 schema；Plan 写负例被拒 | §5 的契约有真实内核下的负例；提示词不代替权限 |
-| M4：TUI 主流程 | `arc-deck-tui`：Ratatui 渲染、OpenCode token/布局、输入/action、Remote 与共用投影；`arcdeck` 无参数进入 | §7 夹具、真实终端与功能验收；历史/stream/取消/失败一致；TUI 里发起的任务与 headless 同一套状态目录 |
+| M4：TUI 主流程 | `arc-deck-tui`：Ratatui 渲染、OpenCode token/布局、输入/action、Remote 与共用投影；`arcdeck` 无参数进入 | §7 夹具、真实终端与功能验收；历史/stream/取消/失败一致；TUI 里发起的任务与 headless 同一套状态目录。**2026-10-20 状态**：§7.3/§7.4 的组件、键位与命令已接通（工具视图、模式与 confirm 审批、时间线/内容检索、信息栏/故障/复制/性能），离线套件与真终端探针有证据（[M4_PLAN](M4_PLAN.md) 第六轮）；**§7.5 与 OpenCode 的视觉对照未做**（需要人看），所以这一行不标「完成」 |
 | M5：本地服务与稳定 | `arcdeck serve` 与版本化 IPC；受控并发（单机并发上限由后端守）；macOS；分发与许可 | 平台矩阵实际验收；无孤儿进程/越权/重复写入；不把断点恢复等同 exactly-once |
 | M6：桌面 GUI（冻结中） | Windows：完整信任宿主验证 + IPC 接线；Linux：Kanesumi 接同一 IPC | §8 运行通过且任务状态与 TUI 一致；宿主验证失败则停在决策，不冒充接线完成 |
 

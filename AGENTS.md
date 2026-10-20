@@ -849,7 +849,9 @@ SDK 里 152 处引用、0 处定义。
 | `kanesumi/` GDI 参考渲染器 | ⚠️ 缺 `Arc`/`Triangle`/`Image`，裁剪为空 |
 | `kanesumi/` 文本排版 | ⚠️ `HeuristicTextEngine` 是占位，不得用于最终排版决策 |
 | `kanesumi/` 无障碍 | ❌ 完全没有（`Scene` 是纯绘制命令，没有无障碍树） |
-| **TUI 真终端可用性** | ✅ **已实测**（`crates/arc-deck-tui/tools/console-probe.ps1`，隐藏控制台 + 写按键 + 读屏幕）：交互内核就绪 / `@` / 帮助 / `/sessions` / `/runs` / **同一会话两轮（42 → 43）** / Esc 取消这一轮 / **跨进程恢复会话** / 退出后无残留内核；184 个 TUI 测试 |
+| **TUI 真终端可用性** | ✅ **已实测**（`crates/arc-deck-tui/tools/console-probe.ps1`，隐藏控制台 + 写按键 + 读屏幕）：交互内核就绪 / `@` / 帮助 / `/sessions` / `/runs` / **同一会话两轮（42 → 43）** / Esc 取消这一轮 / **跨进程恢复会话** / 退出后无残留内核；第七轮（密度照 OpenCode 收）后加测 stash / `/search` 真内核 / `/subagents`；第八轮补输入框底色 / 扫描条 / 一次 Enter / Agent 颜色；**227 个 TUI 测试**，见 [M4_PLAN 第七、八轮](docs/M4_PLAN.md) |
+| **TUI 工具视图与模式** | ✅ 代码 + 夹具实测：按类别的工具摘要、着色 diff、折叠态可见失败、全屏查看器（`/diff` `/output`）；§7.4 六种模式转换、运行中先确认、Plan 在执行层只读（`policy_for` 单测：写范围清空 / shell 行摘掉）。子 agent 会话经 `/subagents` 打开（父地址由服务配，**从工具块直接进入未做**）；**鼠标点选不做**（用户裁定纯键盘，鼠标只留滚轮，复制用 `/copy`） |
+| **confirm 审批** | ✅ 通道两侧都有证据：假 WS+HTTP 上 `$events` → `approval/request` → `$events/result` 逐字断言；真内核上 `$events` 首帧 `ready` 带 `clientId`；`approval: ask` 的 patch 真启动过、无激活警告。**没有**在 `confirm` 档下真发一条会触发提权的模型请求（要配额） |
 | **交互会话层**（Rust Remote：`arc-deck-dsh::remote`） | ✅ **已实测**：web 内核启停、换票、mux、会话操作（live 不耗配额）；真实一轮流式 → 权威全文替换（quota）。见 [REMOTE_0.2.1](docs/REMOTE_0.2.1.md) |
 | **GUI 后端接口** `arcdeck serve --stdio` | ✅ **已实测**（握手 / 坏行不断开 / 未知命令被容忍 / EOF 收内核放锁）；共享 socket 模式**未实现**。见 [GUI_PLUGGABLE](docs/GUI_PLUGGABLE.md) |
 | `uwp/` 编译与打包 | ✅ 从零 Rebuild 无错误无警告，产出 MSIX（0.1.13.0） |

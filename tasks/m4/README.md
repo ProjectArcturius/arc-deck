@@ -1,10 +1,8 @@
 # M4 任务书队列 · 派工手册（给接手调度的人：claude / sol）
 
-> **2026-10-14 起暂停**：用户裁定当时在跑的几件收完后不再派新任务。重新开派之前先确认用户的意思；
-> 开派时从 `docs/M4_PLAN.md` 状态表里第一个「待 …」且依赖已合入的任务开始。2026-10-20：Remote 层与会话核心已由
-> 调度者直接做完并提交（0774e85、358425a）。**顺序 3 的 w3-tool-views、w4-tui-modes 现在可以开派**；任务书里
-> 「待 Remote」的前置已满足，但写任务书时的 API 名要按 `crates/arc-deck-dsh/src/remote/{session,service}.rs` 与
-> `arc_deck_core::{conversation,service}` 的实际形状改一遍再派。
+> **2026-10-20：队列已收口。** 剩下四项（w3-session-list 收尾、w3-tool-views、w4-tui-modes、w5-polish）
+> 由调度者直接做完，证据在 `docs/M4_PLAN.md`「第六轮」；只剩 §7.5 的人工视觉对照。
+> 本文件保留**怎么派、怎么收**，作为下一次派工的手册，不再有「待 …」的依赖顺序。
 
 目标：**Arc Deck TUI 能像 OpenCode 一样日常写代码**，之后产品重心可以转向 GUI。
 状态表在 `docs/M4_PLAN.md`（每合一件就更新那一行）；本文件是**怎么派、怎么收**。

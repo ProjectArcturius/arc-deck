@@ -93,6 +93,36 @@ live:  step/start → system/message → user/message(kind=user) → user/messag
 | P14 / P15 两个写者 | 交互内核的 `DSH_HOME` 独立且加独占锁（`launch::HomeLock`）；live 测试一律临时目录 |
 | P16 实时帧包装 / 当轮断言 | 实时与快照同形 `{type:'event', event}`，同一个 `apply_follow_item`；quota 测试只看发消息后新增的部分 |
 
+## 八b、转发的 Cordis 事件（`$events`）与审批
+
+审批不是会话事件流的一部分，而是 **Host 转发的 Cordis waterfall**：
+
+```text
+WS  open  endpoint="$events" payload={"args":{}}
+  ← {"type":"ready","clientId":…,"host":{"home":…}}
+  ← {"type":"waterfall","event":"approval/request","eventId":…,"agentId":…,"request":{…}}
+  ← {"type":"emit","event":"api-session/activity","args":[…]}
+  ← {"type":"cancel","eventId":…}
+POST /api/$events/result  {"args":{"clientId":…,"eventId":…,"outcome":{…}}}
+```
+
+出处：`packages/api/gateway/src/stream-protocol.ts:10-13`（端点名）、`packages/api/remotes/src/remote-events.ts:20-27`
+（`approval/request` 是 `waterfall`）、`packages/api/gateway/src/client/remote-events.ts:186-228`
+（答 `{kind:'next'|'result'|'rejected'}`）、`packages/interaction/user-approval/src/types.ts:32`
+（结果只有 `allowed-once` / `rejected` / `cancelled` / `unavailable`）。
+
+三条实测/源码结论：
+
+1. **`$events` 只有一段**，而业务方法都是 `ns/name`。我们最初的 `valid_method` 只认「恰好两段」，
+   于是客户端在 `open` 之前就报「不是一个合法的 Remote 方法名」—— 真正的原因（端点本身）反而看不到。
+   现在只对 `$` 开头的单段端点放行。
+2. **不认识的 waterfall 必须回 `next`**：那是「我不接，交回 Host 链」。不回等于把整条链短路。
+3. **`cancel` 不是错误**：它表示那条请求（这一轮被取消）不需要回答了。
+
+`approval: ask` 不等于「每次写文件都问」：DSH 的 `ask` 只在**有人发起审批请求**时生效
+（沙箱提权、hook 的 `permissionDecision: ask` 等）；普通工作区内的读写不会先问。
+Arc Deck 的 `confirm` 档因此是「内核问的时候，TUI 真的能答」，而不是一个逐工具确认的开关。
+
 ## 八、离线测试曾经挂住的原因（已修）
 
 并行跑全套时 mux 的两条测试偶尔挂 60 秒以上、单跑不复现。根因两处：
@@ -101,5 +131,7 @@ live:  step/start → system/message → user/message(kind=user) → user/messag
 
 ## 九、没做的
 
-- 审批（`confirm`）：数据与应答方法未接；交互内核遇到 `confirm` 拒绝启动，不悄悄当成 `workspace`。
-- `session/control` 的实时 projection（用量、上下文压力的实时值）；子 agent 会话的打开；带附件的一元响应（multipart，明确报不支持）；`steer` 模式。
+- `session/control` 的实时 projection（用量、上下文压力的实时值）；子 agent 会话的**打开**
+  （地址形状已在 P13 记录，TUI 还没有入口）；带附件的一元响应（multipart，明确报不支持）；`steer` 模式。
+- `session/search` 只在 TUI 接了 `/search`；**没有对着真内核真跑过一次全文检索**（补丁行与解析有证据，
+  首次打开索引要走 `node:sqlite`，本机只验到内核接受这一行）。

@@ -84,6 +84,16 @@ headless。现有子命令仍走原路径。
 
 ### Windows 键位的明确差异
 
+> **2026-10-20 更正：这条已经改了。** 用户原话是「哪个神人会用 F6 发送」—— M4a 为了躲开
+> 粘贴问题而把发送键改成 F6，代价是没人找得到发送键。现在 **Enter 发送**（与 §7.4、
+> OpenCode 一致），Shift+Enter / Ctrl+J 换行；粘贴在 Windows 上仍然是**一串按键**，
+> 所以运行循环把同一次 poll 里排队的按键整批交给 `App::input_batch`：一批里**按下**的键多于一个
+> 时按粘贴处理，其中的 Enter 插入换行而不是提交（Release 不算：Windows 上每个键是 Press + Release
+> 两条，按事件条数判的话一次快速的 Enter 就会被当成粘贴 —— 2026-10-20 第八轮修掉）。F6 只剩兼容别名，不出现在任何提示里。
+> 代价：人手快到一个批里同时出现字符与 Enter 时会被当成粘贴（再按一次即可）。
+> 证据：`enter_sends_and_shift_enter_or_ctrl_j_inserts_a_newline`、
+> `a_pasted_batch_inserts_newlines_instead_of_submitting`。
+
 伪终端实测发现：Crossterm 0.29 的 Windows 原生输入会把多行粘贴拆成普通按键，
 不能靠启用 `EnableBracketedPaste` 就宣称收到 `Event::Paste`。第一次试验中，粘贴的
 换行确实把两行变成了两次请求。
