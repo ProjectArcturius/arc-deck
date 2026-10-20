@@ -28,6 +28,8 @@ pub const FIXTURE_COMMAND_ENV: &str = "ARC_DECK_FIXTURE_COMMAND";
 pub enum Scenario {
     /// 正常收敛：一轮、有权威正文、有一致的工具记录、`turn/end completed`。
     Success,
+    /// 有正文与 completed，但响应 shutdown 后以非零退出（真实 libuv 崩溃的形状）。
+    CrashAfterResult,
     /// 内核报错结束。
     Failure,
     /// 需要主控介入。
@@ -58,6 +60,7 @@ pub enum Scenario {
 impl Scenario {
     pub const ALL: &'static [&'static str] = &[
         "success",
+        "crash-after-result",
         "failure",
         "blocked",
         "eof",
@@ -74,6 +77,7 @@ impl Scenario {
     pub fn parse(raw: &str) -> Option<Self> {
         Some(match raw {
             "success" => Scenario::Success,
+            "crash-after-result" => Scenario::CrashAfterResult,
             "failure" => Scenario::Failure,
             "blocked" => Scenario::Blocked,
             "eof" => Scenario::Eof,
@@ -92,6 +96,7 @@ impl Scenario {
     pub const fn as_str(self) -> &'static str {
         match self {
             Scenario::Success => "success",
+            Scenario::CrashAfterResult => "crash-after-result",
             Scenario::Failure => "failure",
             Scenario::Blocked => "blocked",
             Scenario::Eof => "eof",
@@ -179,6 +184,9 @@ where
             }
             "shutdown" => {
                 respond(&writer, id, json!({})).await?;
+                if scenario == Scenario::CrashAfterResult {
+                    std::process::exit(17);
+                }
                 return Ok(());
             }
             _ => {
@@ -211,7 +219,7 @@ where
     let mut seq: u64 = 0;
 
     match scenario {
-        Scenario::Success => {
+        Scenario::Success | Scenario::CrashAfterResult => {
             send_event!(writer, seq, json!({"type":"turn/start","turn":1}));
             // 系统来源的一条不该进对话 —— 这条就是用来验证那件事的。
             send_event!(writer, seq, json!({"type":"user/message","turn":1,"source":{"kind":"system"},

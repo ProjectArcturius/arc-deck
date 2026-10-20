@@ -168,6 +168,18 @@ struct Run {
     stderr: String,
 }
 
+#[test]
+fn a_runtime_crash_after_the_answer_is_not_reported_as_completed() {
+    let case = Case::new("crash-after-result", json!([]), json!({}));
+    let run = case.run();
+    assert_ne!(run.code, 0, "正文完成后崩溃不能返回成功");
+    let result = run.result();
+    assert_eq!(result["status"], "failed", "{result}");
+    assert_eq!(result["runtime_exit_code"], 17);
+    assert!(result["summary"].as_str().unwrap().contains("离线完成"));
+    assert!(result["blockers"].as_array().unwrap().iter().any(|b| b["code"] == "RUNTIME_SHUTDOWN_FAILED"));
+}
+
 impl Run {
     fn result(&self) -> Value {
         self.events()

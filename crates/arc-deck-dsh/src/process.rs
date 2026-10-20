@@ -287,6 +287,18 @@ impl RuntimeProcess {
         self.child.id()
     }
 
+    /// SDK shutdown 回执早于 Node 的异步清理；给它自然退出的机会才能拿到真实退出码。
+    pub async fn wait_for_exit(&mut self, grace: Duration) -> std::io::Result<Option<std::process::ExitStatus>> {
+        match tokio::time::timeout(grace, self.child.wait()).await {
+            Ok(status) => status.map(Some),
+            Err(_) => Ok(None),
+        }
+    }
+
+    pub fn try_exit_status(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.child.try_wait()
+    }
+
     /// 结束进程树并**确认**退出。
     ///
     /// Windows 上用 `taskkill /T /F` 连子孙一起结束 —— 只 `kill` 父进程会留下

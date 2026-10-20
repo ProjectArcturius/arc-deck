@@ -11,6 +11,9 @@
 | `result.example.json` | `arc_deck_core::result::TaskResult` |
 | `event.example.jsonl` | `arc_deck_core::event::EventEnvelope` |
 
+1.0 增加可选的 `TaskResult.runtime_exit_code`：只有采集到运行时自然退出码时才出现；
+主动收进程树不填，避免把客户端终止信号冒充运行时自己的退出结论。
+
 `crates/arc-deck-core/tests/schema_contract.rs` 会把这些示例解析成对应类型再重新
 序列化，要求两者语义相等，并逐个钉住关键字段名。**改字段名、加必填字段、改枚举
 取值都会让那个测试失败**，失败信息直接指出是哪一个字段。

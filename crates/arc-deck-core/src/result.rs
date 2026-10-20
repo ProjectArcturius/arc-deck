@@ -145,6 +145,9 @@ pub struct TaskResult {
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_version: Option<String>,
+    /// 自然退出时才记录；主动收树的退出码不冒充运行时自己的结论。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changes: Vec<ChangeRecord>,
     /// Arc Deck 自己从 git 采集的提交（`<sha> <标题>`），相对启动配置的 `git_base`。
@@ -175,6 +178,7 @@ impl TaskResult {
             summary: summary.into(),
             session_id: None,
             runtime_version: None,
+            runtime_exit_code: None,
             changes: Vec::new(),
             commits: Vec::new(),
             verification: Vec::new(),

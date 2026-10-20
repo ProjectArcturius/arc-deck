@@ -621,7 +621,7 @@ async fn run_attempt(
             result.runtime_version = runtime_version.clone();
             result.policy = Some(prepared.plan.policy.clone());
             apply_call_failure(&mut result, "initialize", outcome);
-            let termination = shutdown_and_terminate(&transport, &mut process).await;
+            let termination = shutdown_and_terminate(&transport, &mut process, &prepared.config.runtime).await;
             let _ = append_stderr(&mut result, &stderr_tail, sink).await;
             return AttemptEnd::Early { result, termination };
         }
@@ -659,7 +659,7 @@ async fn run_attempt(
             result.runtime_version = runtime_version.clone();
             result.policy = Some(prepared.plan.policy.clone());
             apply_call_failure(&mut result, "session/prompt", outcome);
-            let termination = shutdown_and_terminate(&transport, &mut process).await;
+            let termination = shutdown_and_terminate(&transport, &mut process, &prepared.config.runtime).await;
             let _ = append_stderr(&mut result, &stderr_tail, sink).await;
             return AttemptEnd::Early { result, termination };
         }
@@ -746,7 +746,7 @@ async fn run_attempt(
         }
     };
 
-    let termination = shutdown_and_terminate(&transport, &mut process).await;
+    let termination = shutdown_and_terminate(&transport, &mut process, &prepared.config.runtime).await;
     let stderr_text = stderr_tail.lock().await.clone();
     if !stderr_text.trim().is_empty() {
         let _ = sink.diagnostic(
@@ -1308,25 +1308,57 @@ fn apply_call_failure(result: &mut TaskResult, stage: &str, outcome: CallOutcome
 async fn shutdown_and_terminate(
     transport: &Arc<Transport>,
     process: &mut RuntimeProcess,
+    runtime: &RuntimeSpec,
 ) -> ProcessTermination {
+    if let Ok(Some(status)) = process.try_exit_status() {
+        return ProcessTermination {
+            exited: true, detail: format!("运行时已自然退出（{status}）"),
+            abnormal: !status.success(), exit_code: status.code(),
+        };
+    }
+    // 2026-10-20 真内核 17 条负例里两次复现：Windows DSH 0.2.1-alpha.2 的
+    // shutdown 清理触发 libuv 关闭断言（0xc0000409）。结果与 wait 回执已收齐后
+    // 直接收进程树，绕过上游坏掉的清理路径；不改 DSH、不把崩溃说成正常退出。
+    if cfg!(windows) && matches!(runtime, RuntimeSpec::DshSdk { version, .. } if version == "0.2.1-alpha.2") {
+        let termination = process.terminate_tree(TERMINATE_GRACE).await;
+        return ProcessTermination {
+            exited: termination.exited,
+            detail: format!("Windows DSH 使用进程树收尾（绕过 SDK shutdown 的 libuv 崩溃）：{}", termination.detail),
+            abnormal: false, exit_code: None,
+        };
+    }
     // `shutdown` 是礼貌请求；对端不退，后面的结束才是实际手段。
-    let _ = transport
+    let shutdown = transport
         .call(method::SHUTDOWN, Value::Null, Duration::from_secs(5))
         .await;
+    if shutdown.is_ok()
+        && let Ok(Some(status)) = process.wait_for_exit(Duration::from_secs(2)).await
+    {
+        return ProcessTermination {
+            exited: true,
+            detail: format!("运行时自然退出（{status}）"),
+            abnormal: !status.success(),
+            exit_code: status.code(),
+        };
+    }
     let termination = process.terminate_tree(TERMINATE_GRACE).await;
     ProcessTermination {
         exited: termination.exited,
         detail: termination.detail,
+        abnormal: false,
+        exit_code: None,
     }
 }
 
 struct ProcessTermination {
     exited: bool,
     detail: String,
+    abnormal: bool,
+    exit_code: Option<i32>,
 }
 
 fn process_termination_note(exited: bool, detail: &str) -> ProcessTermination {
-    ProcessTermination { exited, detail: detail.to_string() }
+    ProcessTermination { exited, detail: detail.to_string(), abnormal: false, exit_code: None }
 }
 
 fn spawn_stderr_drain(stderr: ChildStderr, log_path: PathBuf) -> Arc<Mutex<String>> {
@@ -1541,8 +1573,17 @@ fn finish(
     termination: ProcessTermination,
     status: &mut StatusWriter,
 ) -> i32 {
+    result.runtime_exit_code = termination.exit_code;
+    if termination.abnormal {
+        // 2026-10-15 实测：DSH 写完结果后 libuv 以 0xc0000409 崩溃。
+        // 输出可保留，但不能把「正文完成」冒充「运行时正常退出」。
+        result.blocker("RUNTIME_SHUTDOWN_FAILED", termination.detail.clone());
+        if result.status == TaskStatus::Completed {
+            result.status = TaskStatus::Failed;
+        }
+    }
     let _ = sink.diagnostic(
-        if termination.exited { "info" } else { "warn" },
+        if termination.exited && !termination.abnormal { "info" } else { "warn" },
         Some("RUNTIME_TERMINATION"),
         &termination.detail,
     );

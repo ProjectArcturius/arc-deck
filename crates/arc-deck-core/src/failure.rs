@@ -33,6 +33,9 @@ const fn class(code: &'static str, retryable: bool) -> FailureClass {
 /// **优先用结构化字段**：真实会话里额度用尽是 `{code:"QUOTA", status:402}` ——
 /// 比猜 `Insufficient Balance` 那串英文硬得多。认不出才退回子串匹配。
 pub fn classify_with(status: Option<i64>, provider_code: Option<&str>, text: &str) -> FailureClass {
+    if disk_full(text) || provider_code.is_some_and(disk_full) {
+        return class("HOST_DISK_FULL", false);
+    }
     if let Some(code) = provider_code {
         let c = code.to_ascii_lowercase();
         if c.contains("quota") || c.contains("balance") || c.contains("insufficient") {
@@ -73,6 +76,10 @@ pub fn classify_with(status: Option<i64>, provider_code: Option<&str>, text: &st
 /// 免得把 `1429` 或 `4290` 认成状态码。顺序按「越具体越先」（额度先于限流：
 /// 一条 `429 insufficient_quota` 是额度用尽，重派不会好）。
 pub fn classify_model_failure(text: &str) -> FailureClass {
+    // w2-remote-transport 的真失败是 ENOSPC，误归 MODEL_FAILURE 会让调度者重烧配额。
+    if disk_full(text) {
+        return class("HOST_DISK_FULL", false);
+    }
     let lower = text.to_ascii_lowercase();
     let has = |needles: &[&str]| needles.iter().any(|n| lower.contains(n));
 
@@ -119,6 +126,12 @@ pub fn classify_model_failure(text: &str) -> FailureClass {
     class("MODEL_FAILURE", false)
 }
 
+fn disk_full(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    ["enospc", "no space left on device", "disk full", "not enough space on the disk", "磁盘空间不足", "磁盘已满"]
+        .iter().any(|needle| lower.contains(needle))
+}
+
 /// 一个原因码能不能靠重派解决。`status.json` 的 `last_error.retryable` 由它填。
 ///
 /// 与 [`classify_model_failure`] 分开，是因为非模型侧的失败（卡死、验收、协议）
@@ -158,6 +171,16 @@ fn has_status(text: &str, code: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_full_host_disk_is_not_a_model_or_network_failure() {
+        for text in ["ENOSPC: write", "No space left on device", "There is not enough space on the disk", "磁盘空间不足"] {
+            assert_eq!(classify_model_failure(text), class("HOST_DISK_FULL", false));
+            assert_eq!(classify_with(Some(503), Some("NETWORK"), text), class("HOST_DISK_FULL", false));
+        }
+        assert_eq!(classify_with(None, Some("ENOSPC"), "write failed"), class("HOST_DISK_FULL", false));
+        assert!(!retryable("HOST_DISK_FULL"));
+    }
 
     #[test]
     fn model_route_failure_is_not_retryable() {
