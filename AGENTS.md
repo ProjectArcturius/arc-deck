@@ -12,9 +12,10 @@ TUI 派工计划与状态（**队列 2026-10-14 起暂停**）：[docs/M4_PLAN.m
 GUI 怎么热插拔地研发与发布（Windows + Linux）：[docs/GUI_PLUGGABLE.md](docs/GUI_PLUGGABLE.md)。用 arcdeck 工人替代 OpenCode 工人的复盘：[docs/ARCDECK_WORKERS_REVIEW_2026-10-14.md](docs/ARCDECK_WORKERS_REVIEW_2026-10-14.md)。
 
 - **2026-10-14 补记**：用户随后要求用 arcdeck 工人把 TUI 做到日常可用，W1（Markdown / 主题 / 模型对话框）与 M3 第一段已合入；同日暂停派工，下一步重心转 GUI，剩余 TUI 队列可由替班按手册继续。**本机 C 盘已满：worktree、TEMP、构建输出都在 D 盘**（见 tasks/m4/README.md）。
-- **当前焦点只有一件事：Rust 后端的 headless 在 Ether 上可用**（PRODUCT_PLAN M2a–M2c）。TUI 排在其后（M4）；两个桌面 GUI 冻结。
+- **当前焦点只有一件事：Rust 后端的 headless 在 Ether 上可用**（PRODUCT_PLAN M2a–M2c）。TUI 主流程已可用（M4 只差 §7.5 的人工视觉对照）；两个桌面 GUI 冻结。
 - 一个可执行文件 `arcdeck`：工作目录下无参数运行进 TUI，带子命令进 headless。headless 的主用法是 Ether 的工人任务书；调度者靠 `arcdeck status` 一行 + 退出码判断「完成 / 在跑 / 卡死 / 出错」，不读长日志。健康由读者按时间戳计算，进程死了不能自称健康。
 - **底层只用 DSH 一个内核**：DS 走 `deepseek-official`（Messages 协议，DS 优势只在官方路由上成立），非 DS 走 DSH 的 pi-ai 路由。不再造 OpenCode/Claude 的执行内核；它们只作 TUI、Agent、工具定义的设计参考。「非 DS 用 DSH 不劣于 OpenCode」未测，是 M2d 的对照门。
+- **仓库主许可证是 Apache-2.0**（根 `LICENSE`，第三方归属见 `NOTICE`）。**TUI 的视觉与交互基线来自 OpenCode**（v1.19.0；主题资产取自 v2.0.27），不是原创视觉。直接移植或逐字取用的代码、主题必须保留 MIT notice（`crates/arc-deck-tui/LICENSE-OpenCode`），并在文件头标明来源。OpenCode 只是参考与移植来源，不是第二执行内核。
 - 桌面版两块：Windows = C# + WinUI 2（不擅自换 WinUI 3 或 WebView），Linux = Rust + Kanesumi。都在后端本地服务（M5）之后经同一 IPC 接入。
 - 默认 Agent 是 Echo，具备完整工程角色、工具/权限、验证/交付纪律与用户提供的风格；Build/Plan 参考 OpenCode。提示词不能替代实际权限。
 - DSH 默认把会话日志随请求上传 DeepSeek（`session-log-deepseek`）。用户裁定前，Arc Deck 生成的 profile 关闭它；不吃 DSH 默认值。
@@ -22,7 +23,7 @@ GUI 怎么热插拔地研发与发布（Windows + Linux）：[docs/GUI_PLUGGABLE
 - workers 缺省路由 `opencode-go/deepseek-v4.1-flash`（用户 2026-10-14 指定）。密钥在 `%APPDATA%\arcdeck\auth.json`，**不得写进仓库或任务状态目录**。
 - 跑会消耗模型配额的测试前先问用户；用户已允许「少量用 4.1 flash 测试」。
 - `/REFS/` 只作本地参考，不入 Git，也不能成为生产构建依赖。复制 OpenCode 的实质部分保留 MIT notice；Claude Code 根许可证为商业条款，不默认复制源码或提示词。
-- 旧代码与数据保留。K1–K9 只约束既有 `kanesumi/`，U1–U17 继续约束既有 `uwp/`；旧协议的事件词汇、版本结论与实测只对旧组合成立，新 DSH 必须重新核对。
+- 旧代码与数据保留。K1–K9 只约束既有 `kanesumi/`，U1–U18 继续约束既有 `uwp/`；旧协议的事件词汇、版本结论与实测只对旧组合成立，新 DSH 必须重新核对。
 
 下文保留旧实现约束与历史实测；其中「两条 GUI」「C# 协议层作为新宿主引用」及原分线安排不再支配新开发。若历史路线与当前产品方向冲突，以 PRODUCT_PLAN 为准；非冲突的工程/证据纪律继续执行。
 

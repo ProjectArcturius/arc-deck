@@ -17,7 +17,8 @@ git -C <REFS>/opencode show v2.0.27:packages/tui/src/theme/assets/<name>.json
 
 ## 许可
 
-MIT，Copyright (c) 2025 opencode。完整notice 见 `crates/arc-deck-tui/LICENSE-OpenCode`。
+这些主题按上游 **MIT** 使用，Copyright (c) 2025 opencode；完整 notice 见 `crates/arc-deck-tui/LICENSE-OpenCode`。
+Arc Deck 仓库本身以 Apache-2.0 发布（根 `LICENSE`），但这不改变这些资产的上游 MIT 许可与署名要求。
 
 ## 加新主题
 

@@ -1,0 +1,15 @@
+Arc Deck
+Copyright 2026 Takahashi Rinta
+
+This product includes software derived from OpenCode.
+
+OpenCode
+  Copyright (c) 2025 opencode
+  Licensed under the MIT License.
+  Upstream: https://github.com/anomalyco/opencode
+  Baseline: v1.19.0 (TUI); theme assets: v2.0.27
+  The complete MIT notice is reproduced in
+  crates/arc-deck-tui/LICENSE-OpenCode.
+
+OpenCode is the visual and interaction baseline for the TUI and the source of
+ported code and theme assets. It is not the execution kernel; execution uses DSH.

@@ -6,9 +6,10 @@
 
 ## 0. 2026-10-14 定型结论
 
-**本轮推进补记**：用户要求审查核心/headless 完备性后开始 TUI。审计及 M4a 第一段见
+**本轮推进补记（2026-10-14）**：用户要求审查核心/headless 完备性后开始 TUI。审计及 M4a 第一段见
 [CORE_HEADLESS_AUDIT_2026-10-14.md](CORE_HEADLESS_AUDIT_2026-10-14.md)。无参数入口已替换为
-独立运行 TUI；这不代表 M2c/M2d/M3 或完整 M4 已通过。Remote 会话和执行 guard 仍待接通。
+独立运行 TUI；这一段当时不代表 M2c/M2d/M3 或完整 M4 已通过，Remote 会话和执行 guard 当时仍待接通。
+后续进展以下一条 2026-10-20 补记为准。
 
 **2026-10-20 补记**：Remote 会话、执行 guard、TUI 的工具视图 / 模式与 confirm 审批 / 时间线与内容检索 /
 收尾都已接通并留下证据（[M4_PLAN](M4_PLAN.md) 第五、六轮）。**M4 只差 §7.5 的人工视觉对照**；
@@ -18,7 +19,7 @@ M2c 的 Ether 真派工、M2d 的对照门、M5 与 M6 仍未做。
 
 | 编号 | 决定 | 依据 |
 |---|---|---|
-| D1 | **当前焦点只有 Rust 后端，且其中只有 headless 可用这一件事。** 目的是尽快接进 Ether 的工人流程；TUI 排在 headless 之后，两个桌面 GUI 不在焦点内 | 用户 2026-10-14 |
+| D1 | **当前焦点只有 Rust 后端；其中 headless 是首要可用目标。** 目的是尽快接进 Ether 的工人流程；TUI 排在 headless 之后，两个桌面 GUI 不在焦点内。**2026-10-20 补记**：TUI 主流程已可用，只差人工视觉对照；焦点仍是 headless | 用户 2026-10-14；2026-10-20 补记 |
 | D2 | **一个可执行文件 `arcdeck`**：在工作目录直接运行 `arcdeck`（无参数）进入 TUI；带子命令进入 headless（§6.0）。TUI 落地前，无参数运行给出明确提示并退出，不假装有界面。**headless 本身分两条**：不给任务书、不带工人参数时是**一般模式**（与 `opencode run "…"` 同类，stdout 是给人看的回答）；带了工人那套参数才是**工人模式**。Arc Deck 不是一个工地，只是一个带工人优化方案的 agent | 用户 2026-10-14 |
 | D3 | **headless 的主用法是 Ether 的「工人任务书」**：调度者派一件任务、之后只靠 shell 上的一行状态判断「做完 / 在跑 / 卡死 / 出错」，不读长日志（§6.5–6.6） | 用户 2026-10-14；Ether `docs/DISPATCHER.md`、`tools/dispatch/dsh-runner.sh` |
 | D4 | **底层只用 DSH 一个内核**，非 DS 模型走 DSH 的 pi-ai 路由。调查结论：DSH 的优势一半 DS 专属（协议与缓存）、一半 provider 中立（loop 工程），后者对非 DS 适用；按用户规则「若有则全部 DSH」。OpenCode / Claude Code 只作 TUI、Agent、工具定义的设计参考 | [DSH_FINDINGS.md](DSH_FINDINGS.md) |
@@ -26,6 +27,7 @@ M2c 的 Ether 真派工、M2d 的对照门、M5 与 M6 仍未做。
 | D6 | **桌面版分两块且都冻结**：Windows = C# + WinUI 2，Linux = Rust + Kanesumi。都等后端的本地服务接口（M5）稳定后再接，不并行开发 | 用户 2026-10-14 |
 | D7 | **headless 的控制面是任务状态目录里的文件**（状态、事件、结果、取消），不是常驻服务。ssh 过去 `arcdeck status` 就能读，Windows 与 Arch 一样 | 本文 §6.5 |
 | D8 | 「非 DS 用 DSH 不劣于 OpenCode」与「完整工具集 vs RL 两工具组合」都**未测**，列为 M2d 对照门；没有数据前不建第二个内核 | DSH_FINDINGS §5 |
+| D9 | **仓库主许可证采用 Apache-2.0**（根 `LICENSE`，第三方归属见 `NOTICE`）。TUI 从 OpenCode（MIT）移植的部分继续保留原 MIT notice（`crates/arc-deck-tui/LICENSE-OpenCode`），不因主许可证改变 | 用户 2026-10-20 |
 
 ## 1. 文档状态与需求基线
 
@@ -278,7 +280,7 @@ Build/Plan 借鉴的是角色与行为，不将 OpenCode 的 provider、工具�
 `opencode` / `opencode run` 分法：**无参数是交互，有子命令是 headless**。
 
 ```text
-arcdeck                                   当前目录进 TUI（M4a：独立运行/历史/取消；非交互终端退出 64）
+arcdeck                                   当前目录进 TUI（Remote 交互会话；非交互终端退出 64）
 arcdeck run <任务书> [选项]                前台执行一件任务；stdout 是 JSONL 协议，退出码 = 终态（§6.3）
 arcdeck run "<要对模型说的话>" [选项]       一般模式：不给任务书、不带工人参数；stdout 是给人看的回答
 arcdeck run <任务书> --detach [选项]       分离执行：等到工人接住（写出状态）才返回；接不住就报出原因
@@ -632,9 +634,10 @@ Ether 侧的改动（新的派工脚本、DISPATCHER §三 的改写）在 Ether
 ## 7. TUI 视觉与交互需求
 
 **排期**：完整 M4 在 headless 可用（M2）与权限实装（M3）之后。本节规格保留不变。
-2026-10-14 用户要求开始 TUI，先落地 M4a 的独立运行/历史/取消入口；Plan/readonly/confirm
-与 Remote 会话仍待接通，不把第一段当作完整 M4。Windows 暂用 F6 发送、Enter 换行，
-原因与验证见 [本轮审计 §4–5](CORE_HEADLESS_AUDIT_2026-10-14.md)。
+2026-10-14 用户要求开始 TUI，先落地 M4a 的独立运行/历史/取消入口。
+**2026-10-20 补记**：Remote 会话、工具视图、Plan / confirm 审批与时间线 / 检索均已接通；
+发送键已改回 `Enter`（`F6` 只留兼容别名），`Shift+Enter` / `Ctrl+J` 换行。仍缺 §7.5 的人工视觉对照。
+当时的 F6 取舍与验证见 [本轮审计 §4–5](CORE_HEADLESS_AUDIT_2026-10-14.md)。
 
 ### 7.1 迁移目标与「v1」基线
 
@@ -773,7 +776,7 @@ DSH 协议里的 `reasoningEffort` 是上游字段名，映射在适配器里做
 | | Windows | Linux |
 |---|---|---|
 | 技术 | C# + WinUI 2（`uwp/`） | Rust + Kanesumi（`kanesumi/`） |
-| 约束 | U1–U17 | K1–K9 |
+| 约束 | U1–U18 | K1–K9 |
 | 接后端的方式 | 版本化本地 IPC | 同一个 IPC —— 即便 Kanesumi 也是 Rust、能直接链接 core，也走 IPC，保证会话、权限与完成判定只有后端一份 |
 | 先决验证 | 完整信任宿主（下文） | Wayland 外壳与 IME（Kanesumi 在 Ether 侧的进展决定） |
 

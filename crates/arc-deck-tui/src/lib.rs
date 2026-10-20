@@ -1,5 +1,6 @@
 //! Terminal presentation only. Execution, health and cancellation belong to the host.
-//! M4a uses independent headless runs; Remote conversations are a separate capability.
+//! Interactive conversations go through the Remote session layer; `/runs` still reads
+//! independent headless runs from the same state directory.
 
 mod app;
 mod autocomplete;
