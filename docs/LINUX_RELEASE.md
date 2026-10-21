@@ -9,7 +9,7 @@
 正式发布前确认 v1.0.0 指向这些修改所在的提交，不能用旧 main 的源码替代本轮源码包。
 
 ```bash
-gh release download v1.0.0 --repo ProjectArcturius/arc-deck --pattern '*source.tar.gz' --pattern '*aur.tar.gz' --pattern 'SHA256SUMS-source.txt'
+gh release download v1.0.0 --repo ProjectArcturius/saiku --pattern '*source.tar.gz' --pattern '*aur.tar.gz' --pattern 'SHA256SUMS-source.txt'
 sha256sum -c SHA256SUMS-source.txt
 tar xf arc-deck-1.0.0-source.tar.gz
 tar xf arc-deck-1.0.0-aur.tar.gz
@@ -27,7 +27,7 @@ makepkg --verifysource
 makepkg -s
 makepkg --printsrcinfo > .SRCINFO
 sudo pacman -U ./arc-deck-1.0.0-1-*.pkg.tar.zst
-arcdeck --version
+saiku --version
 ```
 
 recipe 带源码 SHA256，不使用 SKIP。`check()` 跑完整四 crate 离线测试（live 默认忽略），
@@ -41,7 +41,7 @@ recipe 带源码 SHA256，不使用 SKIP。`check()` 跑完整四 crate 离线�
 
 ```bash
 cd ../arc-deck-1.0.0
-arcdeck runtime install
+saiku runtime install
 cargo test --locked -p arc-deck-dsh --features test-runtime remote_live_cancel_tool_then_immediately_prompt -- --ignored --nocapture
 ```
 
@@ -58,15 +58,15 @@ Arch 的 glibc 可能比 Debian 新；**不能把 Arch 编出的 ELF 直接封�
 ```bash
 cd arc-deck-1.0.0
 mkdir -p target/dist
-docker build -f packaging/debian/Dockerfile -t arcdeck-deb:1.0.0 .
-docker run --rm -v "$PWD/target/dist:/out" arcdeck-deb:1.0.0
+docker build -f packaging/debian/Dockerfile -t saiku-deb:1.0.0 .
+docker run --rm -v "$PWD/target/dist:/out" saiku-deb:1.0.0
 dpkg-deb --info target/dist/arc-deck_1.0.0-1_amd64.deb
 dpkg-deb --contents target/dist/arc-deck_1.0.0-1_amd64.deb
 ```
 
 Dockerfile 中跑四 crate 测试，打包脚本用 `dpkg-shlibdeps` 从真实 ELF 推导依赖。
 再在干净 Debian/Ubuntu 容器里安装 deb（准备 Node.js >=24、npm、Git），检查
-`arcdeck --version`、`config init`、`runtime install`、headless；TUI 则在真终端中验收。
+`saiku --version`、`config init`、`runtime install`、headless；TUI 则在真终端中验收。
 `dpkg-deb --info` 成功不等于安装/运行已验证。
 
 ## 补传草稿 release
@@ -75,8 +75,8 @@ Dockerfile 中跑四 crate 测试，打包脚本用 `dpkg-shlibdeps` 从真实 E
 
 ```bash
 sha256sum arc-deck-1.0.0-1-x86_64.pkg.tar.zst arc-deck_1.0.0-1_amd64.deb > SHA256SUMS-linux.txt
-gh release upload v1.0.0 arc-deck-1.0.0-1-x86_64.pkg.tar.zst arc-deck_1.0.0-1_amd64.deb SHA256SUMS-linux.txt --repo ProjectArcturius/arc-deck
-gh release view v1.0.0 --repo ProjectArcturius/arc-deck
+gh release upload v1.0.0 arc-deck-1.0.0-1-x86_64.pkg.tar.zst arc-deck_1.0.0-1_amd64.deb SHA256SUMS-linux.txt --repo ProjectArcturius/saiku
+gh release view v1.0.0 --repo ProjectArcturius/saiku
 ```
 
 Linux 实测结果补进 release notes，再由用户决定发布。参考：

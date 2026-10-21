@@ -1,4 +1,7 @@
-# Arc Deck
+# Saiku
+
+> 原名 Arc Deck，2026-10-21 改名。命令行与产品叫 **Saiku**（`saiku`），桌面 GUI 统称 **Saiku Deck**。
+> 旧版的 `arcdeck` 用户目录在首次运行 `saiku` 时自动迁移；环境变量 `ARCDECK_*` 改为 `SAIKU_*`，不再读旧名。
 
 **1.0.0 发布准备**：[安装](docs/INSTALL.md) · [修复与验收记录](docs/releases/v1.0.0.md) ·
 [Arch 上构建 AUR/deb 与补传 Linux 资产](docs/LINUX_RELEASE.md)。本版范围是 TUI + headless；Linux 本轮尚未构建，桌面 GUI 继续冻结。
@@ -7,7 +10,7 @@
 
 | 部分 | 编码方向 | 使用者 | 状态 |
 |---|---|---|---|
-| Rust 后端：`arcdeck` | 无参数进 TUI（视觉与交互基线来自 OpenCode v1.19.0，MIT），带子命令进 headless | 终端用户，以及 Claude 等外部主控派发的 workers（首先是 Ether） | **headless 仍是焦点；TUI 主流程已完成，等待人工视觉对照** |
+| Rust 后端：`saiku` | 无参数进 TUI（视觉与交互基线来自 OpenCode v1.19.0，MIT），带子命令进 headless | 终端用户，以及 Claude 等外部主控派发的 workers（首先是 Ether） | **headless 仍是焦点；TUI 主流程已完成，等待人工视觉对照** |
 | 桌面 GUI | Windows：C# + WinUI 2；Linux：Rust + Kanesumi；都经本地 IPC 接入后端 | 桌面用户 | 冻结 |
 
 执行内核只用 DSH：DeepSeek 走官方路由，非 DS 模型走 DSH 的 pi-ai 路由（调查见 [docs/DSH_FINDINGS.md](docs/DSH_FINDINGS.md)）。
@@ -18,7 +21,7 @@
 
 - `crates/arc-deck-core/` 产品模型（任务/配置/结果/事件/Agent/授权）
 - `crates/arc-deck-dsh/` DSH 适配（行式 JSON-RPC、事件投影、假 SDK 对端）
-- `crates/arc-deck-cli/` `arcdeck` 二进制：headless 命令面（run / status / wait / report / usage / logs / cancel / ls / auth / runtime / config）
+- `crates/arc-deck-cli/` `saiku` 二进制：headless 命令面（run / status / wait / report / usage / logs / cancel / ls / auth / runtime / config）
 - `crates/arc-deck-tui/` 无参数终端入口：Remote 交互会话（多轮、流式、取消、跨进程恢复）、命令系统、工具视图（diff / 完整输出）、主题与模型对话框；视觉与交互基线是 OpenCode v1.19.0（MIT，见「来源与许可」）
 - `agents/`、`prompts/` 默认 Agent 与提示词；`schemas/` 契约示例
 
@@ -28,15 +31,15 @@ cargo test -p arc-deck-core -p arc-deck-dsh -p arc-deck-cli -p arc-deck-tui \
     --features arc-deck-cli/test-runtime --offline
 
 # 端到端离线验收：不发任何模型请求，退出码 0 表示 completed
-cargo run -p arc-deck-cli --bin arcdeck --features test-runtime -- worker run \
+cargo run -p arc-deck-cli --bin saiku --features test-runtime -- worker run \
     --config tests/fixtures/worker-offline.json \
     --task tests/fixtures/worker-task.json --format jsonl --result result.json
 ```
 
-- **headless 已可用**（Windows 与 Arch 均实测）：`arcdeck runtime install` → `arcdeck run <任务书> --by <谁> --accept "<验收命令>" --detach` → `arcdeck status` / `report`。用法见 `arcdeck --help` 与 [PRODUCT_PLAN §10.2b](docs/PRODUCT_PLAN.md)；Ether 接入示例在 `examples/ether/`。
+- **headless 已可用**（Windows 与 Arch 均实测）：`saiku runtime install` → `saiku run <任务书> --by <谁> --accept "<验收命令>" --detach` → `saiku status` / `report`。用法见 `saiku --help` 与 [PRODUCT_PLAN §10.2b](docs/PRODUCT_PLAN.md)；Ether 接入示例在 `examples/ether/`。
 - **TUI 主流程已完成**：Remote 多轮与流式、Esc 取消、跨进程恢复、命令系统、`/sessions` `/runs` `/search` `/subagents` `/timeline`、工具视图（`/diff` `/output`）、Plan / confirm 审批、输入历史与 stash、OSC 52 复制。离线 **227** 个 TUI 测试，真终端探针有证据（[docs/M4_PLAN.md](docs/M4_PLAN.md)）。**唯一未完成的是 §7.5 与 OpenCode 的同终端视觉对照**（要人看）。
 - **授权落到执行层（M3）**：只读 / Plan 由 DSH 的 OS 沙箱强制，关 shell 即摘工具，表达不了的组合拒绝启动；`confirm` 经 `$events` 审批通道（[docs/M3_GUARD.md](docs/M3_GUARD.md)）。
-- **TUI 入口**：`cargo run -p arc-deck-cli --bin arcdeck --offline` 无参数进入（release 二进制直接 `arcdeck`）。`Enter` 发送，`Shift+Enter` / `Ctrl+J` 换行；Windows 的原生多行粘贴按同一次输入批处理识别，不再需要 F6；`Ctrl+P` 查看命令。若启动环境带 `NO_COLOR=1`，通知行会明确说明颜色被关闭。
+- **TUI 入口**：`cargo run -p arc-deck-cli --bin saiku --offline` 无参数进入（release 二进制直接 `saiku`）。`Enter` 发送，`Shift+Enter` / `Ctrl+J` 换行；Windows 的原生多行粘贴按同一次输入批处理识别，不再需要 F6；`Ctrl+P` 查看命令。若启动环境带 `NO_COLOR=1`，通知行会明确说明颜色被关闭。
 - 尚未实现 / 未验证：macOS、真实运行时卡死续跑、Arch TUI 真终端、GUI 接线、M2d 对照门；§7.5 TUI 视觉对照待人工。core 算出的路径 / 提交限制尚未完整落实到真实工具执行，不以提示词或策略留档宣称隔离。
 - `REFS/` 是被 Git 忽略的本地参考；构建和发布不能依赖它。OpenCode 为 MIT；TUI 中直接移植或逐字取用的部分保留 MIT notice（`crates/arc-deck-tui/LICENSE-OpenCode`）。Claude Code 参考仓的根许可证不是 MIT，不默认复制其实现或提示词。
 - 现有 `kanesumi/`、`uwp/` 与 C# `arc-deck-dsh/` 保留，不进行删除或真实数据迁移。
@@ -45,13 +48,13 @@ cargo run -p arc-deck-cli --bin arcdeck --features test-runtime -- worker run \
 
 - **TUI 来源于 OpenCode。** `crates/arc-deck-tui/` 的视觉与交互基线是 OpenCode `v1.19.0`（TUI），主题资产取自 `v2.0.27`；颜色 / 主题解析、模型目录、补全行为等直接移植或逐字取用的部分，在文件头标注了来源。OpenCode 以 **MIT** 发布，Copyright (c) 2025 opencode；完整 notice 见 [`crates/arc-deck-tui/LICENSE-OpenCode`](crates/arc-deck-tui/LICENSE-OpenCode)，主题清单与上游路径见 [`crates/arc-deck-tui/themes/README.md`](crates/arc-deck-tui/themes/README.md)。
 - OpenCode 只作为 TUI 与 Agent 行为的设计与移植来源；执行内核仍然只有 DSH。
-- Arc Deck 以 **Apache-2.0** 发布，完整文本见根 [`LICENSE`](LICENSE)，第三方归属见 [`NOTICE`](NOTICE)；`Cargo.toml` 的 `workspace.package.license` 同步为 `Apache-2.0`。TUI 中来自 OpenCode 的 MIT 部分继续按 MIT 保留 notice，不因仓库主许可证改变。
+- Saiku 以 **Apache-2.0** 发布，完整文本见根 [`LICENSE`](LICENSE)，第三方归属见 [`NOTICE`](NOTICE)；`Cargo.toml` 的 `workspace.package.license` 同步为 `Apache-2.0`。TUI 中来自 OpenCode 的 MIT 部分继续按 MIT 保留 notice，不因仓库主许可证改变。
 
 ## 历史实现与验收记录
 
 以下内容记录新方向确立前的两条 GUI 路线、构建入口和既往测量，不再作为新增功能的路线选择。相关测量没有在本轮复跑；当前需求、优先级和未验证项以 [PRODUCT_PLAN.md](docs/PRODUCT_PLAN.md) 为准。
 
-此前 Arc Deck 是 DeepSeek Harness 的原生桌面客户端，两个实现并列：
+此前 Saiku Deck 是 DeepSeek Harness 的原生桌面客户端，两个实现并列：
 
 | | `kanesumi/` | `uwp/` |
 |---|---|---|
@@ -104,7 +107,7 @@ cargo run -p arc-deck-cli --bin arcdeck --features test-runtime -- worker run \
 其中 1,462 MB 是 harness 本体，与外壳无关；**可省的是那 ≈ 1.0 GB Chromium，以及它
 累计 1,937 秒的 CPU 时间**。
 
-Arc Deck 走第三条路：**没有 WebView**。
+Saiku Deck 走第三条路：**没有 WebView**。
 
 ## 设计基础
 
@@ -149,7 +152,7 @@ kanesumi-controls = { git = "...", rev = "<sha>", subdirectory = "kanesumi-contr
 > *"No protocol version: client and host release bound together; introduce one
 > when an independently released client appears."*
 
-**Arc Deck 就是那个「独立发布的客户端」**，而那个字段尚不存在。因此：
+**Saiku Deck 就是那个「独立发布的客户端」**，而那个字段尚不存在。因此：
 
 - `dsh` 版本必须**钉死**，升级是刻意的工程动作，不是自动跟随
 - 协议面：`POST /api/<namespace>/<method>` + 单条 WebSocket `GET /api/remote.mux`
@@ -161,7 +164,7 @@ arc-deck/
 ├── crates/
 │   ├── arc-deck-core/             产品模型（任务/配置/结果/事件/Agent/授权）
 │   ├── arc-deck-dsh/              DSH 适配（行式 JSON-RPC、事件投影、Remote 会话）
-│   ├── arc-deck-cli/              arcdeck 二进制：headless 命令 + 无参数 TUI 入口
+│   ├── arc-deck-cli/              saiku 二进制：headless 命令 + 无参数 TUI 入口
 │   └── arc-deck-tui/              终端界面（视觉/交互基线来自 OpenCode，上游 MIT）
 ├── kanesumi/                      早期自绘 GUI（已暂停新增功能）
 │   ├── crates/arc-deck-shell/
@@ -192,7 +195,7 @@ arc-deck/
 │   ├── STATE_2026-10-14.md        交接快照：此刻的状态、仓外的东西、换机器步骤
 │   ├── M4_PLAN.md                 TUI 计划、状态与真终端证据
 │   ├── M3_GUARD.md                授权策略 → DSH 执行层的映射表、缺口与负例清单
-│   ├── ARCDECK_WORKERS_REVIEW_2026-10-14.md  用 arcdeck 工人替代 OpenCode 工人：实测、成本、对 Ether 的意义
+│   ├── ARCDECK_WORKERS_REVIEW_2026-10-14.md  用 saiku 工人替代 OpenCode 工人：实测、成本、对 Ether 的意义
 │   ├── CORE_HEADLESS_AUDIT_2026-10-14.md     core / headless 完备性审计与 M4a（历史，含 10-20 更正）
 │   ├── DSH_FINDINGS.md            DSH 对非 DS 模型是否适用
 │   ├── PERSONA_FINDINGS.md        人格与风格怎么装（Claude Code 的做法）
@@ -215,7 +218,7 @@ arc-deck/
 cargo test -p arc-deck-core -p arc-deck-dsh -p arc-deck-cli -p arc-deck-tui \
     --features arc-deck-cli/test-runtime --offline
 
-cargo run -p arc-deck-cli --bin arcdeck --offline   # 无参数进 TUI
+cargo run -p arc-deck-cli --bin saiku --offline   # 无参数进 TUI
 ```
 
 早期自绘 GUI（`kanesumi/`，已暂停新增功能）：

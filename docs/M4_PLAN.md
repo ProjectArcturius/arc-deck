@@ -1,6 +1,6 @@
 # M4 · TUI 完整落地的派工计划
 
-日期：2026-10-14 起。用户裁定：TUI 做到 PRODUCT_PLAN §7 **完全完成**，用 `arcdeck` headless 派工人干
+日期：2026-10-14 起。用户裁定：TUI 做到 PRODUCT_PLAN §7 **完全完成**，用 `saiku` headless 派工人干
 （`opencode-go/deepseek-v4.1-flash` · `effort high` · `--permission full --worktree dsh/<id>` · 每件都带 `--accept`）。
 Claude 是派工者：写任务书、复跑验收、逐行审阅、在工人分支上提交后挑进 main。工人不提交（`allow_commit: false`）。
 
@@ -100,7 +100,7 @@ PRODUCT_PLAN §7.3 的八个组件、§7.4 的键位与命令、§7.5 的视觉�
 - **TUI 视觉照 OpenCode 抄（2026-10-20 用户裁定）**：代码块按主题 `syntax.*` 着色
   （关键字 / 字符串 / 注释 / 数字 / 类型 / 函数 / 运算符，块注释与 Python 三引号跨行），
   用户消息改成 OpenCode v1 那种「左边竖线 + 抬高背景」的块，去掉自己发明的「你」/
-  「Arc Deck」角色标签，工具行的名字用 accent。视觉语言只在 GUI 上做，TUI 不搞原创。- **发送键改回 Enter（2026-10-20 用户反馈）**：M4a 为了躲开 Windows 粘贴拆键，把发送键改成了 F6，
+  「Saiku」角色标签，工具行的名字用 accent。视觉语言只在 GUI 上做，TUI 不搞原创。- **发送键改回 Enter（2026-10-20 用户反馈）**：M4a 为了躲开 Windows 粘贴拆键，把发送键改成了 F6，
   代价是「没人找得到发送键」。现在 Enter 发送、Shift+Enter / Ctrl+J 换行；Windows 的粘贴靠
   「同一次 poll 里的整批按键」识别（`App::input_batch`），批里的 Enter 当换行。F6 只留兼容别名。
 - **正文缓存的键必须含「内容版本」**：运行记录的更新（`Update::Detail`/`Runs`）原先不加版本号，
@@ -125,7 +125,7 @@ PRODUCT_PLAN §7.3 的八个组件、§7.4 的键位与命令、§7.5 的视觉�
 |---|---|---|---|
 | 页脚 | 两行：常驻通知 + 八个键位的说明书 | **一行**：左边「现在怎么了」（通知 / `⋯ Esc 中断` / 目录:分支），右边 `shift+tab agents  ctrl+p 命令` | prompt footer |
 | 通知 | 永不消失；启动时就有一句「内核启动中；可以先输入；/help…」 | 没事不说；普通通知 8 秒收起，**故障与 `错误：` 不收** | toast / footer status |
-| 会话页标题栏 | ` Arc Deck  /  标题` 一整行 | 去掉；标题在信息栏顶上与终端窗口标题里 | 无标题栏 |
+| 会话页标题栏 | ` Saiku  /  标题` 一整行 | 去掉；标题在信息栏顶上与终端窗口标题里 | 无标题栏 |
 | 工具行 | 两行一个，行尾挂「· 完成」「（/tools 展开 diff，/diff 看全部）」 | 一行一个、次要色、按类别的图标（`→ ✱ ← $ ◉`）；失败才变红；连续 ≥2 个只读查看折成「→ 浏览了 N 个文件、M 次查找」 | `InlineTool` / exploration 分组 |
 | 思考 | `思考 · 1234 字（/tools 展开）` | `+ 思考：<标题>`（`**标题**` 开头时取标题） | `ReasoningPart` |
 | 一轮结束 | 无 / 「模型失败：…」 | `▣ Echo · 模型 · 已取消`；失败另起一行 `错误：…` | `AssistantFooter` |
@@ -144,7 +144,7 @@ PRODUCT_PLAN §7.3 的八个组件、§7.4 的键位与命令、§7.5 的视觉�
 | 子 agent 会话 | `/subagents`：列当前会话的子会话；子会话里第一行回父会话，且**只读**（发消息被挡、草稿保留）。服务按上一次列表给子会话配父地址 `{kind:'subagent',…,mode}`（`mode` 从 `projections.values.subagent` 读，P13），**协议不变** | `subagent_sessions_get_the_parent_address`、`subagent_sessions_open_from_the_parent_and_are_read_only`；真终端 `/subagents` 弹层起来（本机最近的会话没有子会话，显示「还没有派出子 agent」） |
 | 交互面 persona | `serve::interactive_persona`：个性化关 → 空串（一段都不注入）；开 → 与 headless 一般模式同一份 `compose_system_prompt`（工程规则 → Agent → 模式 → 风格） | `the_interactive_persona_follows_the_personalization_switch` |
 | stash | `<leader>s` / 命令面板：收起草稿；`/stash`：列出、Enter 取回；跟偏好一起落盘 | `a_draft_can_be_stashed_and_brought_back`；真终端三条全过 |
-| `session/search` 真查询 | — | ✅ `arcdeck serve --stdio` 对真内核检索 `OK`，回了本机会话的真实命中；真终端 `/search OK` 弹出「N 条命中」（零配额） |
+| `session/search` 真查询 | — | ✅ `saiku serve --stdio` 对真内核检索 `OK`，回了本机会话的真实命中；真终端 `/search OK` 弹出「N 条命中」（零配额） |
 
 ### 顺手抓到的真 bug
 
@@ -152,9 +152,9 @@ PRODUCT_PLAN §7.3 的八个组件、§7.4 的键位与命令、§7.5 的视觉�
   （`Effort | Permission | Rename`），后加的两条没进名单；单测直接调 `execute` 所以没抓到。
   现在看注册表的 `arg`。是 console-probe 对着真内核跑 `/search` 时发现的。
 - **模型 / provider 对话框里敲的字从来没画出来**（光标在动、字看不见）。对着预览发现。
-- **孤儿内核**：TUI 被硬杀（关终端窗口不跑 Drop）后 node 内核还活着；下一个 arcdeck 照规矩接管遗留锁，
+- **孤儿内核**：TUI 被硬杀（关终端窗口不跑 Drop）后 node 内核还活着；下一个 saiku 照规矩接管遗留锁，
   于是同一份 home 上**两个内核** —— P14 的形状。实测抓到一个 10:58 起、主人已死的内核。现在锁旁边另记
-  内核 pid（`arcdeck.kernel`，确认收掉才删），下一次拿锁时**核对命令行**（`--profile web` + 本 home 的 patch）
+  内核 pid（`saiku.kernel`，确认收掉才删），下一次拿锁时**核对命令行**（`--profile web` + 本 home 的 patch）
   再收树；对不上只删记录（pid 会复用）。Windows 的 `kill_tree_by_pid` 也改成真确认根进程退出，不再一律「未确认」。
   那个实测的孤儿就是被新二进制收掉的。
 - **段落后紧跟列表时少一行空行**（`Start(Item)` 把段落要的空行清掉了）。
@@ -168,7 +168,7 @@ PRODUCT_PLAN §7.3 的八个组件、§7.4 的键位与命令、§7.5 的视觉�
 | 离线套件 | core 84 + 契约 7 · dsh 110（8 个 live 默认 ignore）· TUI **222** · cli 50 + 43 端到端（`--features test-runtime`）全过，连跑三次 |
 | `cargo clippy -p arc-deck-tui --all-targets` | TUI crate 无告警。**core / cli / dsh 有既有告警**（clippy 1.95 新加的 `collapsible_match` 等，不是这一轮引入的；`-D warnings` 全仓不再成立） |
 | 真终端（release，`console-probe.ps1 -Resume`，零配额） | 内核就绪 · 页脚一行 · 占位符写着 Enter 发送 · `@` 补全 · stash 三步 · F1 · 输入 · `/sessions` · `/runs` · **`/search` 真内核** · `/subagents` · 恢复会话 · 退出 · 无残留内核。`resume_history` 两条判据假定最近一次是 `-Cancel` 留下的会话，本机最近的是用户自己的会话，所以那两条是 false（打开与历史本身在快照里是好的） |
-| 安装 | `~/.cargo/bin/arcdeck.exe` 换成本轮 release（与 `target-main/release` 逐字节相同）；上一版留在 `arcdeck.prev-2026-10-20-1015.exe` |
+| 安装 | `~/.cargo/bin/saiku.exe` 换成本轮 release（与 `target-main/release` 逐字节相同）；上一版留在 `saiku.prev-2026-10-20-1015.exe` |
 
 预览：`cargo test -p arc-deck-tui -- generate_reviewable an_agentic` 把各屏写成文本到 `target/tui-preview/`
 （新增 `conversation-*`、`models-*`、`agentic-*`）。**颜色看不出来** —— 满意与否仍要在真终端里看。
@@ -214,13 +214,13 @@ PRODUCT_PLAN §7.3 的八个组件、§7.4 的键位与命令、§7.5 的视觉�
 
 | 检查 | 结果 |
 |---|---|
-| Home 渲染 | ✅ `Arc Deck` |
+| Home 渲染 | ✅ `Saiku` |
 | `@` 文件补全 | ✅ `@ 文件引用` 列真实仓文件 |
 | `F1` 帮助 | ✅ |
 | 输入可见 | ✅ |
 | `/sessions` 面板 | ✅ 打开「运行历史」 |
 | **真提交一轮**（`-Submit`，发 `say OK`） | ✅ `运行已结束`，正文 `OK`，无错误提示 |
-| **取消**（启动中 `Esc`） | ✅ 界面显示取消，`status.json` → `cancelled`；退出后无残留 `arcdeck` 进程 |
+| **取消**（启动中 `Esc`） | ✅ 界面显示取消，`status.json` → `cancelled`；退出后无残留 `saiku` 进程 |
 | `Ctrl+C` 退出（含收尾） | ✅ 进程退出 |
 
 `-Submit` 会消耗一次小配额，默认关闭；不加它只跑界面检查。
@@ -234,7 +234,7 @@ PRODUCT_PLAN §7.3 的八个组件、§7.4 的键位与命令、§7.5 的视觉�
 ## 派工中发现并已修的产品问题
 
 - `4cf84b0` 旧配置字段（`sandbox` → `permission`）的报错不说新名字。
-- `b227176` Windows 上 headless 弹常驻 / 闪烁的终端窗口；`$(arcdeck run --detach)` 挂到任务结束。
+- `b227176` Windows 上 headless 弹常驻 / 闪烁的终端窗口；`$(saiku run --detach)` 挂到任务结束。
 
 ## 派工中发现、尚未修的
 

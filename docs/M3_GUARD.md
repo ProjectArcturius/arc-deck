@@ -1,4 +1,4 @@
-# M3 · Arc Deck 授权策略落到 DSH 执行层（映射表与缺口）
+# M3 · Saiku 授权策略落到 DSH 执行层（映射表与缺口）
 
 日期：2026-10-14。被钉住的运行时：**DSH 0.2.1-alpha.2**（`userconfig::PINNED_DSH_VERSION`），
 profile `sdk`（= `@deepseek-ai/dsh-base` + `@deepseek-ai/dsh-sdk-app`）。
@@ -41,7 +41,7 @@ profile `sdk`（= `@deepseek-ai/dsh-base` + `@deepseek-ai/dsh-sdk-app`）。
 
 ### 2.1 授权级别 → DSH 沙箱档（唯一出处：`crates/arc-deck-core/src/authz.rs`）
 
-| Arc Deck 级别 | 行 id | 包 | 配置键 | 取值 | 保证范围 |
+| Saiku 级别 | 行 id | 包 | 配置键 | 取值 | 保证范围 |
 |---|---|---|---|---|---|
 | `readonly` | `sandbox-policy` | `@deepseek-ai/dsh-sandbox-policy` | `mode` | `read-only` | **OS 沙箱** |
 | `workspace` | `sandbox-policy` | `@deepseek-ai/dsh-sandbox-policy` | `mode` | `workspace-write` | **OS 沙箱**（写根 = workspace **+ `/tmp` + `os.tmpdir()`**，见下） |
@@ -133,7 +133,7 @@ workspace 的父目录（DSH 给每个会话建的临时目录），且**同一�
 
 ### 2.4 Plan 模式
 
-Arc Deck 的 Plan 由三件东西共同承担，**没有一件依赖 DSH 的 plan-mode**：
+Saiku 的 Plan 由三件东西共同承担，**没有一件依赖 DSH 的 plan-mode**：
 
 1. **沙箱 read-only**：`write_paths` 被清空（`authz.rs::resolve_with_ceiling` 的第三层），
    `execution_guard` 因此把档压到 `read-only`；文件工具的写入被 DSH 的文件栅栏拒
@@ -147,7 +147,7 @@ approval prompts when you need enforced limits`（`packages/plan/plan-mode/READM
 它的出口工具 `exit_plan_mode` 要一个人工评审通道，而 headless 没有 ——
 PRODUCT_PLAN §5.3 也明确「不得不经适配直接要求 headless 调用其人工评审工具」。
 
-## 3 · 做不到的部分，以及 Arc Deck 怎么处理
+## 3 · 做不到的部分，以及 Saiku 怎么处理
 
 **判定规则**（`authz.rs::execution_guard`）：能表达的就表达；表达不了时，
 只在该项**没有任何替代表达、且收紧到更严的档会把任务整个废掉**时才留档 —— 其余一律**拒绝启动**。
@@ -160,7 +160,7 @@ PRODUCT_PLAN §5.3 也明确「不得不经适配直接要求 headless 调用其
 | `commit = false` / `push = false` | **留档**：进 `result.unverified` + 一条 `AUTH_GUARD_GAP` 诊断事件；启动时 stderr 也打一行 | DSH **没有按 git 子命令区分权限的能力**（提交就是 shell 里的一条 `git commit`）。而 `allow_commit` 缺省是 `false`、shell 缺省是开 —— 拒绝启动会拒掉几乎每一次派工。**这是一个已知缺口，不是遗漏**：它就在结果里明文写着「这条没有被执行层拦住」 |
 
 第三条的取舍单独说明：**「宁可拒绝启动」不等于「凡是表达不了就拒绝」**。
-写范围收窄拒绝启动，是因为 Arc Deck 有能力给出更严的表达（不许写）却会废掉任务，
+写范围收窄拒绝启动，是因为 Saiku 有能力给出更严的表达（不许写）却会废掉任务，
 所以正确动作是把问题交回主控去改授权；而 commit 那条连更严的表达都不存在
 （唯一的更严是「整个 shell 关掉」），拒绝就等于拒绝所有派工。
 
@@ -188,7 +188,7 @@ PRODUCT_PLAN §5.3 也明确「不得不经适配直接要求 headless 调用其
    `workspace-write` 的写根含 `os.tmpdir()`（§2.1），而 **worker 不给任务私有临时区** ——
    同一台机器上并发两个任务时，A 的写入可以落在 B 的写根里。
    这是 DSH 的既定语义（`roots.ts` 的注释写明「omitting it would deny what the mode promises」），
-   不是实现 bug；Arc Deck 这一侧的表达手段是给运行时设 `TMPDIR` / `TEMP` / `TMP`
+   不是实现 bug；Saiku 这一侧的表达手段是给运行时设 `TMPDIR` / `TEMP` / `TMP`
    （DSH 经 `os.tmpdir()` 读它们），**本轮没做**。
    实测形态见 §7 第 4 条的正例：写 `%TEMP%` 下的路径 → 工具结果 `ok`。
 5. **预设表被收窄之后，`DSH_HOME` 必须是每任务独有的空目录**（worker 就是这么做的：
@@ -339,9 +339,9 @@ cargo test -p arc-deck-dsh -p arc-deck-cli --features arc-deck-cli/test-runtime 
 | 9 | `readonly` 会话跑 `read` 读 workspace 之外的文件 | **会成功** —— 第二处缺口（读范围） | **会成功（缺口确认）** | `m3_live_readoutside_workspace_is_allowed`。实测读 `C:\Windows\win.ini` → 工具结果 `ok` |
 | 10 | Plan 会话调 `subagent`，子 Agent 里再试 `write` / shell | 子会话 `sandbox/mode` 是 `read-only`；写与命令同样被拒；子 Agent 的工具表里没有 shell | **拦住** | `m3_live_subagent_cannot_write_and_has_no_shell`。实测：子会话的工具清单同样 **19 个**、没有 `pwsh`；子会话里的 `write` 拿到 `[sandbox: file access denied under read-only mode]`；文件不存在。（子会话的 `sandbox/mode` 事件本轮没有单独断言 —— 子会话日志是另一份文件，见 §6「未测」） |
 | 11 | `--permission full` 调 `workflow` | 允许执行；记下 PTC 的 `sandbox.enforcement` 报告 | **未测** | 没有写这条用例。`workflow` 要跑模型写的 JS，脚本条目数不固定；本轮把它排除在范围外，不假装测过 |
-| 12 | `network = false` + shell 关：调 `web_search` | 工具不存在（`tool-web` 被摘）；`pwsh` 也拿不到 | **拦住**（工具管线） | `m3_live_network_off_removes_web_and_shell_tools`。实测工具清单里没有 `web_search` / `web_fetch` / `pwsh`，两个调用都拿到 `unknown tool`。注：这条走 `arcdeck worker run`（配置手写）—— `arcdeck run` 物化时 `network` 恒为 true，产品层还没有关网络的开关 |
+| 12 | `network = false` + shell 关：调 `web_search` | 工具不存在（`tool-web` 被摘）；`pwsh` 也拿不到 | **拦住**（工具管线） | `m3_live_network_off_removes_web_and_shell_tools`。实测工具清单里没有 `web_search` / `web_fetch` / `pwsh`，两个调用都拿到 `unknown tool`。注：这条走 `saiku worker run`（配置手写）—— `saiku run` 物化时 `network` 恒为 true，产品层还没有关网络的开关 |
 | 13 | 未知 / 拼错的工具名 | `UNKNOWN_TOOL`；**不要**当成拒权证据 | **`UNKNOWN_TOOL`，与拒权分开记** | `m3_live_unknown_tool_name_is_not_a_denial`。实测正文 `Error: unknown tool "definitely_not_a_tool"`，并断言正文里**没有** `[sandbox:` —— 形状与第 1 条不同 |
-| 14 | 读会话日志：断言 `permission/preset`、`sandbox/mode`、`approval/policy` 三条事件与本次 guard 逐字一致 | 「钉点真的写进去了」的唯一直接证据 | **三条逐字一致** | `m3_live_session_log_records_the_pinned_guard_events`。实测（`readonly` 档）：`{"type":"permission/preset","data":{"preset":"readonly"}}`、`{"type":"sandbox/mode","data":{"mode":"read-only"}}`、`{"type":"approval/policy","data":{"policy":"never"}}`。会话日志是 zstd 压的、文件名带版本号（实测 `session.v4.jsonl.zstd`），解压用本机 `zstd`（`$ARCDECK_TEST_ZSTD` 可指定） |
+| 14 | 读会话日志：断言 `permission/preset`、`sandbox/mode`、`approval/policy` 三条事件与本次 guard 逐字一致 | 「钉点真的写进去了」的唯一直接证据 | **三条逐字一致** | `m3_live_session_log_records_the_pinned_guard_events`。实测（`readonly` 档）：`{"type":"permission/preset","data":{"preset":"readonly"}}`、`{"type":"sandbox/mode","data":{"mode":"read-only"}}`、`{"type":"approval/policy","data":{"policy":"never"}}`。会话日志是 zstd 压的、文件名带版本号（实测 `session.v4.jsonl.zstd`），解压用本机 `zstd`（`$SAIKU_TEST_ZSTD` 可指定） |
 
 **本轮新增的三条「实测形状」（写给下一个来这里的人）**
 

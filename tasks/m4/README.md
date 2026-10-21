@@ -4,12 +4,12 @@
 > 由调度者直接做完，证据在 `docs/M4_PLAN.md`「第六轮」；只剩 §7.5 的人工视觉对照。
 > 本文件保留**怎么派、怎么收**，作为下一次派工的手册，不再有「待 …」的依赖顺序。
 
-目标：**Arc Deck TUI 能像 OpenCode 一样日常写代码**，之后产品重心可以转向 GUI。
+目标：**Saiku TUI 能像 OpenCode 一样日常写代码**，之后产品重心可以转向 GUI。
 状态表在 `docs/M4_PLAN.md`（每合一件就更新那一行）；本文件是**怎么派、怎么收**。
 
 ## 一、「日常可用」的判据（全部满足才算这条队列做完）
 
-1. 在一个仓里敲 `arcdeck` → 输入 → **流式**回答（Markdown 正确），工具调用可见，同一会话**多轮**继续。
+1. 在一个仓里敲 `saiku` → 输入 → **流式**回答（Markdown 正确），工具调用可见，同一会话**多轮**继续。
 2. 能列出、搜索、**恢复**以前的会话并接着聊；改名；历史完整。
 3. 能切换模型 / effort / Agent；Plan / Build / 授权级别**在执行层生效**；confirm 有审批界面。
 4. 运行中能取消；模型失败、配额、缺密钥、运行时没装都有可读、可操作的提示。
@@ -50,23 +50,23 @@ A_CLIPPY="cargo clippy -p arc-deck-tui --all-targets --offline --no-deps -- -D w
 A_CLI="cargo test -p arc-deck-cli --features test-runtime --offline"
 
 # 模板：每份任务书末尾的「验收」节里有几条，就带几条 --accept，原样照抄
-arcdeck run "$T/<id>.md" --id <id> --by <你是谁：claude|sol> --worktree dsh/<id> \
+saiku run "$T/<id>.md" --id <id> --by <你是谁：claude|sol> --worktree dsh/<id> \
     --permission full --effort high --accept "<验收 1>" --accept "<验收 2>" … --detach
 
-arcdeck status --all          # 每件一行；不要读长日志
-arcdeck wait <id> --timeout 3h
-arcdeck report <id>           # 终态后：Arc Deck 采集的事实 vs 模型的陈述
+saiku status --all          # 每件一行；不要读长日志
+saiku wait <id> --timeout 3h
+saiku report <id>           # 终态后：Saiku 采集的事实 vs 模型的陈述
 ```
 
 - `--permission full` 是 `--worktree` 的硬要求（worktree 的 `.git` 指向主仓，非 full 时里面每条 git 命令返回 128）。
 - 模型用用户配置的默认值（`opencode-go/deepseek-v4.1-flash`）；不要换。
 - **大文件都在 D 盘**（2026-10-14 起，C 盘已满）：用户配置 `worktree.dir = D:/arcdeck/wt/{task_id}`，`env.TEMP/TMP = D:\arcdeck\tmp`；
   主仓构建输出由**本机未入库**的 `.cargo/config.toml` 指到 `D:/arcdeck/target-main`。换机器时这三处按那台机器的磁盘重配。
-- 改了 arcdeck 自身的代码后，**先重编 release 并装到 `~/.cargo/bin` 再派工**（拿旧二进制派工，测的是旧代码）。
+- 改了 saiku 自身的代码后，**先重编 release 并装到 `~/.cargo/bin` 再派工**（拿旧二进制派工，测的是旧代码）。
 
 ## 四、收工（每一件都要做，顺序不能省）
 
-1. `arcdeck report <id>`：先看「Arc Deck 采集的事实」（验收结果、改动文件），再看「模型的陈述」（**不是证据**）。
+1. `saiku report <id>`：先看「Saiku 采集的事实」（验收结果、改动文件），再看「模型的陈述」（**不是证据**）。
 2. **自己复跑验收**：在 `D:/arcdeck/wt/<id>` 里把任务书的验收命令原样跑一遍。
 3. **读 diff**（`git -C D:/arcdeck/wt/<id> status` / `diff`，新文件直接读）。重点看：
    - 是否越出任务书允许的文件范围；
@@ -76,10 +76,10 @@ arcdeck report <id>           # 终态后：Arc Deck 采集的事实 vs 模型�
    - 有没有新的 Windows 子进程没带 `no_window`（会弹窗，用户明确不接受，见 commit b227176）。
    不合格：写一份**补充任务书**（`<id>-fix.md`，只写要改的点），用**同一个 id** 加 `--rerun` 派回去，或自己改：
    ```bash
-   arcdeck run "$T/<id>-fix.md" --id <id> --rerun --by <你> --worktree dsh/<id> --permission full --effort high --accept … --detach
+   saiku run "$T/<id>-fix.md" --id <id> --rerun --by <你> --worktree dsh/<id> --permission full --effort high --accept … --detach
    ```
    **必须用同一个 id**：worktree 目录按 id 命名，同 id 时直接复用那个目录（未提交的改动都还在）；换个新 id 会新建目录，
-   而分支已在原 worktree 里检出，`git worktree add` 会失败。`--rerun` 把旧的运行记录挪到一边（`arcdeck report` 只看新的这次）。
+   而分支已在原 worktree 里检出，`git worktree add` 会失败。`--rerun` 把旧的运行记录挪到一边（`saiku report` 只看新的这次）。
 4. 在工人分支上提交（Conventional Commits，正文中文，写清**来源**：任务 id、模型、用时、步数，以及审阅者），然后：
    ```bash
    git -C D:/arcdeck/wt/<id> add -A && git -C D:/arcdeck/wt/<id> commit -F <消息文件>
@@ -98,7 +98,7 @@ arcdeck report <id>           # 终态后：Arc Deck 采集的事实 vs 模型�
 |---|---|
 | 派工立刻 64：`unknown field sandbox` | 用户配置旧字段名；改成 `"permission": "workspace"`（4cf84b0 之后报错会说新名字） |
 | 派工后屏幕上有常驻 / 闪烁的终端窗口 | 已修（b227176）；若再出现，查新加的子进程是否漏了 `CREATE_NO_WINDOW` |
-| `$(arcdeck run --detach)` 一直不返回 | 已修（b227176），同一根因的另一半 |
+| `$(saiku run --detach)` 一直不返回 | 已修（b227176），同一根因的另一半 |
 | 工人「完成」但功能没生效 | 拿旧 release 二进制在跑；或改动没被编进去（AGENTS U16 同类） |
 | `completed` 但验收没跑 | 没带 `--accept`。永远带 |
 | 多个工人同时「心跳停了 / dead」，events 末尾是 `ENOSPC` | **C 盘写满**（2026-10-14 实测：456 GB 盘只剩 0.35 GB，3 件同时死）。每个 worktree 的构建目录 0.4–1 GB、主仓 `target/` 约 3 GB。**派工前看剩余空间（现在是 D 盘），按每件 1.5 GB 留余量**；不够就少派几件、先 `cargo clean` 主仓、收完的 worktree 及时删。死掉的工人进度还在 worktree 里：写 `<id>-resume.md`（模板见 `w1-markdown-resume.md`），同 id + `--rerun` 续做 |

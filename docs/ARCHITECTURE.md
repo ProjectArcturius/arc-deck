@@ -1,4 +1,4 @@
-# Arc Deck · 早期 Kanesumi 架构记录
+# Saiku Deck · 早期 Kanesumi 架构记录
 
 > 本文是早期 Rust 自绘 GUI 骨架的设计快照，不是当前全产品架构。新的 TUI/headless + WinUI GUI 分工、Echo、工具与 worker 需求以 [PRODUCT_PLAN.md](PRODUCT_PLAN.md) 为准。下文「协议层尚未建立」等状态只记录当时，不能拿来判断现有 C# 协议层或新 Rust 规划的完成度。
 
@@ -24,7 +24,7 @@
 
 ## 与 Kanesumi 的关系
 
-Arc Deck 的 `Scene` / `SceneCommand` / `App` / `TextEngine` **刻意镜像**
+Saiku Deck 的 `Scene` / `SceneCommand` / `App` / `TextEngine` **刻意镜像**
 Kanesumi 的对应物，逐变体一一对应。这样将来若要直接消费上游
 `kanesumi-canvas` + `kanesumi-controls`（约 48 个控件），替换是无痛的。
 
@@ -39,7 +39,7 @@ Kanesumi 的对应物，逐变体一一对应。这样将来若要直接消费�
 | `kanesumi-controls` | 21,914 | 0 | ✅ |
 | `kanesumi-harness` | 7,821 | 6 | ❌ 平台外壳是 Linux 专属 |
 
-**结论：UI 层完全可用，缺的只有外壳** —— 而外壳正是 Arc Deck 在造的东西。
+**结论：UI 层完全可用，缺的只有外壳** —— 而外壳正是 Saiku Deck 在造的东西。
 
 ## 为什么不用 winit
 
@@ -60,7 +60,7 @@ Kanesumi 的对应物，逐变体一一对应。这样将来若要直接消费�
 
 Kanesumi 的 Linux 外壳用 `smithay-client-toolkit` + `calloop` **自研事件循环**，
 不用 winit。Windows 侧照此办理：**自己写 Win32 消息泵，IME 完全归自己管。**
-于是上面整张表都与 Arc Deck 无关。
+于是上面整张表都与 Saiku Deck 无关。
 
 ## 重绘门控（中心化）
 
@@ -119,7 +119,7 @@ Cargo 的 git 依赖天然**按 crate 选择**且支持 `subdirectory`。submodu
 > *"No protocol version: client and host release bound together; introduce one
 > when an independently released client appears."*
 
-**Arc Deck 就是那个「独立发布的客户端」**，而那个字段尚不存在。
+**Saiku Deck 就是那个「独立发布的客户端」**，而那个字段尚不存在。
 
 因此：`dsh` 版本必须**钉死**；升级是刻意的工程动作，不是自动跟随。
 

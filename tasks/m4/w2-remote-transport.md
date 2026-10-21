@@ -42,7 +42,7 @@ Rust 侧现有可复用的：`crates/arc-deck-dsh/src/runtime.rs`（`RuntimeLayo
    - 离线单测：信封编解码、错误结构、mux 帧路由（两条流不串帧）、断线通知所有流、token 打码。
      需要服务端时写一个**进程内的假服务端**（tokio + tungstenite 就够），不要依赖真内核。
    - **live 测试**（`#[ignore]`，名字以 `remote_live_` 开头）：对**本机已安装的真实运行时**（用 `RuntimeLayout` 定位，
-     见 `arcdeck runtime status`），在**临时目录**作 `DSH_HOME` 起 web 内核 → 换票 → 调一个只读方法（如会话列表，
+     见 `saiku runtime status`），在**临时目录**作 `DSH_HOME` 起 web 内核 → 换票 → 调一个只读方法（如会话列表，
      新 home 应为空）→ 经 mux 打开一条只读的流（找一个不需要已有会话的；没有的话说明并改为验证 mux 握手）→ 关闭并确认进程退出。
      **不发任何 prompt，不消耗模型配额**。要配置模型路由时可用假密钥（不会发请求）。
      在 Windows 上确认整个过程没有新开可见控制台（子进程用 no_window 即可，不必写探针）。

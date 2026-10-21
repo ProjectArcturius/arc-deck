@@ -1,4 +1,4 @@
-# Arc Deck · 设计系统
+# Saiku Deck · 设计系统
 
 > 正典：[Kanesumi Design](https://github.com/ProjectArcturius/Ether/blob/main/docs/KANESUMI_DESIGN.md)
 > （`Ether/docs/KANESUMI_DESIGN.md`，108 行）。
@@ -37,7 +37,7 @@ PezMax-One 同样：零 `Shadow`、零渐变、圆角近乎全零。
 
 正典写「OLED 纯黑 `#000000`」，**Android 扇区严格遵守，Ether 桌面扇区不遵守**：
 
-| Token | **Ether 桌面（Arc Deck 跟随）** | Android |
+| Token | **Ether 桌面（Saiku Deck 跟随）** | Android |
 |---|---|---|
 | background | **`#1A1A1A`** | `#000000` |
 | surface | `#242424` | `#0A0F16` |
@@ -50,7 +50,7 @@ PezMax-One 同样：零 `Shadow`、零渐变、圆角近乎全零。
 | focus_stroke | `#FFA626` | — |
 
 **分歧没有文档解释。** 两个平台都满足「深底 + 灰阶分层 + 单一强调色」，
-但都不是字面正典。Arc Deck 选择**跟随桌面扇区**，并把这条写进文档 ——
+但都不是字面正典。Saiku Deck 选择**跟随桌面扇区**，并把这条写进文档 ——
 因为一个未记录的取值分歧，半年后会变成"为什么这里跟文档不一样"的困惑。
 
 ### 调色板是一个标量的纯函数
@@ -59,7 +59,7 @@ PezMax-One 同样：零 `Shadow`、零渐变、圆角近乎全零。
 `fn token() -> Color`，通过 `lerp_dark(light, dark)` 读取单个 0→1 的
 `dark_progress()` 标量。**于是整套主题交叉淡入淡出只花一个 float。**
 
-Arc Deck 的 `Color::lerp` 就是为此准备的。
+Saiku Deck 的 `Color::lerp` 就是为此准备的。
 
 ## 排版
 
@@ -127,7 +127,7 @@ overlay 0.383/0.216、dialog fade 0.167/0.083、expander 0.333/0.167。
    EaseOutCubic 进 / 松开 **200ms** 出，单个 `Animatable` 在 draw phase 读，
    一次性 `drawRect` **无圆角参数** —— 用 API 形状强制直角）。但 Rust 侧变成了
    **静态 token 结构体**，28 处用法**无一动画，全是硬切**。
-   正典说「直角**闪切**」—— **这里是 Arc Deck 要补的。**
+   正典说「直角**闪切**」—— **这里是 Saiku Deck 要补的。**
 
 2. **无障碍在 Rust 侧完全不存在。** `Scene` 是纯绘制命令，**没有无障碍树**。
    正典铁律 7「语义树自层 0 起」**只在 Android 实现**。
@@ -160,7 +160,7 @@ PezMax-One 是同一作者的**更早**的 Rust 桌面作品，用 egui，叫「
 
 ### 必须反着做
 
-| 问题 | PezMax 的做法 | Arc Deck |
+| 问题 | PezMax 的做法 | Saiku Deck |
 |---|---|---|
 | **emoji 当图标** | ~15 处 `☰🔍🔔📥🚩★` | **禁止** —— `Scene` 渲染器画不出彩色 emoji，且破坏单色语言 |
 | **无间距 token** | 66 处 `Frame` + 100+ 处 `add_space` 全是字面量，`24.0` 在单文件重复十次 | 建立间距 token |

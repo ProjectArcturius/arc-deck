@@ -9,7 +9,7 @@ git -C <REFS>/opencode show v2.0.27:packages/tui/src/theme/assets/<name>.json
 | 目录 | 上游路径 | 是什么 | 谁在用 |
 |---|---|---|---|
 | `*.json` | `packages/tui/src/theme/assets/*.json` | **v1 扁平调色板**（`defs` + `{dark, light}` 取值，没有状态角色） | 经 `src/theme/v1.rs` 的 v1→v2 迁移后使用，行为对齐上游 `packages/theme/src/tui/v1-migrate.ts` |
-| `v2/opencode.json` | `packages/tui/src/theme/assets/v2/opencode.json` | **v2 语义 token 文档**（`base` + `light`/`dark`，含 `hue` 标尺与 `@dialog`） | 直接解析；同时是 Arc Deck 的默认主题 `opencode` |
+| `v2/opencode.json` | `packages/tui/src/theme/assets/v2/opencode.json` | **v2 语义 token 文档**（`base` + `light`/`dark`，含 `hue` 标尺与 `@dialog`） | 直接解析；同时是 Saiku 的默认主题 `opencode` |
 
 上游对这两类的分流方式与这里一致：`packages/tui/src/theme/index.ts` 在看到文档里有 `theme` 键时调
 `migrateV1`，否则按 v2 文档解析。`assets/v2/` 之外没有第二个 v2 文件，所以除 `opencode` 外的每个名字
@@ -18,7 +18,7 @@ git -C <REFS>/opencode show v2.0.27:packages/tui/src/theme/assets/<name>.json
 ## 许可
 
 这些主题按上游 **MIT** 使用，Copyright (c) 2025 opencode；完整 notice 见 `crates/arc-deck-tui/LICENSE-OpenCode`。
-Arc Deck 仓库本身以 Apache-2.0 发布（根 `LICENSE`），但这不改变这些资产的上游 MIT 许可与署名要求。
+Saiku 仓库本身以 Apache-2.0 发布（根 `LICENSE`），但这不改变这些资产的上游 MIT 许可与署名要求。
 
 ## 加新主题
 

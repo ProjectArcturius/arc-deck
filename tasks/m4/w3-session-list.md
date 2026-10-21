@@ -16,7 +16,7 @@ w3-session-core 已让 TUI 走 Remote。参考 v1.19.0：`component/dialog-sessi
 3. **时间线 / 跳到某条消息**（照 dialog-timeline）：列出本会话的用户消息，选中后滚到那里。
 4. **真实模型目录**：把 `tui.rs` 里从用户配置拼出来的临时目录换成 Remote 的模型目录（w2-remote-session 已提供）；
    `catalog::Model.efforts` 由此填上，effort 对话框因此对有档位的模型出现。目录拿不到时回退到临时目录并在对话框标题处注明来源。
-5. 打开会话会 promote 冷会话（P15）—— 只在 Arc Deck 自己的交互 home 里做，确认不会碰 Desktop 的 home。
+5. 打开会话会 promote 冷会话（P15）—— 只在 Saiku 自己的交互 home 里做，确认不会碰 Desktop 的 home。
 6. 测试：列表过滤 / 排序 / 搜索；打开后历史与线上一致（假服务端上分页场景）；改名后列表与会话头同步；时间线跳转；
    目录来源切换与回退；`TestBackend` 渲染列表与对话框。
 

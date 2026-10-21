@@ -43,7 +43,7 @@
 官方 DeepSeek 请求会附带**会话日志的增量**与插件清单作为请求元数据（不进模型输入、不影响 KV 缓存）。
 这是**数据外发，不是性能机制** —— worker 跑的是 Ether 的源码。
 源码：`packages/session/session-log-deepseek/README.md`（「Disable it only when the official API must not receive a Session-log suffix」）、
-`packages/llm/deepseek-llm-api-extensions/README.md`。Arc Deck 生成的 profile 必须**显式**设置它，开或关由用户裁定（PRODUCT_PLAN §11）。
+`packages/llm/deepseek-llm-api-extensions/README.md`。Saiku 生成的 profile 必须**显式**设置它，开或关由用户裁定（PRODUCT_PLAN §11）。
 
 ## 3. 证据：provider 中立的机制（非 DS 也适用）
 
@@ -62,7 +62,7 @@ pi-ai 路由的已知短板（`packages/llm/llm-pi-ai/README.md`「Known Limitat
 中途提示/工具更新只对 catalog 里带兼容标记的模型生效，**手写声明的网关路由每次请求都发完整工具表与拼接后的 system**；
 拿不到 provider 的 HTTP 状态码；不支持 stop 序列。所以非 DS 路由上的缓存表现会比官方 DS 路由差，这是结构性的。
 
-## 4. 对 Arc Deck 的直接含义
+## 4. 对 Saiku 的直接含义
 
 1. **worker 默认路由是 `deepseek-official`（官方 key）**，不是 intern-ai / opencode-go 之类网关。
    在网关上 DSH 的 DS 优势不成立（§1 第 4 条）。

@@ -121,7 +121,7 @@ POST /api/$events/result  {"args":{"clientId":…,"eventId":…,"outcome":{…}}
 
 `approval: ask` 不等于「每次写文件都问」：DSH 的 `ask` 只在**有人发起审批请求**时生效
 （沙箱提权、hook 的 `permissionDecision: ask` 等）；普通工作区内的读写不会先问。
-Arc Deck 的 `confirm` 档因此是「内核问的时候，TUI 真的能答」，而不是一个逐工具确认的开关。
+Saiku 的 `confirm` 档因此是「内核问的时候，TUI 真的能答」，而不是一个逐工具确认的开关。
 
 ## 八、离线测试曾经挂住的原因（已修）
 

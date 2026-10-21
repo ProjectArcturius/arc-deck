@@ -13,8 +13,8 @@
 1. **信息栏只显示真实数据**：会话标题、cwd、git 分支与脏状态、当前模型 / effort / Agent / 授权级别、本会话 token 用量
    （provider 报的）、上下文占用（有模型 contextWindow 时才算百分比，没有就不显示）、本会话改动过的文件、todo（DSH 有 todo 工具时）。
    **没有数据的区域省略**，不填演示数字（§7.3）。宽 > 120 列自动并排、否则按需覆盖（现有行为保持）。
-2. **Home**：品牌区、提示（照 tips，内容换成 Arc Deck 的真实功能与键位）、页脚（cwd、版本、Remote 状态）。
-3. **首次运行与故障**：没有配置 → 提示 `arcdeck config init`；运行时没装 → `arcdeck runtime install`；缺密钥 → `arcdeck auth set <provider>`；
+2. **Home**：品牌区、提示（照 tips，内容换成 Saiku 的真实功能与键位）、页脚（cwd、版本、Remote 状态）。
+3. **首次运行与故障**：没有配置 → 提示 `saiku config init`；运行时没装 → `saiku runtime install`；缺密钥 → `saiku auth set <provider>`；
    Remote 内核意外退出 → 界面报错并提供重连，不卡死。全部给出可复制的命令。
 4. **终端恢复**：panic hook 恢复终端（离开 alternate screen、关 raw mode、关鼠标捕获与键盘增强、显示光标）；Ctrl+C / 关闭窗口的收尾；
    resize 时布局正确重排。

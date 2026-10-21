@@ -1,6 +1,6 @@
-# Arc Deck · DSH 协议客户端
+# Saiku Deck · DSH 协议客户端
 
-这是 **Arc Deck 两个实现共用的那一层**：说漏了这句话会让人以为它可以随便搬。
+这是 **Saiku Deck 两个实现共用的那一层**：说漏了这句话会让人以为它可以随便搬。
 
 ```
 arc-deck-dsh/          ← 本目录：协议客户端（.NET 9，桌面进程）
@@ -20,7 +20,7 @@ UWP 版的 `ArcDeck.csproj` 里写着 `<OutputType>AppContainerExe</OutputType>`
 所以分工是：
 
 ```
-Arc Deck 界面  (AppContainer)  ──IPC──▶  arc-deck-dsh host (完整信任)  ──stdio──▶  node dsh --profile sdk
+Saiku Deck 界面  (AppContainer)  ──IPC──▶  arc-deck-dsh host (完整信任)  ──stdio──▶  node dsh --profile sdk
 ```
 
 **不要**把协议解析塞回 UWP 工程里「省一层」：AppContainer 那一侧永远拿不到

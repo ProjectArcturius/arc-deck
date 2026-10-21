@@ -1,4 +1,4 @@
-# 任务书 w4-m3-guard：把 Arc Deck 的授权策略落到 DSH 的执行层（M3 第一段）
+# 任务书 w4-m3-guard：把 Saiku 的授权策略落到 DSH 的执行层（M3 第一段）
 
 派工者：claude。仓库：arc-deck（Rust workspace）。你在独立 git worktree 里工作，别的工人同时在改
 `crates/arc-deck-tui` 与 `crates/arc-deck-dsh/src/remote/`（新模块）。**本任务动 `crates/arc-deck-core`、
@@ -15,7 +15,7 @@
 DSH 源码（只读，与钉住的运行时同版本）：`C:/Users/mc158/Documents/Projects/arc-deck/REFS/deepseek-harness/`。
 已知的关键事实（**你要按源码核实**）：
 - `packages/plan/plan-mode/README.md`：Plan 模式**不限制任何工具**，「use sandbox mode and approval prompts for enforced limits」。
-  所以 Arc Deck 的 Plan 不能只靠开 DSH 的 plan-mode。
+  所以 Saiku 的 Plan 不能只靠开 DSH 的 plan-mode。
 - `packages/sandbox/sandbox-policy/`：bash / 文件系统 / terminal 共用的文件效果策略（`read-only` / `workspace-write` / …、workspace 根）。
 - `packages/core/tools/`：工具注册与执行管线，有 allow / deny / ask 策略与 per-agent 限制（可见工具集收窄）。
 - `packages/guard/`（permission-presets、user-approval、timeout-policy）、`packages/sandbox/*`（bash-sandbox、pwsh-sandbox、
@@ -27,7 +27,7 @@ DSH 源码（只读，与钉住的运行时同版本）：`C:/Users/mc158/Docume
 1. **映射表** `docs/M3_GUARD.md`：`EffectivePolicy` 的每个字段（以及 Plan 模式、readonly / workspace / full 授权级别）
    → 落到 DSH 的哪一行配置（包名 / 配置键 / 取值）→ 保证范围（OS 沙箱强制 / 工具管线拒绝 / 仅可见性收窄 / 做不到）。
    **每一行注明源码出处（文件:行）**。做不到的（例如 DSH 若没有按路径列表限制写入、没有按 git 子命令区分提交与推送）
-   要**如实写成缺口**，并说明 Arc Deck 现在怎么处理（拒绝启动？降级到更严的档？仅留档？）——
+   要**如实写成缺口**，并说明 Saiku 现在怎么处理（拒绝启动？降级到更严的档？仅留档？）——
    **宁可拒绝启动，也不能静默放宽**（PRODUCT_PLAN 的交集原则：只能收紧）。
 2. **实现**：`render_patch` 接收最终的 `EffectivePolicy`（扩展 `PatchInput`），按映射表生成限制行；`worker.rs` 的
    `dsh_runtime_command` 把 `prepared.plan.policy` 传进去。DSH 沙箱档从 `EffectivePolicy` 推导，而不是只看启动配置

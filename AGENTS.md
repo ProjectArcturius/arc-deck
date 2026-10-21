@@ -1,4 +1,10 @@
-# AGENTS.md — Arc Deck
+# AGENTS.md — Saiku
+
+**命名（2026-10-21）**：产品原名 Arc Deck，因 `arcdeck` 已有人用而改名。产品与可执行文件叫 **Saiku**（`saiku`，取日文「細工」），
+桌面 GUI（Windows 的 UWP、Linux 的 Kanesumi）统称 **Saiku Deck**，仓库是 `ProjectArcturius/saiku`。用户目录与环境变量随之改为
+`saiku` / `SAIKU_*`，`saiku` 首次运行时把旧的 `arcdeck` 目录搬过来（`userconfig::migrate_legacy_dirs`）。
+**沿用旧名的有三类**：内部 crate（`arc-deck-*`）、C# 命名空间与 UWP 包标识（`ArcDeck.*`、AppService `arcdeck.host`）、
+带日期的历史记录与本机磁盘路径（`D:\arcdeck\…`）—— 前两者不对用户可见，改了只是徒增风险；后者是当时的事实。
 
 ## 当前产品方向（2026-10-14 定型）
 
@@ -9,18 +15,18 @@ DSH 对非 DS 模型是否适用的调查：[docs/DSH_FINDINGS.md](docs/DSH_FIND
 不可让渡的规则与「什么算个性化」：[prompts/constitution.md](prompts/constitution.md)（草案）。
 TUI 派工计划与状态（**队列 2026-10-14 起暂停**）：[docs/M4_PLAN.md](docs/M4_PLAN.md)；派工手册：[tasks/m4/README.md](tasks/m4/README.md)。
 授权 → DSH 执行层的映射与缺口：[docs/M3_GUARD.md](docs/M3_GUARD.md)。DSH 0.2.1 Remote 层的协议核对：[docs/REMOTE_0.2.1.md](docs/REMOTE_0.2.1.md)。
-GUI 怎么热插拔地研发与发布（Windows + Linux）：[docs/GUI_PLUGGABLE.md](docs/GUI_PLUGGABLE.md)。用 arcdeck 工人替代 OpenCode 工人的复盘：[docs/ARCDECK_WORKERS_REVIEW_2026-10-14.md](docs/ARCDECK_WORKERS_REVIEW_2026-10-14.md)。
+GUI 怎么热插拔地研发与发布（Windows + Linux）：[docs/GUI_PLUGGABLE.md](docs/GUI_PLUGGABLE.md)。用 saiku 工人替代 OpenCode 工人的复盘：[docs/ARCDECK_WORKERS_REVIEW_2026-10-14.md](docs/ARCDECK_WORKERS_REVIEW_2026-10-14.md)。
 
-- **2026-10-14 补记**：用户随后要求用 arcdeck 工人把 TUI 做到日常可用，W1（Markdown / 主题 / 模型对话框）与 M3 第一段已合入；同日暂停派工，下一步重心转 GUI，剩余 TUI 队列可由替班按手册继续。**本机 C 盘已满：worktree、TEMP、构建输出都在 D 盘**（见 tasks/m4/README.md）。
+- **2026-10-14 补记**：用户随后要求用 saiku 工人把 TUI 做到日常可用，W1（Markdown / 主题 / 模型对话框）与 M3 第一段已合入；同日暂停派工，下一步重心转 GUI，剩余 TUI 队列可由替班按手册继续。**本机 C 盘已满：worktree、TEMP、构建输出都在 D 盘**（见 tasks/m4/README.md）。
 - **当前焦点只有一件事：Rust 后端的 headless 在 Ether 上可用**（PRODUCT_PLAN M2a–M2c）。TUI 主流程已可用（M4 只差 §7.5 的人工视觉对照）；两个桌面 GUI 冻结。
-- 一个可执行文件 `arcdeck`：工作目录下无参数运行进 TUI，带子命令进 headless。headless 的主用法是 Ether 的工人任务书；调度者靠 `arcdeck status` 一行 + 退出码判断「完成 / 在跑 / 卡死 / 出错」，不读长日志。健康由读者按时间戳计算，进程死了不能自称健康。
+- 一个可执行文件 `saiku`：工作目录下无参数运行进 TUI，带子命令进 headless。headless 的主用法是 Ether 的工人任务书；调度者靠 `saiku status` 一行 + 退出码判断「完成 / 在跑 / 卡死 / 出错」，不读长日志。健康由读者按时间戳计算，进程死了不能自称健康。
 - **底层只用 DSH 一个内核**：DS 走 `deepseek-official`（Messages 协议，DS 优势只在官方路由上成立），非 DS 走 DSH 的 pi-ai 路由。不再造 OpenCode/Claude 的执行内核；它们只作 TUI、Agent、工具定义的设计参考。「非 DS 用 DSH 不劣于 OpenCode」未测，是 M2d 的对照门。
 - **仓库主许可证是 Apache-2.0**（根 `LICENSE`，第三方归属见 `NOTICE`）。**TUI 的视觉与交互基线来自 OpenCode**（v1.19.0；主题资产取自 v2.0.27），不是原创视觉。直接移植或逐字取用的代码、主题必须保留 MIT notice（`crates/arc-deck-tui/LICENSE-OpenCode`），并在文件头标明来源。OpenCode 只是参考与移植来源，不是第二执行内核。
 - 桌面版两块：Windows = C# + WinUI 2（不擅自换 WinUI 3 或 WebView），Linux = Rust + Kanesumi。都在后端本地服务（M5）之后经同一 IPC 接入。
 - 默认 Agent 是 Echo，具备完整工程角色、工具/权限、验证/交付纪律与用户提供的风格；Build/Plan 参考 OpenCode。提示词不能替代实际权限。
-- DSH 默认把会话日志随请求上传 DeepSeek（`session-log-deepseek`）。用户裁定前，Arc Deck 生成的 profile 关闭它；不吃 DSH 默认值。
-- headless 第一个可用版本已在 Windows 上实测（PRODUCT_PLAN §10.2b）；Linux 一侧的目标是**本机 Arch**（不是 Debian，2026-10-14 修订）。Arch 上已实测：构建、离线套件、夹具端到端，以及**真实 DSH 运行**（真派工、取消、杀监工→dead、孤儿回收、worktree 真提交）。DSH 不进仓、不进二进制：`arcdeck runtime install` 把钉住的版本装进用户数据目录。
-- workers 缺省路由 `opencode-go/deepseek-v4.1-flash`（用户 2026-10-14 指定）。密钥在 `%APPDATA%\arcdeck\auth.json`，**不得写进仓库或任务状态目录**。
+- DSH 默认把会话日志随请求上传 DeepSeek（`session-log-deepseek`）。用户裁定前，Saiku 生成的 profile 关闭它；不吃 DSH 默认值。
+- headless 第一个可用版本已在 Windows 上实测（PRODUCT_PLAN §10.2b）；Linux 一侧的目标是**本机 Arch**（不是 Debian，2026-10-14 修订）。Arch 上已实测：构建、离线套件、夹具端到端，以及**真实 DSH 运行**（真派工、取消、杀监工→dead、孤儿回收、worktree 真提交）。DSH 不进仓、不进二进制：`saiku runtime install` 把钉住的版本装进用户数据目录。
+- workers 缺省路由 `opencode-go/deepseek-v4.1-flash`（用户 2026-10-14 指定）。密钥在 `%APPDATA%\saiku\auth.json`，**不得写进仓库或任务状态目录**。
 - 跑会消耗模型配额的测试前先问用户；用户已允许「少量用 4.1 flash 测试」。
 - `/REFS/` 只作本地参考，不入 Git，也不能成为生产构建依赖。复制 OpenCode 的实质部分保留 MIT notice；Claude Code 根许可证为商业条款，不默认复制源码或提示词。
 - 旧代码与数据保留。K1–K9 只约束既有 `kanesumi/`，U1–U18 继续约束既有 `uwp/`；旧协议的事件词汇、版本结论与实测只对旧组合成立，新 DSH 必须重新核对。
@@ -35,26 +41,26 @@ GUI 怎么热插拔地研发与发布（Windows + Linux）：[docs/GUI_PLUGGABLE
 |---|---|---|
 | 绝对高位调度者（老板） | Claude，用自己的 Claude Code 发任务书 | 本仓之外 |
 | 组长 | Sol，用自己的 Codex；可替班，也可小做修改与 feat | 本仓之外 |
-| 工人 | `arcdeck` worker | 本机 / Ether |
+| 工人 | `saiku` worker | 本机 / Ether |
 
 派一件工人任务，跟踪都在这三行里：
 
 ```bash
-arcdeck run <任务书.md> --id <id> --by <谁> --worktree dsh/<id> --accept "<验收命令>" --detach
-arcdeck status <id>          # 每次检查只读这一行；退出码见 PRODUCT_PLAN §6.5.3
-arcdeck report <id>          # 终态后：Arc Deck 采集的事实与模型的陈述分开
+saiku run <任务书.md> --id <id> --by <谁> --worktree dsh/<id> --accept "<验收命令>" --detach
+saiku status <id>          # 每次检查只读这一行；退出码见 PRODUCT_PLAN §6.5.3
+saiku report <id>          # 终态后：Saiku 采集的事实与模型的陈述分开
 ```
 
-- **`--by` 记的是派工关系的边，不是授权。** 它落成 `status.json` 里的 `assigned_by`，供外部监控程序（`cute-agents-monitor`）画任务书流向。缺席就是没记，不改变任何判定。上两层不是 Arc Deck 任务，所以它是自由文本（`claude` / `sol`），不是任务 id。
-- **一般模式**：`arcdeck run "问句话"` 就是普通 agent —— 没有任务书、不带工人参数时 stdout 是给人看的回答，不是 JSONL。**Arc Deck 不是一个工地**，工人那套（任务书、验收、工人守则、worktree）只在你带上那些参数时才生效。两种模式都落状态目录，监控程序一视同仁。
-- **人格默认关**：装不装 Arc Deck 的人格由 `personalization.enabled` 决定，缺省关闭 —— 关的时候一般模式**一段提示词都不注入**，按模型本体行事。工人模式永远只拿功能契约，**不带风格**（PRODUCT_PLAN §5.3.1）。
+- **`--by` 记的是派工关系的边，不是授权。** 它落成 `status.json` 里的 `assigned_by`，供外部监控程序（`cute-agents-monitor`）画任务书流向。缺席就是没记，不改变任何判定。上两层不是 Saiku 任务，所以它是自由文本（`claude` / `sol`），不是任务 id。
+- **一般模式**：`saiku run "问句话"` 就是普通 agent —— 没有任务书、不带工人参数时 stdout 是给人看的回答，不是 JSONL。**Saiku 不是一个工地**，工人那套（任务书、验收、工人守则、worktree）只在你带上那些参数时才生效。两种模式都落状态目录，监控程序一视同仁。
+- **人格默认关**：装不装 Saiku 的人格由 `personalization.enabled` 决定，缺省关闭 —— 关的时候一般模式**一段提示词都不注入**，按模型本体行事。工人模式永远只拿功能契约，**不带风格**（PRODUCT_PLAN §5.3.1）。
 - **总是带 `--accept`。** 没有验收命令时 `completed` 只表示内核正常结束 —— §10.2b 里实测出现过「提交被拒但 completed」。
 - Ether 侧的派工脚本抄 `examples/ether/ad.sh`。
 - **命名**：授权说的是**级别**（`readonly` / `workspace` / `full`，§5.6），不是 DSH 的沙箱档名；模型强度叫 **`effort`**，不是 opencode 的 `variant`。派工给别人看的东西一律用产品名。
 
 ## 旧实现与历史记录
 
-此前 Arc Deck 是 DeepSeek Harness 的原生桌面客户端，有两个并列实现，
+此前 Saiku Deck 是 DeepSeek Harness 的原生桌面客户端，有两个并列实现，
 外加**一层两者共用的协议客户端**。
 
 ```
@@ -70,7 +76,7 @@ arc-deck-dsh/   与内核说话的协议层（C# / .NET 9，桌面进程）  两
 | 外观 | 自定 —— Kanesumi Design | **跟系统走**（唯一例外：圆角归零，见 U3） |
 | 理由 | 跨平台一致性 | 用平台现成的基础设施 |
 
-产品名 **Arc Deck**，仓名 `arc-deck`。
+这两条 GUI 当时属于 **Arc Deck**，现统称 **Saiku Deck**（命名见文首）。
 设计正典（**只与 `kanesumi/` 相关**）：
 [Ether `docs/KANESUMI_DESIGN.md`](https://github.com/ProjectArcturius/Ether/blob/main/docs/KANESUMI_DESIGN.md)。
 
@@ -854,7 +860,7 @@ SDK 里 152 处引用、0 处定义。
 | **TUI 工具视图与模式** | ✅ 代码 + 夹具实测：按类别的工具摘要、着色 diff、折叠态可见失败、全屏查看器（`/diff` `/output`）；§7.4 六种模式转换、运行中先确认、Plan 在执行层只读（`policy_for` 单测：写范围清空 / shell 行摘掉）。子 agent 会话经 `/subagents` 打开（父地址由服务配，**从工具块直接进入未做**）；**鼠标点选不做**（用户裁定纯键盘，鼠标只留滚轮，复制用 `/copy`） |
 | **confirm 审批** | ✅ 通道两侧都有证据：假 WS+HTTP 上 `$events` → `approval/request` → `$events/result` 逐字断言；真内核上 `$events` 首帧 `ready` 带 `clientId`；`approval: ask` 的 patch 真启动过、无激活警告。**没有**在 `confirm` 档下真发一条会触发提权的模型请求（要配额） |
 | **交互会话层**（Rust Remote：`arc-deck-dsh::remote`） | ✅ **已实测**：web 内核启停、换票、mux、会话操作（live 不耗配额）；真实一轮流式 → 权威全文替换（quota）。见 [REMOTE_0.2.1](docs/REMOTE_0.2.1.md) |
-| **GUI 后端接口** `arcdeck serve --stdio` | ✅ **已实测**（握手 / 坏行不断开 / 未知命令被容忍 / EOF 收内核放锁）；共享 socket 模式**未实现**。见 [GUI_PLUGGABLE](docs/GUI_PLUGGABLE.md) |
+| **GUI 后端接口** `saiku serve --stdio` | ✅ **已实测**（握手 / 坏行不断开 / 未知命令被容忍 / EOF 收内核放锁）；共享 socket 模式**未实现**。见 [GUI_PLUGGABLE](docs/GUI_PLUGGABLE.md) |
 | `uwp/` 编译与打包 | ✅ 从零 Rebuild 无错误无警告，产出 MSIX（0.1.13.0） |
 | `uwp/` 启动运行 | ✅ **已实测**（签名 → 覆盖安装 → 启动，无 crash.log） |
 | `uwp/` 对话页块渲染（段落/代码/工具卡） | ✅ **已实测**，逐块截图核对 |
@@ -907,19 +913,19 @@ SDK 里 152 处引用、0 处定义。
 
 ```bash
 # headless 日常用法（PRODUCT_PLAN §6.0）。首次：装运行时、写配置、存密钥。
-cargo build -p arc-deck-cli --release && cp target/release/arcdeck.exe ~/.cargo/bin/
-arcdeck runtime install            # 钉住的 DSH 装进 %LOCALAPPDATA%\arcdeck\runtime\
-arcdeck config init                # %APPDATA%\arcdeck\arcdeck.json；Ether 用 examples/ether/arcdeck.json
-arcdeck auth set opencode-go       # 密钥从 stdin 读
-arcdeck run task.md --worktree dsh/<id> --accept "cargo test -p x" --detach
-arcdeck status --all               # 每件一行；单件时退出码 0/1/2/3/4/5/10/11
-arcdeck report <id>
+cargo build -p arc-deck-cli --release && cp target/release/saiku.exe ~/.cargo/bin/
+saiku runtime install            # 钉住的 DSH 装进 %LOCALAPPDATA%\saiku\runtime\
+saiku config init                # %APPDATA%\saiku\saiku.json；Ether 用 examples/ether/saiku.json
+saiku auth set opencode-go       # 密钥从 stdin 读
+saiku run task.md --worktree dsh/<id> --accept "cargo test -p x" --detach
+saiku status --all               # 每件一行；单件时退出码 0/1/2/3/4/5/10/11
+saiku report <id>
 
-# **真实验证前先重编 release。** 改了代码却拿旧的 `target/release/arcdeck` 去跑真实任务，
+# **真实验证前先重编 release。** 改了代码却拿旧的 `target/release/saiku` 去跑真实任务，
 # 看到的「没生效」其实测的是旧二进制 —— 与 U16「`--no-build` 跑旧 dll」同一类。
 # `cargo test` 走 debug，真实场景走 release，两者不会互相更新。（2026-10-14 为此白跑两轮。）
 
-# Arc Deck 产品 crate（core / dsh / cli）—— TUI 与 headless 的那一半
+# Saiku Deck 产品 crate（core / dsh / cli）—— TUI 与 headless 的那一半
 # `--features arc-deck-cli/test-runtime` 是必需的：假 SDK 对端与隐藏子命令
 # 都在那个 feature 后面，发布构建里不存在它们。
 cargo test -p arc-deck-core -p arc-deck-dsh -p arc-deck-cli \
@@ -927,7 +933,7 @@ cargo test -p arc-deck-core -p arc-deck-dsh -p arc-deck-cli \
 
 # 端到端离线验收（不发任何模型请求）。重复跑要先清状态目录，否则第二次
 # 以 TASK_ALREADY_SEEN 退出 64 —— 见 docs/PRODUCT_PLAN.md §10.2。
-cargo run -p arc-deck-cli --bin arcdeck --features test-runtime -- worker run \
+cargo run -p arc-deck-cli --bin saiku --features test-runtime -- worker run \
     --config tests/fixtures/worker-offline.json \
     --task tests/fixtures/worker-task.json --format jsonl --result result.json
 
@@ -1001,7 +1007,7 @@ $ps5 = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 & $ps5 -File uwp\tools\shot\Uia.ps1 -Invoke "会话" -Out shot.png
 
 # TUI 真终端探针（隐藏控制台 + 写按键 + 读屏幕；-Submit 会花一次小配额）
-& $ps5 -File crates\arc-deck-tui\tools\console-probe.ps1 -Exe D:\arcdeck\target-main\release\arcdeck.exe
+& $ps5 -File crates\arc-deck-tui\tools\console-probe.ps1 -Exe D:\arcdeck\target-main\release\saiku.exe
 ```
 
 **别用肉眼判断界面改没改。** `uwp/tools/shot/` 下的脚本是为了把这类判断做成

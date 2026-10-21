@@ -1,4 +1,4 @@
-# Arc Deck · 流式排版性能实测
+# Saiku Deck · 流式排版性能实测
 
 > 探针：`probes/layout-bench`。全部数字为 **release** 构建、单机实测（Windows，
 > 字体 `simhei.ttf` 9.3 MB，字号 15.0）。复现：`cargo run -p layout-bench --release`。

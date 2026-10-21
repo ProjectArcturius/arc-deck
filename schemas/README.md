@@ -28,5 +28,5 @@
 ## 与 DSH 线上形状的区别
 
 这里的字段一律 `snake_case`（`task_id`、`exit_code`、`total_tokens`），是
-**Arc Deck 自己的**契约。DSH 的 JSON-RPC 与通知用 `camelCase`（`sessionId`、
+**Saiku 自己的**契约。DSH 的 JSON-RPC 与通知用 `camelCase`（`sessionId`、
 `promptTokens`），那层映射在 `arc-deck-dsh` 里完成，不要混用。
