@@ -7,7 +7,7 @@
 
   Usage:
     powershell.exe -File Crop.ps1 -Element "Projects/arc-deck" -Shot shot.png -Out crop.png
-    powershell.exe -File Crop.ps1 -Element "Arc Deck 骨架与 IME 验证" -Shot shot.png -Out crop.png -Pad 8 -Zoom 8
+    powershell.exe -File Crop.ps1 -Element "Saiku Deck 骨架与 IME 验证" -Shot shot.png -Out crop.png -Pad 8 -Zoom 8
 #>
 param(
   [Parameter(Mandatory=$true)][string]$Element,
@@ -25,8 +25,8 @@ $AE = [System.Windows.Automation.AutomationElement]
 $TS = [System.Windows.Automation.TreeScope]
 
 $win = $AE::RootElement.FindFirst($TS::Children,
-  (New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, "Arc Deck")))
-if ($null -eq $win) { Write-Error "Arc Deck window not found"; exit 1 }
+  (New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, "Saiku Deck")))
+if ($null -eq $win) { Write-Error "Saiku Deck window not found"; exit 1 }
 
 $all = $win.FindAll($TS::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
 $hit = $null

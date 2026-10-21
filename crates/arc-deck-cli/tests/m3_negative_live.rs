@@ -25,8 +25,8 @@ use arc_deck_core::userconfig::PINNED_DSH_VERSION;
 use arc_deck_dsh::fake_provider::{self, Provider, Script};
 use serde_json::{json, Value};
 
-fn arcdeck_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_arcdeck")
+fn saiku_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_saiku")
 }
 
 /// 假端点在请求里看到的模型名。与配置里的 `models` 表一致 —— 不一致时 DSH 会在
@@ -43,7 +43,7 @@ fn runtime_entry() -> PathBuf {
     assert!(
         entry.is_file(),
         "本机没有钉住的 DSH 运行时（{PINNED_DSH_VERSION}）：找不到 {}。\
-         先运行 `arcdeck runtime install` 再跑这些 live 用例",
+         先运行 `saiku runtime install` 再跑这些 live 用例",
         entry.display()
     );
     entry
@@ -202,7 +202,7 @@ impl Case {
         Provider::start(script, self.path("requests.jsonl")).expect("起假端点")
     }
 
-    /// 跑一次 `arcdeck run`：真实内核 + 假模型端点。
+    /// 跑一次 `saiku run`：真实内核 + 假模型端点。
     ///
     /// `readonly` 档**不带验收命令**：`ACCEPTANCE_NOT_ALLOWED` 会在建立任何状态之前
     /// 拒掉整次运行（「验收身份不能绕过授权」），于是走不到工具被拒那一步。
@@ -212,16 +212,16 @@ impl Case {
         self.run_with_provider(&provider, permission, &[], accept)
     }
 
-    /// 跑一次 `arcdeck worker run`：配置由测试**手写**。
+    /// 跑一次 `saiku worker run`：配置由测试**手写**。
     ///
-    /// 只有 `network = false` 需要这条路：`arcdeck run` 物化启动配置时 `network` 恒为 true
+    /// 只有 `network = false` 需要这条路：`saiku run` 物化启动配置时 `network` 恒为 true
     /// （产品层还没有关网络的开关），而 `worker run` 收的就是启动配置本身 ——
     /// 于是照样走真实内核，只是配置不是物化的那一份。
     fn run_worker(&self, provider: &Provider, config: Value) -> Outcome {
         let config_path = self.path("worker.json");
         std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
         let task_path = self.write_task(json!({}), Value::Null);
-        let output = Command::new(arcdeck_bin())
+        let output = Command::new(saiku_bin())
             .arg("worker")
             .arg("run")
             .arg("--config")
@@ -232,10 +232,10 @@ impl Case {
             .arg("jsonl")
             .arg("--result")
             .arg(self.path("result.json"))
-            .env("ARCDECK_TEST_FAKE_KEY", "fake-key-not-a-secret")
+            .env("SAIKU_TEST_FAKE_KEY", "fake-key-not-a-secret")
             .env("DSH_TELEMETRY_DISABLED", "1")
             .output()
-            .expect("跑不起 arcdeck worker");
+            .expect("跑不起 saiku worker");
         Outcome {
             code: output.status.code().unwrap_or(-1),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -278,10 +278,10 @@ impl Case {
     ) -> Outcome {
         let task_path = self.write_task(json!({}), Value::Null);
 
-        let config_path = self.path("arcdeck.json");
+        let config_path = self.path("saiku.json");
         std::fs::write(&config_path, self.config_json(&provider.url())).unwrap();
 
-        let mut command = Command::new(arcdeck_bin());
+        let mut command = Command::new(saiku_bin());
         command
             .arg("run")
             .arg(&task_path)
@@ -299,7 +299,7 @@ impl Case {
             .arg("jsonl")
             // 假端点的路由只要求「有一个非空的密钥」；给一个显式的假值，
             // 免得测试撞上本机 `auth.json` 的真实内容（live 用例不该依赖它）。
-            .env("ARCDECK_TEST_FAKE_KEY", "fake-key-not-a-secret")
+            .env("SAIKU_TEST_FAKE_KEY", "fake-key-not-a-secret")
             .env("DSH_TELEMETRY_DISABLED", "1");
         if accept {
             // 验收命令模型从不执行（脚本里没有那条调用），于是终态必然是 blocked +
@@ -309,7 +309,7 @@ impl Case {
         for arg in extra_args {
             command.arg(arg);
         }
-        let output = command.output().expect("跑不起 arcdeck");
+        let output = command.output().expect("跑不起 saiku");
         Outcome {
             code: output.status.code().unwrap_or(-1),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -330,12 +330,12 @@ impl Case {
                     "api": "anthropic-messages",
                     "options": {
                         "baseURL": base_url,
-                        "apiKey": "{env:ARCDECK_TEST_FAKE_KEY}",
+                        "apiKey": "{env:SAIKU_TEST_FAKE_KEY}",
                     },
                     "models": { MODEL: { "name": "Fake", "contextWindow": 100000 } },
                 }
             },
-            // 运行时目录由测试显式给出：不吃本机 `arcdeck.json` 里的设置。
+            // 运行时目录由测试显式给出：不吃本机 `saiku.json` 里的设置。
             "runtime": {
                 "dir": runtime_dir().display().to_string().replace('\\', "/"),
                 "node": "node",
@@ -373,8 +373,8 @@ impl Case {
                     "api": "anthropic-messages",
                     "base_url": base_url,
                     "models": [{ "id": MODEL, "name": "Fake", "context_window": 100000 }],
-                    "key_env": "ARCDECK_TEST_FAKE_KEY",
-                    "key_source": "env:ARCDECK_TEST_FAKE_KEY",
+                    "key_env": "SAIKU_TEST_FAKE_KEY",
+                    "key_source": "env:SAIKU_TEST_FAKE_KEY",
                 },
             },
             "state_root": self.state.display().to_string().replace('\\', "/"),
@@ -583,7 +583,7 @@ fn m3_live_shell_tools_are_absent_not_just_denied() {
 #[test]
 #[ignore = "live：需要本机已安装钉住的 DSH 运行时"]
 fn m3_live_workspace_write_outside_is_denied() {
-    let outside = home_dir().join("arcdeck-m3b-outside-write.txt");
+    let outside = home_dir().join("saiku-m3b-outside-write.txt");
     let _ = std::fs::remove_file(&outside);
     assert!(!outside.exists(), "前置：{} 不该已经存在", outside.display());
 
@@ -628,7 +628,7 @@ fn m3_live_workspace_write_inside_succeeds() {
 #[test]
 #[ignore = "live：需要本机已安装钉住的 DSH 运行时"]
 fn m3_live_write_inside_temp_root_is_allowed() {
-    let allowed = std::env::temp_dir().join("arcdeck-m3b-inside-temp-root.txt");
+    let allowed = std::env::temp_dir().join("saiku-m3b-inside-temp-root.txt");
     let _ = std::fs::remove_file(&allowed);
 
     let case = Case::new("temp-root");
@@ -665,7 +665,7 @@ fn m3_live_workspace_write_outside_command_does_not_take_effect() {
     // 目标放在用户主目录，不放临时区：`os.tmpdir()` 本来就在 workspace-write 的写根里
     // （见上面临时区那条正例），放那里测的不是「越界」。派工者复跑时就因此得到不同结论 ——
     // 工人环境的 TEMP 在 D 盘、复跑环境在 C 盘，沙箱的表现跟着变。
-    let outside = home_dir().join("arcdeck-m3b-cmd-outside.txt");
+    let outside = home_dir().join("saiku-m3b-cmd-outside.txt");
     let _ = std::fs::remove_file(&outside);
 
     let case = Case::new("ws-cmd-outside");
@@ -759,7 +759,7 @@ fn m3_live_escalation_is_rejected_by_policy_not_by_missing_answerer() {
 #[test]
 #[ignore = "live：需要本机已安装钉住的 DSH 运行时"]
 fn m3_live_full_permission_write_outside_succeeds() {
-    let outside = home_dir().join("arcdeck-m3b-full-outside-write.txt");
+    let outside = home_dir().join("saiku-m3b-full-outside-write.txt");
     let _ = std::fs::remove_file(&outside);
 
     let case = Case::new("full-outside");
@@ -935,7 +935,7 @@ fn m3_live_subagent_cannot_write_and_has_no_shell() {
 ///
 /// 期望：web 工具**不存在**（`tool-web` 行被摘），shell 工具也不存在。
 ///
-/// 这条走 `worker run`（配置手写）：`arcdeck run` 物化启动配置时 `network` 恒为 true，
+/// 这条走 `worker run`（配置手写）：`saiku run` 物化启动配置时 `network` 恒为 true，
 /// 产品层还没有关网络的开关 —— 而 §3 的「`network=false` 但 shell 还开着 → 拒绝启动」
 /// 那条规则要求调用方能表达这个组合，所以只有手写配置这条路能走到它。
 #[test]
@@ -1043,12 +1043,12 @@ fn session_log_lines(outcome: &Outcome) -> Result<Vec<String>, String> {
         .ok_or_else(|| {
             format!("{} 下没有 *.jsonl.zstd；run_dir 里实际有：{listing:#?}", sessions.display())
         })?;
-    let zstd = std::env::var("ARCDECK_TEST_ZSTD").unwrap_or_else(|_| "zstd".to_string());
+    let zstd = std::env::var("SAIKU_TEST_ZSTD").unwrap_or_else(|_| "zstd".to_string());
     let out = Command::new(&zstd)
         .args(["-d", "-c"])
         .arg(&log)
         .output()
-        .map_err(|e| format!("跑不起 `{zstd}`（{e}）；用 $ARCDECK_TEST_ZSTD 指定路径"))?;
+        .map_err(|e| format!("跑不起 `{zstd}`（{e}）；用 $SAIKU_TEST_ZSTD 指定路径"))?;
     if !out.status.success() {
         return Err(format!("`{zstd} -d -c` 退出 {}：{}", out.status, String::from_utf8_lossy(&out.stderr)));
     }
@@ -1079,8 +1079,8 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
 #[test]
 #[ignore = "live：需要本机已安装钉住的 DSH 运行时"]
 fn m3_live_probe_shows_the_real_request_and_result_shapes() {
-    let genuinely_outside = home_dir().join("arcdeck-m3b-probe-outside.txt");
-    let temp_root_target = std::env::temp_dir().join("arcdeck-m3b-probe-temp-root.txt");
+    let genuinely_outside = home_dir().join("saiku-m3b-probe-outside.txt");
+    let temp_root_target = std::env::temp_dir().join("saiku-m3b-probe-temp-root.txt");
     for path in [&genuinely_outside, &temp_root_target] {
         let _ = std::fs::remove_file(path);
     }

@@ -10,34 +10,34 @@
 
 [Setup]
 AppId={{231F89C8-49B7-47AD-8817-47C41DE88684}
-AppName=Arc Deck
+AppName=Saiku
 AppVersion={#Version}
 AppPublisher=Project Arcturius
-AppPublisherURL=https://github.com/ProjectArcturius/arc-deck
-DefaultDirName={localappdata}\Programs\Arc Deck
-DefaultGroupName=Arc Deck
+AppPublisherURL=https://github.com/ProjectArcturius/saiku
+DefaultDirName={localappdata}\Programs\Saiku
+DefaultGroupName=Saiku
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir={#OutputDir}
-OutputBaseFilename=arcdeck-{#Version}-windows-x86_64-setup
+OutputBaseFilename=saiku-{#Version}-windows-x86_64-setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 ChangesEnvironment=yes
 LicenseFile={#SourceDir}\LICENSE
-UninstallDisplayIcon={app}\arcdeck.exe
+UninstallDisplayIcon={app}\saiku.exe
 DisableProgramGroupPage=yes
 
 [Tasks]
-Name: "addtopath"; Description: "Add Arc Deck to your user PATH (recommended)"
+Name: "addtopath"; Description: "Add Saiku to your user PATH (recommended)"
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "install.ps1,install.cmd,uninstall.ps1,uninstall.cmd"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\Getting started"; Filename: "{app}\INSTALL.md"
-Name: "{group}\Uninstall Arc Deck"; Filename: "{uninstallexe}"
+Name: "{group}\Uninstall Saiku"; Filename: "{uninstallexe}"
 
 [Code]
 function HasPath(Value, Entry: String): Boolean;
@@ -52,11 +52,11 @@ begin
     Entry := ExpandConstant('{app}');
     RegQueryStringValue(HKCU, 'Environment', 'Path', Value);
     if not HasPath(Value, Entry) then begin
-      RegWriteStringValue(HKCU, 'Software\Arc Deck', 'OriginalPath', Value);
+      RegWriteStringValue(HKCU, 'Software\Saiku', 'OriginalPath', Value);
       if Value <> '' then Value := Entry + ';' + Value else Value := Entry;
       RegWriteExpandStringValue(HKCU, 'Environment', 'Path', Value);
-      RegWriteStringValue(HKCU, 'Software\Arc Deck', 'WrittenPath', Value);
-      RegWriteStringValue(HKCU, 'Software\Arc Deck', 'AddedPath', Entry);
+      RegWriteStringValue(HKCU, 'Software\Saiku', 'WrittenPath', Value);
+      RegWriteStringValue(HKCU, 'Software\Saiku', 'AddedPath', Entry);
     end;
   end;
 end;
@@ -65,14 +65,14 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var Value, Entry, Item, Kept, Original, Written: String; Sep: Integer;
 begin
   if (CurUninstallStep = usPostUninstall) and
-      RegQueryStringValue(HKCU, 'Software\Arc Deck', 'AddedPath', Entry) then begin
+      RegQueryStringValue(HKCU, 'Software\Saiku', 'AddedPath', Entry) then begin
     RegQueryStringValue(HKCU, 'Environment', 'Path', Value);
-    if RegQueryStringValue(HKCU, 'Software\Arc Deck', 'WrittenPath', Written) and
-        (Value = Written) and RegQueryStringValue(HKCU, 'Software\Arc Deck', 'OriginalPath', Original) then begin
+    if RegQueryStringValue(HKCU, 'Software\Saiku', 'WrittenPath', Written) and
+        (Value = Written) and RegQueryStringValue(HKCU, 'Software\Saiku', 'OriginalPath', Original) then begin
       RegWriteExpandStringValue(HKCU, 'Environment', 'Path', Original);
-      RegDeleteValue(HKCU, 'Software\Arc Deck', 'AddedPath');
-      RegDeleteValue(HKCU, 'Software\Arc Deck', 'WrittenPath');
-      RegDeleteValue(HKCU, 'Software\Arc Deck', 'OriginalPath');
+      RegDeleteValue(HKCU, 'Software\Saiku', 'AddedPath');
+      RegDeleteValue(HKCU, 'Software\Saiku', 'WrittenPath');
+      RegDeleteValue(HKCU, 'Software\Saiku', 'OriginalPath');
       exit;
     end;
     Kept := '';
@@ -87,8 +87,8 @@ begin
       end;
     end;
     RegWriteExpandStringValue(HKCU, 'Environment', 'Path', Kept);
-    RegDeleteValue(HKCU, 'Software\Arc Deck', 'AddedPath');
-    RegDeleteValue(HKCU, 'Software\Arc Deck', 'WrittenPath');
-    RegDeleteValue(HKCU, 'Software\Arc Deck', 'OriginalPath');
+    RegDeleteValue(HKCU, 'Software\Saiku', 'AddedPath');
+    RegDeleteValue(HKCU, 'Software\Saiku', 'WrittenPath');
+    RegDeleteValue(HKCU, 'Software\Saiku', 'OriginalPath');
   end;
 end;

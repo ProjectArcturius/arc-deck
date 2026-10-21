@@ -1,4 +1,4 @@
-// Arc Deck · 输入链路自动验证
+// Saiku Deck · 输入链路自动验证
 //
 // 目的：把「能唤起输入法但打不出字」这类问题从**人工点窗口**变成**可重复的自动验证**。
 //
@@ -61,13 +61,13 @@ fn parse_all(title: &str) -> (Option<u32>, Option<u32>) {
 }
 
 fn main() {
-    println!("Arc Deck · 输入链路自动验证");
+    println!("Saiku Deck · 输入链路自动验证");
     println!("============================");
 
     // SAFETY: 标准 Win32 查询，句柄使用前判空。
     let hwnd = unsafe { FindWindowW(CLASS_NAME.as_ptr(), std::ptr::null()) };
     if hwnd == 0 {
-        eprintln!("未找到 Arc Deck 窗口 —— 请先启动 arc-deck-demo.exe");
+        eprintln!("未找到 Saiku Deck 窗口 —— 请先启动 arc-deck-demo.exe");
         std::process::exit(1);
     }
     if unsafe { IsWindow(hwnd) } == 0 {

@@ -16,7 +16,7 @@ $windows = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $cond)
 $target = $null
 foreach ($w in $windows) {
     if ($TargetPid -ne 0 -and $w.Current.ProcessId -eq $TargetPid) { $target = $w; break }
-    if ($TargetPid -eq 0 -and $w.Current.Name -like "*Arc Deck*") { $target = $w; break }
+    if ($TargetPid -eq 0 -and $w.Current.Name -like "*Saiku Deck*") { $target = $w; break }
 }
 if ($target -eq $null) {
     Write-Output "未找到窗口（pid=$TargetPid）"

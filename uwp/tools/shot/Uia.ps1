@@ -1,5 +1,5 @@
 ﻿<#
-  UI Automation driver for the Arc Deck UWP window. Windows PowerShell 5.1.
+  UI Automation driver for the Saiku Deck UWP window. Windows PowerShell 5.1.
 
   Why this exists: coordinate clicking on this window is unreliable. The window
   belongs to ApplicationFrameHost and sits at DPI 120, and empirical clicks at
@@ -38,9 +38,9 @@ $CT = [System.Windows.Automation.ControlType]
 
 # The UWP window is owned by ApplicationFrameHost, so match on the title.
 $root = $AE::RootElement
-$cond = New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, "Arc Deck")
+$cond = New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, "Saiku Deck")
 $win = $root.FindFirst($TS::Children, $cond)
-if ($null -eq $win) { Write-Error "Arc Deck window not found"; exit 1 }
+if ($null -eq $win) { Write-Error "Saiku Deck window not found"; exit 1 }
 
 function Walk($el, $d) {
   if ($d -gt $Depth) { return }

@@ -51,8 +51,8 @@ $AE = [System.Windows.Automation.AutomationElement]
 $TS = [System.Windows.Automation.TreeScope]
 
 $win = $AE::RootElement.FindFirst($TS::Children,
-  (New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, "Arc Deck")))
-if ($null -eq $win) { Write-Error "Arc Deck window not found"; exit 1 }
+  (New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, "Saiku Deck")))
+if ($null -eq $win) { Write-Error "Saiku Deck window not found"; exit 1 }
 
 # Prefer a ListItem whose name matches; fall back to any matching element.
 $liCond = New-Object System.Windows.Automation.PropertyCondition(

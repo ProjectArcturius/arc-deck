@@ -4,12 +4,12 @@
 //! 密钥只走环境变量、授权级别经 `execution_guard` 投影成 patch 行），差别只有三处：
 //!
 //! 1. **profile 是 `web`**，不是 `sdk`：会话列表、历史、单会话取消只在 Remote 层有（§9.1）。
-//! 2. **`DSH_HOME` 是长期的**（`<本机数据目录>/arcdeck/dsh-home`），不是每任务一份 ——
+//! 2. **`DSH_HOME` 是长期的**（`<本机数据目录>/saiku/dsh-home`），不是每任务一份 ——
 //!    交互会话要能在下次打开时恢复。它**绝不是** DSH Desktop 的 home（P15：follow 会接管会话）。
 //! 3. **一份 home 只许一个内核**：两个内核写同一份会话日志，正是 P14 那种「倒退 4」的坏日志的
-//!    候选成因。所以这里拿一把锁，拿不到就明说「另一个 arcdeck 正在用」，而不是悄悄并发。
+//!    候选成因。所以这里拿一把锁，拿不到就明说「另一个 saiku 正在用」，而不是悄悄并发。
 //!
-//! persona 由调用方装配好再给（`arcdeck` 的 `serve::interactive_persona`）：§5.3.1 人格默认关，
+//! persona 由调用方装配好再给（`saiku` 的 `serve::interactive_persona`）：§5.3.1 人格默认关，
 //! 关着时是空串、一段都不加。`confirm` 授权已经接通：审批策略写成 `ask`，审批请求经
 //! `$events` 流送到界面（`events.rs`）。
 
@@ -30,7 +30,7 @@ use super::host::WebKernelOptions;
 
 /// 交互面的默认 home。跨 TUI 重启保持不变，会话才能恢复。
 pub fn default_dsh_home() -> PathBuf {
-    userconfig::local_data_dir().join("arcdeck").join("dsh-home")
+    userconfig::local_data_dir().join("saiku").join("dsh-home")
 }
 
 /// 启动一个交互内核所需的全部东西。
@@ -123,7 +123,7 @@ pub fn interactive(input: InteractiveInput<'_>) -> SpecResult<InteractiveLaunch>
     std::fs::create_dir_all(input.dsh_home).map_err(|e| {
         SpecError::new(code::CONFIG_INVALID, format!("建 {} 失败：{e}", input.dsh_home.display()))
     })?;
-    let patch_path = input.dsh_home.join("arcdeck-web-patch.json");
+    let patch_path = input.dsh_home.join("saiku-web-patch.json");
     std::fs::write(&patch_path, patch).map_err(|e| {
         SpecError::new(code::CONFIG_INVALID, format!("写 {} 失败：{e}", patch_path.display()))
     })?;
@@ -203,7 +203,7 @@ pub fn policy_for(
 pub struct HomeLock {
     path: PathBuf,
     _file: Option<File>,
-    /// `<home>/arcdeck.kernel`：本进程拉起的内核 pid。**确认收掉内核之后才删**。
+    /// `<home>/saiku.kernel`：本进程拉起的内核 pid。**确认收掉内核之后才删**。
     kernel: PathBuf,
     /// 拿锁时收掉的遗留内核（给人看的一句话）。没有就是 `None`。
     pub reaped: Option<String>,
@@ -214,7 +214,7 @@ impl HomeLock {
         std::fs::create_dir_all(home).map_err(|e| {
             SpecError::new(code::CONFIG_INVALID, format!("建 {} 失败：{e}", home.display()))
         })?;
-        let path = home.join("arcdeck.lock");
+        let path = home.join("saiku.lock");
         for _ in 0..2 {
             match OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(mut file) => {
@@ -230,7 +230,7 @@ impl HomeLock {
                             return Err(SpecError::new(
                                 code::CONFIG_INVALID,
                                 format!(
-                                    "另一个 arcdeck（pid {pid}）正在使用交互会话目录 {}。\
+                                    "另一个 saiku（pid {pid}）正在使用交互会话目录 {}。\
                                      同一份会话日志不能有两个内核同时写（AGENTS.md P14）；先关掉那一个",
                                     home.display()
                                 ),
@@ -269,12 +269,12 @@ impl HomeLock {
     }
 }
 
-const KERNEL_FILE: &str = "arcdeck.kernel";
+const KERNEL_FILE: &str = "saiku.kernel";
 
 /// 收掉上一个主人留下的内核。
 ///
 /// 为什么需要（2026-10-20 实测）：TUI 被硬杀（关掉终端窗口不跑 Drop）之后，它拉起的 node 内核
-/// 成了孤儿，**还活着**；下一个 arcdeck 看锁里的 pid 已死、照规矩接管 —— 然后起了**第二个**内核
+/// 成了孤儿，**还活着**；下一个 saiku 看锁里的 pid 已死、照规矩接管 —— 然后起了**第二个**内核
 /// 在同一份 home 上。那正是 P14「两个写者」的形状。锁文件只记录「谁拿着 home」，不记录
 /// 「谁的内核还在跑」，所以另记一份内核 pid。
 ///
@@ -286,7 +286,7 @@ fn reap_recorded_kernel(home: &Path) -> Option<String> {
     let _ = std::fs::remove_file(&record);
     let pid = pid?;
     let normalize = |s: &str| s.replace('/', "\\").to_lowercase();
-    let marker = normalize(&home.join("arcdeck-web-patch.json").display().to_string());
+    let marker = normalize(&home.join("saiku-web-patch.json").display().to_string());
     let command = crate::process::command_line(pid)?;
     let command = normalize(&command);
     if !(command.contains("--profile web") && command.contains(&marker)) {
@@ -294,9 +294,9 @@ fn reap_recorded_kernel(home: &Path) -> Option<String> {
     }
     let done = crate::process::kill_tree_by_pid(pid);
     Some(if done.exited {
-        format!("收掉了上一个 arcdeck 留下的交互内核（pid {pid}）：它的主人没有正常退出")
+        format!("收掉了上一个 saiku 留下的交互内核（pid {pid}）：它的主人没有正常退出")
     } else {
-        format!("上一个 arcdeck 留下的交互内核（pid {pid}）没能确认收掉：{}", done.detail)
+        format!("上一个 saiku 留下的交互内核（pid {pid}）没能确认收掉：{}", done.detail)
     })
 }
 
@@ -351,7 +351,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let first = HomeLock::acquire(home.path()).unwrap();
         let error = HomeLock::acquire(home.path()).err().expect("第二把锁不该拿到");
-        assert!(error.message.contains("另一个 arcdeck"), "{}", error.message);
+        assert!(error.message.contains("另一个 saiku"), "{}", error.message);
         drop(first);
         HomeLock::acquire(home.path()).expect("第一把放掉之后可以再拿");
     }
@@ -360,7 +360,7 @@ mod tests {
     fn a_lock_left_by_a_dead_process_is_taken_over() {
         let home = tempfile::tempdir().unwrap();
         // 一个几乎不可能存活的 pid：被硬杀的那一次留下的锁文件。
-        std::fs::write(home.path().join("arcdeck.lock"), "4294967294").unwrap();
+        std::fs::write(home.path().join("saiku.lock"), "4294967294").unwrap();
         HomeLock::acquire(home.path()).expect("遗留锁应被接管");
     }
 
@@ -393,7 +393,7 @@ mod tests {
     #[test]
     fn a_kernel_left_behind_is_reaped_only_when_its_command_line_matches() {
         let home = tempfile::tempdir().unwrap();
-        let patch = home.path().join("arcdeck-web-patch.json").display().to_string();
+        let patch = home.path().join("saiku-web-patch.json").display().to_string();
         let mut stranger = sleeper(&["--profile".into(), "web".into(), "--patch".into(), "elsewhere.json".into()]);
         std::fs::write(home.path().join(KERNEL_FILE), stranger.id().to_string()).unwrap();
         let lock = HomeLock::acquire(home.path()).unwrap();

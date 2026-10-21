@@ -16,12 +16,12 @@ try {
     $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0) { throw 'cargo metadata failed' }
     $version = ($meta.packages | Where-Object name -eq 'arc-deck-cli').version
-    $binary = Join-Path $meta.target_directory 'release/arcdeck.exe'
+    $binary = Join-Path $meta.target_directory 'release/saiku.exe'
     $reported = & $binary --version
-    if ($LASTEXITCODE -ne 0 -or $reported -ne "arcdeck $version") { throw 'binary version mismatch' }
-    $stage = Join-Path $OutDir "arcdeck-$version-windows-x86_64"
+    if ($LASTEXITCODE -ne 0 -or $reported -ne "saiku $version") { throw 'binary version mismatch' }
+    $stage = Join-Path $OutDir "saiku-$version-windows-x86_64"
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
-    Copy-Item -LiteralPath $binary -Destination "$stage/arcdeck.exe" -Force
+    Copy-Item -LiteralPath $binary -Destination "$stage/saiku.exe" -Force
     foreach ($file in @('LICENSE', 'NOTICE')) { Copy-Item -LiteralPath "$repo/$file" -Destination $stage -Force }
     Copy-Item -LiteralPath "$repo/crates/arc-deck-tui/LICENSE-OpenCode" -Destination $stage -Force
     Copy-Item -LiteralPath "$repo/docs/INSTALL.md" -Destination $stage -Force
@@ -33,9 +33,9 @@ try {
     $hostTarget = ((rustc -vV | Select-String '^host: ').ToString() -replace '^host: ', '')
     @{ version = $version; commit = $commit; dirty = $dirty; target = $hostTarget; built_at = [DateTime]::UtcNow.ToString('o') } |
         ConvertTo-Json | Set-Content -LiteralPath "$stage/BUILD-INFO.json" -Encoding UTF8
-    Compress-Archive -Path "$stage/*" -DestinationPath "$OutDir/arcdeck-$version-windows-x86_64.zip" -Force
+    Compress-Archive -Path "$stage/*" -DestinationPath "$OutDir/saiku-$version-windows-x86_64.zip" -Force
     if (-not (Test-Path -LiteralPath $Iscc)) { throw "Inno Setup 6 compiler missing: $Iscc" }
-    & $Iscc "/DSourceDir=$stage" "/DOutputDir=$OutDir" "/DVersion=$version" "$PSScriptRoot/windows/arcdeck.iss"
+    & $Iscc "/DSourceDir=$stage" "/DOutputDir=$OutDir" "/DVersion=$version" "$PSScriptRoot/windows/saiku.iss"
     if ($LASTEXITCODE -ne 0) { throw 'Inno Setup failed' }
     Get-ChildItem -LiteralPath $OutDir -File | Where-Object { $_.Name -match '\.(exe|zip)$' } |
         ForEach-Object { $hash = Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256; "$($hash.Hash.ToLower())  $($_.Name)" } |

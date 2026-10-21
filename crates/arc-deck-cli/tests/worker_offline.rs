@@ -22,7 +22,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn binary() -> &'static str {
-    env!("CARGO_BIN_EXE_arcdeck")
+    env!("CARGO_BIN_EXE_saiku")
 }
 
 struct Case {
@@ -483,7 +483,7 @@ fn structured_error_fields_drive_the_classification() {
 // `worker run` 是 M1 的底层入口，而 `run` 才是调度者真正用的那条（它负责物化配置、
 // 建 worktree、决定一般模式还是工人模式）。所以它必须有自己的端到端覆盖。
 //
-// 接假内核靠 `ARCDECK_FIXTURE_SCENARIO` —— 那是 `test-runtime` 构建里唯一的出口
+// 接假内核靠 `SAIKU_FIXTURE_SCENARIO` —— 那是 `test-runtime` 构建里唯一的出口
 // （`cmd_run` 里 cfg 门控），发布构建编译不出它。
 
 struct RunCase {
@@ -497,7 +497,7 @@ impl RunCase {
         let dir = tempfile::tempdir().expect("建临时目录");
         let workspace = dir.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
-        let config = dir.path().join("arcdeck.json");
+        let config = dir.path().join("saiku.json");
         std::fs::write(
             &config,
             serde_json::to_string_pretty(&json!({
@@ -520,7 +520,7 @@ impl RunCase {
 
     fn run_in(&self, workspace: &Path, extra: &[&str]) -> Run {
         let mut command = Command::new(binary());
-        command.env("ARCDECK_FIXTURE_SCENARIO", "success").arg("run");
+        command.env("SAIKU_FIXTURE_SCENARIO", "success").arg("run");
         for arg in extra {
             command.arg(arg);
         }
@@ -598,7 +598,7 @@ fn tui_style_stdin_prompt_survives_windows_argument_limits_and_shell_metacharact
     let case = RunCase::new();
     let prompt = format!("{}\n`literal` $(never execute) ; & |\n/不是命令", "中文👩‍💻".repeat(8000));
     let mut child = Command::new(binary())
-        .env("ARCDECK_FIXTURE_SCENARIO", "success")
+        .env("SAIKU_FIXTURE_SCENARIO", "success")
         .args(["run", "--prompt", "-", "--format", "jsonl", "--id", "stdin-literal", "--agent", "echo", "--permission", "workspace"])
         .arg("--config").arg(&case.config).arg("--workspace").arg(&case.workspace)
         .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
@@ -627,7 +627,7 @@ fn conflicting_literal_and_task_inputs_are_rejected_without_running() {
 #[test]
 fn no_arguments_without_a_terminal_reports_the_headless_alternative() {
     let case = RunCase::new();
-    let output = Command::new(binary()).env("ARCDECK_CONFIG", &case.config)
+    let output = Command::new(binary()).env("SAIKU_CONFIG", &case.config)
         .current_dir(&case.workspace).output().unwrap();
     assert_eq!(output.status.code(), Some(64));
     assert!(String::from_utf8(output.stderr).unwrap().contains("交互终端"));
@@ -688,7 +688,7 @@ fn detached_run_against_a_working_fixture_reaches_completed() {
     assert!(status["state"].is_string());
 }
 
-/// 调度者常把派工的输出接进管道（`id=$(arcdeck run … --detach)`、`| tee`）。
+/// 调度者常把派工的输出接进管道（`id=$(saiku run … --detach)`、`| tee`）。
 /// 监工不能继承派工进程的标准流句柄，否则读端等不到 EOF，派工要挂到整件任务跑完 ——
 /// Windows 上实测过：`hang` 夹具（约 15 s）的派工等满了才返回。
 #[test]
@@ -696,7 +696,7 @@ fn piped_detached_dispatch_returns_without_waiting_for_the_task() {
     let case = RunCase::new();
     let started = std::time::Instant::now();
     let output = Command::new(binary())
-        .env("ARCDECK_FIXTURE_SCENARIO", "hang")
+        .env("SAIKU_FIXTURE_SCENARIO", "hang")
         .args(["run", "挂住的活", "--id", "piped", "--detach", "--config"])
         .arg(&case.config)
         .arg("--workspace")
@@ -797,7 +797,7 @@ fn effort_is_a_known_flag_and_does_not_break_the_run() {
     );
 }
 
-/// `arcdeck usage` 把 provider 报告的用量加起来；**没有费用**。
+/// `saiku usage` 把 provider 报告的用量加起来；**没有费用**。
 #[test]
 fn usage_sums_what_the_provider_reported() {
     let case = RunCase::new();
@@ -982,7 +982,7 @@ fn detached_dispatch_reports_a_preflight_failure_instead_of_printing_started() {
     std::fs::create_dir_all(&workspace).unwrap();
     let state = dir.path().join("state");
 
-    let config = dir.path().join("arcdeck.json");
+    let config = dir.path().join("saiku.json");
     std::fs::write(
         &config,
         serde_json::to_string_pretty(&json!({
@@ -993,7 +993,7 @@ fn detached_dispatch_reports_a_preflight_failure_instead_of_printing_started() {
                     "api": "anthropic-messages",
                     "options": {
                         "baseURL": "http://127.0.0.1:1",
-                        "apiKey": "{env:ARCDECK_TEST_ABSENT_KEY}"
+                        "apiKey": "{env:SAIKU_TEST_ABSENT_KEY}"
                     },
                     "models": { "some-model": { "name": "无" } }
                 }
@@ -1164,7 +1164,7 @@ fn a_missing_dsh_runtime_is_refused_before_any_state_is_created() {
     let run = case.run();
     assert_eq!(run.code, 64, "stderr={}", run.stderr);
     assert!(run.stderr.contains("RUNTIME_ENTRY_MISSING"), "stderr={}", run.stderr);
-    assert!(run.stderr.contains("arcdeck runtime install"), "要告诉用户怎么修：{}", run.stderr);
+    assert!(run.stderr.contains("saiku runtime install"), "要告诉用户怎么修：{}", run.stderr);
     assert!(run.stdout.trim().is_empty(), "被拒绝的配置不该产生事件流：{}", run.stdout);
     assert!(
         !case.dir.path().join("state/runs/t1").exists(),

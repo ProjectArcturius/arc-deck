@@ -1,5 +1,5 @@
 ﻿<#
-  Contrast check for the Arc Deck UI, with the region list kept in a file.
+  Contrast check for the Saiku Deck UI, with the region list kept in a file.
 
   Why a file: passing a semicolon-separated region list through
   `pwsh -Command` -> `powershell.exe -File` mangles it (the outer shell re-parses the

@@ -22,7 +22,7 @@ static class Program
     {
         var sign = args.Length == 0 || args[0] != "--check-only";
 
-        Console.WriteLine("Arc Deck UWP · 签名准备");
+        Console.WriteLine("Saiku Deck UWP · 签名准备");
         Console.WriteLine("════════════════════════════════════════");
 
         // ── 1. 找包 ────────────────────────────────────────────────

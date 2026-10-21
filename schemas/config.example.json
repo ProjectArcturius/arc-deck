@@ -21,7 +21,7 @@
         }
       ],
       "display_name": "OpenCode Go",
-      "key_env": "ARCDECK_KEY_OPENCODE_GO",
+      "key_env": "SAIKU_KEY_OPENCODE_GO",
       "key_source": "auth"
     },
     "sandbox": "workspace-write",

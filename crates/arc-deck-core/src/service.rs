@@ -3,7 +3,7 @@
 //! 为什么现在就把它定成一份 serde 协议，而不是先在 TUI 里写死函数调用：
 //! GUI 要「热插拔」—— 独立安装、独立升级、随时连上 / 断开同一个后端（docs/GUI_PLUGGABLE.md）。
 //! 那要求前后端之间只有**一份**可序列化的契约。TUI 先用它，等于每天都在对这份契约做验收；
-//! 等 `arcdeck serve` 把它搬到 socket 上时，后端代码一行不改。
+//! 等 `saiku serve` 把它搬到 socket 上时，后端代码一行不改。
 //!
 //! 版本与兼容的规则（GUI 能独立升级的前提）：
 //! - 握手交换 [`PROTOCOL_VERSION`]；**主版本不同拒绝连接**，次要变化只允许「加」。
@@ -71,7 +71,7 @@ pub enum Event {
         accepted: bool,
         #[serde(default)]
         reason: Option<String>,
-        /// 后端的产品版本（`arcdeck --version` 那个），给前端显示 / 诊断用。
+        /// 后端的产品版本（`saiku --version` 那个），给前端显示 / 诊断用。
         #[serde(default)]
         backend: String,
     },
@@ -106,7 +106,7 @@ pub enum BackendState {
     Starting,
     /// `model` 是会话默认会用的那条（用户配置的路由，不是内核的出厂默认）。
     Ready { model: Option<ModelChoice> },
-    /// 起不来。`reason` 要可操作（「先运行 `arcdeck runtime install`」），不是一段栈。
+    /// 起不来。`reason` 要可操作（「先运行 `saiku runtime install`」），不是一段栈。
     Failed { reason: String },
     Stopped,
     #[serde(other)]
@@ -128,7 +128,7 @@ pub fn negotiate(client_protocol: u32, backend: &str) -> Event {
     if client_protocol == PROTOCOL_VERSION {
         Event::Welcome { protocol: PROTOCOL_VERSION, accepted: true, reason: None, backend: backend.into() }
     } else {
-        let who = if client_protocol < PROTOCOL_VERSION { "前端" } else { "后端 arcdeck" };
+        let who = if client_protocol < PROTOCOL_VERSION { "前端" } else { "后端 saiku" };
         Event::Welcome {
             protocol: PROTOCOL_VERSION,
             accepted: false,

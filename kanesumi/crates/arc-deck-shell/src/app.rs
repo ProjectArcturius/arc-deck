@@ -1,4 +1,4 @@
-// Arc Deck · App trait 与文本度量契约
+// Saiku Deck · App trait 与文本度量契约
 //
 // `App` 是「应用」与「平台外壳」之间**唯一**的边界。它刻意做成纯逻辑：
 // 不持有任何窗口句柄、GPU 设备、或文件路径 —— 于是它能在没有窗口的环境下
@@ -156,7 +156,7 @@ pub trait App {
     /// 是否需要重绘。默认 `false`（事件驱动）。
     ///
     /// App 在自己的 `update` / `handle_input` 里置脏，在 `render` 末尾清除。
-    /// **这是 Arc Deck 的中心化重绘门控** —— 所有动画都汇总到这一处判断，
+    /// **这是 Saiku Deck 的中心化重绘门控** —— 所有动画都汇总到这一处判断，
     /// 于是「新增了一个动画却忘了请求重绘」这类缺陷在结构上不可能发生。
     fn needs_redraw(&self) -> bool {
         false
@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn config_keeps_start_size_as_minimum() {
-        let c = AppConfig::new("io.github.arcdeck", "Arc Deck", 1200.0, 800.0);
+        let c = AppConfig::new("io.github.arcdeck", "Saiku Deck", 1200.0, 800.0);
         assert_eq!(c.min_width, 1200.0);
         assert_eq!(c.min_height, 800.0);
     }

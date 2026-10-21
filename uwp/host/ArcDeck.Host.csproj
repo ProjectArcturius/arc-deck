@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    Arc Deck · 完整信任伴随进程。
+    Saiku Deck · 完整信任伴随进程。
 
     它存在的原因只有一条：UWP 的 AppContainer 起不了子进程、读不到 %APPDATA%
     （AGENTS P1 的三条结构性限制）。这个进程由 UWP 用 FullTrustProcessLauncher 拉起，

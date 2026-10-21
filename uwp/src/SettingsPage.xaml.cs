@@ -18,7 +18,7 @@ namespace ArcDeck
             InitializeComponent();
 
             var v = Windows.ApplicationModel.Package.Current.Id.Version;
-            VersionText.Text = $"Arc Deck UWP · {v.Major}.{v.Minor}.{v.Build}";
+            VersionText.Text = $"Saiku Deck UWP · {v.Major}.{v.Minor}.{v.Build}";
 
             LoadSettings();
         }

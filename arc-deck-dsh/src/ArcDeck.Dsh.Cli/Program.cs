@@ -54,7 +54,7 @@ internal static class Program
                 targetId: harnessTarget, modelSpec: harnessModel, cwd).ConfigureAwait(false);
         }
 
-        Console.WriteLine("Arc Deck · DSH 协议客户端");
+        Console.WriteLine("Saiku Deck · DSH 协议客户端");
         Console.WriteLine("──────────────────────────────────────────────");
 
         var layout = DshRuntimeLocator.Locate();
@@ -412,7 +412,7 @@ internal static class Program
     private static async Task<int> RunHarnessModeAsync(bool list, bool checkAll, bool muxCheck, bool listRaw,
         string? verify, string? prompt, string? promptLive, string? targetId, string? modelSpec, string cwd)
     {
-        Console.WriteLine("Arc Deck · harness Remote 层（完整功能面）");
+        Console.WriteLine("Saiku Deck · harness Remote 层（完整功能面）");
         Console.WriteLine("──────────────────────────────────────────────");
 
         var install = HarnessLocator.Locate();

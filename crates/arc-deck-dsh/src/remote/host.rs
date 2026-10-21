@@ -133,7 +133,7 @@ impl WebKernel {
     pub async fn start(options: WebKernelOptions) -> Result<WebKernel, RemoteError> {
         if !options.entry.is_file() {
             return Err(RemoteError::Startup(format!(
-                "找不到 DSH 入口 {}。先运行 `arcdeck runtime install`",
+                "找不到 DSH 入口 {}。先运行 `saiku runtime install`",
                 options.entry.display()
             )));
         }
@@ -588,11 +588,11 @@ mod tests {
         let mut options = WebKernelOptions::new("node", "bin.js", "/tmp/isolated-home");
         // 调用方（或从别处抄来的配置）塞进来的 DSH_HOME **不该**生效。
         options.env.insert("DSH_HOME".into(), "/real/desktop/home".into());
-        options.env.insert("ARCDECK_KEY_X".into(), "fake".into());
+        options.env.insert("SAIKU_KEY_X".into(), "fake".into());
         let env = kernel_env(&options);
         assert_eq!(env["DSH_HOME"], "/tmp/isolated-home");
         assert_eq!(env["DSH_TELEMETRY_DISABLED"], "1");
-        assert_eq!(env["ARCDECK_KEY_X"], "fake");
+        assert_eq!(env["SAIKU_KEY_X"], "fake");
         // web 面的权限按会话给，进程级默认不设。
         assert!(!env.contains_key("DSH_PERMISSION_MODE"));
     }

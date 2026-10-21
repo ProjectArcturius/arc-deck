@@ -1,10 +1,10 @@
 # Maintainer: Takahashi Rinta <mc1586182829@outlook.com>
-pkgname=arc-deck
+pkgname=saiku
 pkgver=1.0.0
 pkgrel=1
 pkgdesc='DSH-powered coding agent with a terminal UI and headless workers'
 arch=('x86_64' 'aarch64')
-url='https://github.com/ProjectArcturius/arc-deck'
+url='https://github.com/ProjectArcturius/saiku'
 license=('Apache-2.0' 'MIT')
 depends=('gcc-libs' 'glibc' 'nodejs>=24' 'npm' 'git')
 makedepends=('cargo')
@@ -32,7 +32,7 @@ check() {
 
 package() {
   cd "$srcdir/$pkgname-$pkgver"
-  install -Dm755 "$srcdir/target/release/arcdeck" "$pkgdir/usr/bin/arcdeck"
+  install -Dm755 "$srcdir/target/release/saiku" "$pkgdir/usr/bin/saiku"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 crates/arc-deck-tui/LICENSE-OpenCode "$pkgdir/usr/share/licenses/$pkgname/LICENSE-OpenCode"
   install -Dm644 NOTICE "$pkgdir/usr/share/doc/$pkgname/NOTICE"

@@ -61,7 +61,7 @@ fn configure_command(
     if inherit_env {
         for (key, _) in std::env::vars_os() {
             let k = key.to_string_lossy();
-            if k.starts_with("DSH_") || k.starts_with("ARCDECK_KEY_") {
+            if k.starts_with("DSH_") || k.starts_with("SAIKU_KEY_") {
                 command.env_remove(&key);
             }
         }
@@ -230,7 +230,7 @@ impl RuntimeProcess {
     ///
     /// 真实 DSH 用 `inherit_env = true`：它要执行的是工人的 shell 工具（cargo、git、
     /// 代理变量、`CARGO_TARGET_DIR` 都得在），而 Ether 的 runner 脚本本来也是整份继承。
-    /// 继承时仍会去掉父进程里的 `DSH_*` 与 `ARCDECK_KEY_*`，由调用方显式重设 ——
+    /// 继承时仍会去掉父进程里的 `DSH_*` 与 `SAIKU_KEY_*`，由调用方显式重设 ——
     /// 免得调度者 shell 里残留的 `DSH_HOME` 把任务指到 Desktop 的真实 home 上。
     pub fn spawn(
         program: &Path,

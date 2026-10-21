@@ -1,6 +1,6 @@
-//! Arc Deck 产品模型。
+//! Saiku 产品模型。
 //!
-//! 这一层不认识 DSH、不画终端、不开子进程；它只定义 Arc Deck 自己的公开契约：
+//! 这一层不认识 DSH、不画终端、不开子进程；它只定义 Saiku 自己的公开契约：
 //! 任务书、启动配置、Agent 定义、授权交集、worker 事件与最终结果。
 //!
 //! **依赖方向**：core 不依赖 `arc-deck-dsh` 或 `arc-deck-cli`（参 PRODUCT_PLAN §4.1）。

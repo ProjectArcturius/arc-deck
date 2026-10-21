@@ -85,7 +85,7 @@ pub struct RouteSpec {
     pub display_name: Option<String>,
     /// 运行时子进程里承载密钥的环境变量名。
     pub key_env: String,
-    /// `auth`（arcdeck auth.json）、`env:<变量>`、`file:<路径>`。
+    /// `auth`（saiku auth.json）、`env:<变量>`、`file:<路径>`。
     pub key_source: String,
 }
 

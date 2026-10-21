@@ -1,11 +1,11 @@
-//! `arcdeck` 的 headless 命令面（PRODUCT_PLAN §6.0）。
+//! `saiku` 的 headless 命令面（PRODUCT_PLAN §6.0）。
 //!
-//! `run` 把用户级配置（`arcdeck.json`）与任务书（Ether 的 Markdown 任务书或 JSON 任务书）
+//! `run` 把用户级配置（`saiku.json`）与任务书（Ether 的 Markdown 任务书或 JSON 任务书）
 //! **物化**成 M1 的启动配置与任务书，落在任务状态目录里，再交给同一套 worker 执行 ——
 //! 这样每次运行实际用了什么路由、什么授权都留档可查，且 worker 只有一条执行路径。
 //!
 //! 其余命令只读写状态目录里的文件：`status.json`、`result.json`、`events.jsonl`、`cancel.json`。
-//! 控制面是文件而不是服务，所以 `ssh ether arcdeck status --all` 就能看 Debian 上的工人。
+//! 控制面是文件而不是服务，所以 `ssh ether saiku status --all` 就能看 Debian 上的工人。
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -28,7 +28,7 @@ use arc_deck_dsh::runtime::RuntimeLayout;
 use crate::args::{TaskSource, WorkerArgs};
 use crate::status::{self, StatusFile};
 
-/// 内置的 Agent 定义与提示词。安装后的 `arcdeck` 不能依赖仓库路径，所以编进二进制，
+/// 内置的 Agent 定义与提示词。安装后的 `saiku` 不能依赖仓库路径，所以编进二进制，
 /// 每次运行写进状态目录（顺带留档：这次运行用的是哪一版提示词）。
 const EMBEDDED_AGENTS: &[(&str, &str)] = &[
     ("echo.md", include_str!("../../../agents/echo.md")),
@@ -192,7 +192,7 @@ async fn cmd_run(argv: &[String]) -> CmdResult {
         ([], Some(text)) => text.to_string(),
         ([arg], None) => arg.clone(),
         _ => return Err(SpecError::new(code::CONFIG_INVALID,
-            "用法：arcdeck run <任务书|指令> 或 arcdeck run --prompt <原文|->；二者不能同时提供")),
+            "用法：saiku run <任务书|指令> 或 saiku run --prompt <原文|->；二者不能同时提供")),
     };
     if task_arg.trim().is_empty() {
         return Err(SpecError::new(code::TASK_INVALID, "指令不能为空"));
@@ -204,7 +204,7 @@ async fn cmd_run(argv: &[String]) -> CmdResult {
     //
     // 判据是**工人参数**，不是「参数是不是文件」：没有工人参数时，位置参数就是
     // 要对模型说的话（和 `opencode run "…"` 一样），stdout 换成给人看的回答。
-    // **Arc Deck 不是一个工地** —— 它只是一个带工人优化方案的 agent（用户 2026-10-14）。
+    // **Saiku 不是一个工地** —— 它只是一个带工人优化方案的 agent（用户 2026-10-14）。
     //
     // 两种模式都落状态目录、都写 result.json：监控程序一视同仁，不必分两套。
     let worker_flags = !flags.all("--accept").is_empty()
@@ -288,7 +288,7 @@ async fn cmd_run(argv: &[String]) -> CmdResult {
         // 这件事在派工的那一秒就能说清，不该让工人跑完才知道。
         if permission != Permission::Full {
             eprintln!(
-                "arcdeck: 警告 —— permission = `{}` 时 worktree 里的 git 命令会全部失败\
+                "saiku: 警告 —— permission = `{}` 时 worktree 里的 git 命令会全部失败\
                  （worktree 的 `.git` 指向主仓，主仓在沙箱外）。要提交请用 `--permission full`",
                 permission.as_str()
             );
@@ -329,7 +329,7 @@ async fn cmd_run(argv: &[String]) -> CmdResult {
     // 而它**正是派工的生产路径** —— 没有端到端覆盖就等于没人真走过。
     // 与隐藏子命令同一套纪律：只在 `test-runtime` 构建里存在，发布构建编译不出它。
     #[cfg(feature = "test-runtime")]
-    let fixture_scenario = std::env::var("ARCDECK_FIXTURE_SCENARIO")
+    let fixture_scenario = std::env::var("SAIKU_FIXTURE_SCENARIO")
         .ok()
         .filter(|s| !s.trim().is_empty());
     #[cfg(not(feature = "test-runtime"))]
@@ -426,7 +426,7 @@ async fn cmd_run(argv: &[String]) -> CmdResult {
         .collect();
     if !commands.is_empty() {
         // 验收证据取自工具执行记录（M1 规则），所以模型必须**原样**跑这些命令。
-        instruction.push_str("\n\n---\n\n## 验收命令（Arc Deck 按实际执行记录判定）\n\n完成后必须用 shell 工具**原样**运行下面每一条，不要改写、不要合并成一条：\n\n");
+        instruction.push_str("\n\n---\n\n## 验收命令（Saiku 按实际执行记录判定）\n\n完成后必须用 shell 工具**原样**运行下面每一条，不要改写、不要合并成一条：\n\n");
         for c in &commands {
             instruction.push_str(&format!("- `{c}`\n"));
         }
@@ -454,7 +454,7 @@ async fn cmd_run(argv: &[String]) -> CmdResult {
     let mut task_value = serde_json::to_value(&task).unwrap_or_default();
     task_value["workspace"] = serde_json::json!(workspace.display().to_string());
     write_json(&task_path, &task_value)?;
-    eprintln!("arcdeck: 配置 {} · 模型 {model_label} · workspace {}", cfg_path.display(), workspace.display());
+    eprintln!("saiku: 配置 {} · 模型 {model_label} · workspace {}", cfg_path.display(), workspace.display());
 
     let cancel = dir.join("cancel.json");
     if flags.has("--detach") {
@@ -532,7 +532,7 @@ fn prepare_run_dir(dir: &Path, task_id: &str, rerun: bool) -> Result<(), SpecErr
         if h != "done" && h != "dead" {
             return Err(SpecError::new(
                 code::TASK_ALREADY_SEEN,
-                format!("任务 `{task_id}` 正在运行（{h}）。先 `arcdeck cancel {task_id}`，或换一个 --id"),
+                format!("任务 `{task_id}` 正在运行（{h}）。先 `saiku cancel {task_id}`，或换一个 --id"),
             ));
         }
     }
@@ -540,12 +540,12 @@ fn prepare_run_dir(dir: &Path, task_id: &str, rerun: bool) -> Result<(), SpecErr
     if settled && !rerun {
         return Err(SpecError::new(
             code::TASK_ALREADY_SEEN,
-            format!("任务 `{task_id}` 已经有结论（arcdeck report {task_id}）。要重跑加 --rerun（旧记录改名保留）"),
+            format!("任务 `{task_id}` 已经有结论（saiku report {task_id}）。要重跑加 --rerun（旧记录改名保留）"),
         ));
     }
     let aside = dir.with_file_name(format!("{task_id}.{}", status::now_ms()));
     std::fs::rename(dir, &aside).map_err(io_err(dir))?;
-    eprintln!("arcdeck: 旧记录移到 {}", aside.display());
+    eprintln!("saiku: 旧记录移到 {}", aside.display());
     std::fs::create_dir_all(dir).map_err(io_err(dir))
 }
 
@@ -556,7 +556,7 @@ fn ensure_worktree(cfg: &UserConfig, repo: &Path, branch: &str, task_id: &str) -
         .worktree
         .as_ref()
         .map(|w| w.dir.clone())
-        .unwrap_or_else(|| "{repo_parent}/.arcdeck/wt/{task_id}".into());
+        .unwrap_or_else(|| "{repo_parent}/.saiku/wt/{task_id}".into());
     let parent = repo.parent().unwrap_or(repo);
     let wt = absolute(Path::new(
         &template.replace("{repo_parent}", &parent.display().to_string()).replace("{task_id}", task_id),
@@ -590,10 +590,10 @@ fn ensure_worktree(cfg: &UserConfig, repo: &Path, branch: &str, task_id: &str) -
         if wt.join(".gitmodules").exists() {
             let out = git(&["submodule", "update", "--init", "-q"], &wt)?;
             if !out.status.success() {
-                eprintln!("arcdeck: ⚠ 子模块初始化失败：{}", String::from_utf8_lossy(&out.stderr).trim());
+                eprintln!("saiku: ⚠ 子模块初始化失败：{}", String::from_utf8_lossy(&out.stderr).trim());
             }
         }
-        eprintln!("arcdeck: worktree {} （分支 {branch}{}）", wt.display(), if exists { "，复用" } else { "" });
+        eprintln!("saiku: worktree {} （分支 {branch}{}）", wt.display(), if exists { "，复用" } else { "" });
     }
     Ok((wt, base))
 }
@@ -673,8 +673,8 @@ fn spawn_detached(dir: &Path, config: &Path, task: &Path, cancel: &Path, facts: 
 ///
 /// Rust 在 Windows 上以 `bInheritHandles = TRUE` 建子进程，于是父进程里**所有**可继承句柄
 /// 都会跟过去 —— 包括调度者 shell 递进来的 stdout 管道。监工握着它的写端，读的那边就等不到
-/// EOF：实测 `arcdeck run … --detach | Out-Null` 要等整件任务跑完（22.5 s 的夹具任务等满
-/// 22.5 s）才返回；`id=$(arcdeck run … --detach)` 会挂上几个小时。
+/// EOF：实测 `saiku run … --detach | Out-Null` 要等整件任务跑完（22.5 s 的夹具任务等满
+/// 22.5 s）才返回；`id=$(saiku run … --detach)` 会挂上几个小时。
 /// 监工的标准流已经显式指向 `console.*` 文件与 null，所以去掉的只是泄漏，不影响它自己的输出；
 /// 本进程之后照常写 stdout（继承标志不影响自身使用）。
 #[cfg(windows)]
@@ -702,7 +702,7 @@ fn no_inherit_std_handles() {
 /// 派工握手：**分离不等于成功**。
 ///
 /// 只 `spawn` 就返回 0，会把预检失败（缺密钥、运行时没装、Agent 不认）整个藏进
-/// 子进程 —— 派工的人拿到「started」，而 `arcdeck status --all` 报「没有任务」，
+/// 子进程 —— 派工的人拿到「started」，而 `saiku status --all` 报「没有任务」，
 /// 原因只留在 `console.err` 里。这是 §6.5 第四个问题（漏了就静默消失）的翻版。
 ///
 /// 判据是确定的，不靠时间猜：状态文件出现 = 接住了；子进程先退出 = 没接住。
@@ -734,17 +734,17 @@ fn handshake(dir: &Path, child: &mut std::process::Child, facts: &DispatchFacts)
 
     // 复查一次：`try_wait` 与写盘不是原子的，中间可能有竞态。
     if status_path.is_file() {
-        println!("{}  started  pid {pid}  · arcdeck status {}", facts.task_id, facts.task_id);
+        println!("{}  started  pid {pid}  · saiku status {}", facts.task_id, facts.task_id);
         return Ok(0);
     }
     if !exited {
         // 还活着，只是慢。报已启动，但把「还没写出状态」这件事说出来。
         eprintln!(
-            "arcdeck: 分离进程已起（pid {pid}），但 {} 秒内还没写出状态；用 `arcdeck status {}` 跟踪",
+            "saiku: 分离进程已起（pid {pid}），但 {} 秒内还没写出状态；用 `saiku status {}` 跟踪",
             DISPATCH_HANDSHAKE.as_secs(),
             facts.task_id
         );
-        println!("{}  started  pid {pid}  · arcdeck status {}", facts.task_id, facts.task_id);
+        println!("{}  started  pid {pid}  · saiku status {}", facts.task_id, facts.task_id);
         return Ok(0);
     }
 
@@ -786,7 +786,7 @@ fn read_preflight_error(dir: &Path) -> Option<(String, String)> {
     None
 }
 
-/// `arcdeck usage`：把状态目录里各任务的 token 用量加起来。
+/// `saiku usage`：把状态目录里各任务的 token 用量加起来。
 ///
 /// 只有 provider **实际报告**的用量，**没有费用** —— 没有数据就不填虚构成本（§6.3）。
 /// 终态以 `result.json` 为准（那才是交出去的那一份）；未终态用 `status.json` 上此刻的数字，
@@ -956,7 +956,7 @@ fn cmd_status(argv: &[String], all: bool) -> CmdResult {
 async fn cmd_wait(argv: &[String]) -> CmdResult {
     let flags = Flags::parse(argv, &["--config", "--state-root", "--timeout"], &["--json"])?;
     let [id] = flags.positional.as_slice() else {
-        return Err(SpecError::new(code::CONFIG_INVALID, "用法：arcdeck wait <id> [--timeout 30m]"));
+        return Err(SpecError::new(code::CONFIG_INVALID, "用法：saiku wait <id> [--timeout 30m]"));
     };
     let root = state_root(&flags);
     let path = run_dir(&root, id).join(status::STATUS_FILE);
@@ -981,7 +981,7 @@ async fn cmd_wait(argv: &[String]) -> CmdResult {
 fn cmd_report(argv: &[String]) -> CmdResult {
     let flags = Flags::parse(argv, &["--config", "--state-root"], &["--json"])?;
     let [id] = flags.positional.as_slice() else {
-        return Err(SpecError::new(code::CONFIG_INVALID, "用法：arcdeck report <id> [--json]"));
+        return Err(SpecError::new(code::CONFIG_INVALID, "用法：saiku report <id> [--json]"));
     };
     let dir = run_dir(&state_root(&flags), id);
     let now = status::now_ms();
@@ -1045,7 +1045,7 @@ fn render_report(r: &TaskResult, st: Option<&StatusFile>, dir: &Path, now: u64) 
         }
     }
     let _ = now;
-    o.push_str("\n## Arc Deck 采集的事实\n");
+    o.push_str("\n## Saiku 采集的事实\n");
     for b in &r.blockers {
         o.push_str(&format!("- ✗ {}: {}\n", b.code, status::clip(&b.message, 200)));
     }
@@ -1101,7 +1101,7 @@ fn render_report(r: &TaskResult, st: Option<&StatusFile>, dir: &Path, now: u64) 
 fn cmd_logs(argv: &[String]) -> CmdResult {
     let flags = Flags::parse(argv, &["--config", "--state-root", "--tail"], &["--runtime", "--console"])?;
     let [id] = flags.positional.as_slice() else {
-        return Err(SpecError::new(code::CONFIG_INVALID, "用法：arcdeck logs <id> [--tail N] [--runtime|--console]"));
+        return Err(SpecError::new(code::CONFIG_INVALID, "用法：saiku logs <id> [--tail N] [--runtime|--console]"));
     };
     let dir = run_dir(&state_root(&flags), id);
     let file = if flags.has("--runtime") {
@@ -1123,7 +1123,7 @@ fn cmd_logs(argv: &[String]) -> CmdResult {
 async fn cmd_cancel(argv: &[String]) -> CmdResult {
     let flags = Flags::parse(argv, &["--config", "--state-root"], &[])?;
     let [id] = flags.positional.as_slice() else {
-        return Err(SpecError::new(code::CONFIG_INVALID, "用法：arcdeck cancel <id>"));
+        return Err(SpecError::new(code::CONFIG_INVALID, "用法：saiku cancel <id>"));
     };
     let dir = run_dir(&state_root(&flags), id);
     let cancel = dir.join("cancel.json");
@@ -1159,7 +1159,7 @@ async fn cmd_cancel(argv: &[String]) -> CmdResult {
             return Ok(reap_orphan(id, &st));
         }
     }
-    println!("{id}  已请求取消，30 秒内还没收尾；用 arcdeck status {id} 继续看");
+    println!("{id}  已请求取消，30 秒内还没收尾；用 saiku status {id} 继续看");
     Ok(10)
 }
 
@@ -1186,9 +1186,9 @@ fn cmd_auth(argv: &[String]) -> CmdResult {
     match argv.first().map(String::as_str) {
         Some("set") => {
             let Some(id) = argv.get(1) else {
-                return Err(SpecError::new(code::CONFIG_INVALID, "用法：arcdeck auth set <provider>（密钥从 stdin 读）"));
+                return Err(SpecError::new(code::CONFIG_INVALID, "用法：saiku auth set <provider>（密钥从 stdin 读）"));
             };
-            eprintln!("arcdeck: 粘贴 `{id}` 的 API key 后回车（Ctrl+Z/Ctrl+D 结束）：");
+            eprintln!("saiku: 粘贴 `{id}` 的 API key 后回车（Ctrl+Z/Ctrl+D 结束）：");
             let mut key = String::new();
             std::io::stdin().read_to_string(&mut key).map_err(|e| SpecError::new(code::CONFIG_INVALID, e.to_string()))?;
             let key = key.trim();
@@ -1211,7 +1211,7 @@ fn cmd_auth(argv: &[String]) -> CmdResult {
         }
         Some("rm") => {
             let Some(id) = argv.get(1) else {
-                return Err(SpecError::new(code::CONFIG_INVALID, "用法：arcdeck auth rm <provider>"));
+                return Err(SpecError::new(code::CONFIG_INVALID, "用法：saiku auth rm <provider>"));
             };
             let mut store = AuthStore::load(&path)?;
             store.entries.remove(id);
@@ -1255,7 +1255,7 @@ fn cmd_runtime(argv: &[String]) -> CmdResult {
     let layout = RuntimeLayout::new(&dir, &version);
     match argv.first().map(String::as_str) {
         Some("install") => {
-            eprintln!("arcdeck: 安装 @deepseek-ai/dsh@{version} → {}", dir.display());
+            eprintln!("saiku: 安装 @deepseek-ai/dsh@{version} → {}", dir.display());
             layout.install().map_err(|m| SpecError::new(code::RUNTIME_ENTRY_MISSING, m))?;
             println!("DSH {version} 已就绪：{}", layout.entry().display());
             Ok(0)
@@ -1275,9 +1275,9 @@ fn cmd_runtime(argv: &[String]) -> CmdResult {
 }
 
 fn cmd_config(argv: &[String]) -> CmdResult {
-    let path = match std::env::var_os("ARCDECK_CONFIG") {
+    let path = match std::env::var_os("SAIKU_CONFIG") {
         Some(p) if !p.is_empty() => PathBuf::from(p),
-        _ => userconfig::config_dir().join("arcdeck").join("arcdeck.json"),
+        _ => userconfig::config_dir().join("saiku").join("saiku.json"),
     };
     match argv.first().map(String::as_str) {
         Some("init") => {

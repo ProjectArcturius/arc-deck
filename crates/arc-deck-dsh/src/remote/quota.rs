@@ -7,7 +7,7 @@
 //! 用户已允许少量用 `opencode-go/deepseek-v4.1-flash` 测试。`DSH_HOME` 是临时目录（P15）。
 //!
 //! ```text
-//! ARCDECK_CAPTURE=<文件> cargo test -p arc-deck-dsh --offline --lib -- --ignored remote_quota_ --nocapture
+//! SAIKU_CAPTURE=<文件> cargo test -p arc-deck-dsh --offline --lib -- --ignored remote_quota_ --nocapture
 //! ```
 
 #![cfg(test)]
@@ -32,8 +32,8 @@ async fn remote_quota_one_turn_is_captured_end_to_end() {
             return;
         }
     };
-    let home = tempfile::Builder::new().prefix("arcdeck-quota-").tempdir().unwrap();
-    let workspace = tempfile::Builder::new().prefix("arcdeck-quota-ws-").tempdir().unwrap();
+    let home = tempfile::Builder::new().prefix("saiku-quota-").tempdir().unwrap();
+    let workspace = tempfile::Builder::new().prefix("saiku-quota-ws-").tempdir().unwrap();
     let mut launch = interactive(InteractiveInput {
         config: &config,
         workspace: workspace.path(),
@@ -42,7 +42,7 @@ async fn remote_quota_one_turn_is_captured_end_to_end() {
         mode: arc_deck_core::mode::Mode::Build,
         dsh_home: home.path(),
         persona_suffix: "",
-        kernel_id: "arcdeck-quota-capture",
+        kernel_id: "saiku-quota-capture",
     })
     .expect("交互内核的启动参数");
     launch.options.startup_timeout = Duration::from_secs(180);
@@ -90,7 +90,7 @@ async fn remote_quota_one_turn_is_captured_end_to_end() {
         .call(
             "session/prompt",
             json!({ "request": {
-                "requestId": "arcdeck-capture-1",
+                "requestId": "saiku-capture-1",
                 "sessionId": session_id,
                 "mode": "queue",
                 "content": [{ "type": "text", "text": "只回复两个字：收到" }],
@@ -137,7 +137,7 @@ async fn remote_quota_one_turn_is_captured_end_to_end() {
         .await;
     capture.push(json!({ "call": "session/rename", "result": format!("{renamed:?}") }));
 
-    if let Ok(path) = std::env::var("ARCDECK_CAPTURE") {
+    if let Ok(path) = std::env::var("SAIKU_CAPTURE") {
         let mut file = std::fs::File::create(&path).expect("写抓帧文件");
         for line in &capture {
             writeln!(file, "{line}").unwrap();
@@ -160,8 +160,8 @@ async fn start_configured(
             return None;
         }
     };
-    let home = tempfile::Builder::new().prefix("arcdeck-live-").tempdir().unwrap();
-    let workspace = tempfile::Builder::new().prefix("arcdeck-live-ws-").tempdir().unwrap();
+    let home = tempfile::Builder::new().prefix("saiku-live-").tempdir().unwrap();
+    let workspace = tempfile::Builder::new().prefix("saiku-live-ws-").tempdir().unwrap();
     let mut launch = interactive(InteractiveInput {
         config: &config,
         workspace: workspace.path(),

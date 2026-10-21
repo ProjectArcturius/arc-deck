@@ -1,4 +1,4 @@
-// Arc Deck · 流式文本排版性能探针
+// Saiku Deck · 流式文本排版性能探针
 //
 // 要回答的问题（它直接决定渲染管线怎么设计，晚知道会返工）：
 //
@@ -48,7 +48,7 @@ fn main() {
             std::process::exit(1);
         });
 
-    println!("Arc Deck · 流式文本排版性能探针");
+    println!("Saiku Deck · 流式文本排版性能探针");
     println!("================================");
     println!("字体: {font_path}");
 

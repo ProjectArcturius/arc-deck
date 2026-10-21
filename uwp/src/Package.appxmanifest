@@ -24,7 +24,7 @@
                     PhonePublisherId="00000000-0000-0000-0000-000000000000" />
 
   <Properties>
-    <DisplayName>Arc Deck</DisplayName>
+    <DisplayName>Saiku Deck</DisplayName>
     <PublisherDisplayName>Takahashi Rinta</PublisherDisplayName>
     <!-- Properties/Logo 走 **StoreLogo** 校验，规范要求恰好 50×50。 -->
     <Logo>Assets\StoreLogo.png</Logo>
@@ -46,7 +46,7 @@
       Executable="$targetnametoken$.exe"
       EntryPoint="ArcDeck.App">
       <uap:VisualElements
-        DisplayName="Arc Deck"
+        DisplayName="Saiku Deck"
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png"
         Description="DeepSeek Harness 的 Windows 客户端"

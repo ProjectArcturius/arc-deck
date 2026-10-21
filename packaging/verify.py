@@ -13,24 +13,24 @@ for sums in ['SHA256SUMS-windows.txt', 'SHA256SUMS-source.txt']:
         expected, name = line.split('  ', 1)
         assert Path(name).name == name
         assert hashlib.sha256((dist / name).read_bytes()).hexdigest() == expected, name
-source = dist / 'arc-deck-1.0.0-source.tar.gz'
+source = dist / 'saiku-1.0.0-source.tar.gz'
 source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
 with tarfile.open(source) as archive:
     names = archive.getnames()
-    assert all(n.startswith('arc-deck-1.0.0/') and '..' not in Path(n).parts for n in names)
+    assert all(n.startswith('saiku-1.0.0/') and '..' not in Path(n).parts for n in names)
     assert not any(n.split('/')[1] in {'REFS', '.git', 'target', '.cargo'} for n in names)
     for required in ['Cargo.toml', 'Cargo.lock', 'agents/echo.md', 'prompts/echo-style.md', 'docs/LINUX_RELEASE.md', 'packaging/debian/build.sh', 'crates/arc-deck-dsh/src/remote/daily.rs']:
-        assert f'arc-deck-1.0.0/{required}' in names, required
-with tarfile.open(dist / 'arc-deck-1.0.0-aur.tar.gz') as archive:
-    for name in ['arc-deck-aur/PKGBUILD', 'arc-deck-aur/.SRCINFO']:
+        assert f'saiku-1.0.0/{required}' in names, required
+with tarfile.open(dist / 'saiku-1.0.0-aur.tar.gz') as archive:
+    for name in ['saiku-aur/PKGBUILD', 'saiku-aur/.SRCINFO']:
         recipe = archive.extractfile(name).read().decode('utf-8')
         assert source_sha in recipe and '@SOURCE_SHA256@' not in recipe
-with zipfile.ZipFile(dist / 'arcdeck-1.0.0-windows-x86_64.zip') as archive:
+with zipfile.ZipFile(dist / 'saiku-1.0.0-windows-x86_64.zip') as archive:
     for name in ['LICENSE', 'NOTICE', 'LICENSE-OpenCode', 'INSTALL.md', 'BUILD-INFO.json', 'install.cmd', 'install.ps1', 'uninstall.cmd', 'uninstall.ps1']:
         assert name in archive.namelist(), name
     info = json.loads(archive.read('BUILD-INFO.json').decode('utf-8-sig'))
     assert info['version'] == '1.0.0'
-    binary = archive.read('arcdeck.exe')
+    binary = archive.read('saiku.exe')
     if len(sys.argv) > 2:
         assert binary == Path(sys.argv[2]).read_bytes(), 'ZIP executable differs from release binary'
 

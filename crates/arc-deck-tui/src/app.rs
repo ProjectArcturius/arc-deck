@@ -311,11 +311,11 @@ impl App {
         self.conversation_running() || self.pending.is_some() || self.active.is_some()
     }
 
-    /// 终端窗口标题：`会话标题 · Arc Deck`，没有会话时只有产品名。
+    /// 终端窗口标题：`会话标题 · Saiku`，没有会话时只有产品名。
     pub fn window_title(&self) -> String {
         match self.conversation.as_ref().and_then(|c| c.title.as_deref()) {
-            Some(title) if self.in_conversation() => format!("{} · Arc Deck", crate::markdown::clean(title)),
-            _ => "Arc Deck".into(),
+            Some(title) if self.in_conversation() => format!("{} · Saiku", crate::markdown::clean(title)),
+            _ => "Saiku".into(),
         }
     }
 
@@ -868,7 +868,7 @@ impl App {
                     .as_ref()
                     .map(|d| {
                         format!(
-                            "完整证据：{}；可用 arcdeck report {}",
+                            "完整证据：{}；可用 saiku report {}",
                             d.evidence_dir.display(),
                             d.record.id
                         )
@@ -2458,13 +2458,13 @@ fn first_line(text: &str) -> &str {
 pub(crate) fn failure_hint(reason: &str) -> Option<&'static str> {
     let lower = reason.to_lowercase();
     if reason.contains("runtime install") || reason.contains("运行时") || lower.contains("dsh-runtime") || lower.contains("未安装") {
-        Some("先运行 `arcdeck runtime install`（把钉住的 DSH 装进本机数据目录）")
+        Some("先运行 `saiku runtime install`（把钉住的 DSH 装进本机数据目录）")
     } else if lower.contains("api key") || lower.contains("auth") || reason.contains("密钥") || reason.contains("凭据") {
-        Some("先运行 `arcdeck auth set <provider>` 存密钥")
-    } else if reason.contains("config init") || lower.contains("arcdeck.json") || reason.contains("用户配置") {
-        Some("先运行 `arcdeck config init` 生成配置")
-    } else if reason.contains("另一个 arcdeck") {
-        Some("先关掉占着会话目录的那个 arcdeck，再 /reconnect")
+        Some("先运行 `saiku auth set <provider>` 存密钥")
+    } else if reason.contains("config init") || lower.contains("saiku.json") || reason.contains("用户配置") {
+        Some("先运行 `saiku config init` 生成配置")
+    } else if reason.contains("另一个 saiku") {
+        Some("先关掉占着会话目录的那个 saiku，再 /reconnect")
     } else {
         None
     }
@@ -3691,7 +3691,7 @@ mod tests {
         app.input(key(KeyCode::F(6)), &tx);
         assert!(matches!(rx.recv().unwrap(), Request::Session(Command::Prompt { .. })));
         app.update(Update::Session(service::Event::Backend {
-            state: BackendState::Failed { reason: "DSH 运行时未安装：先运行 `arcdeck runtime install`".into() },
+            state: BackendState::Failed { reason: "DSH 运行时未安装：先运行 `saiku runtime install`".into() },
         }));
         assert_eq!(app.editor.text, "还没起来就发了", "没有去处的消息要放回输入框，不能吞掉");
         assert!(app.notice.contains("runtime install"), "{}", app.notice);
@@ -4154,9 +4154,9 @@ mod tests {
 
     #[test]
     fn failures_come_with_a_copyable_next_command() {
-        assert!(failure_hint("DSH 运行时未安装：先运行 `arcdeck runtime install`").unwrap().contains("runtime install"));
+        assert!(failure_hint("DSH 运行时未安装：先运行 `saiku runtime install`").unwrap().contains("runtime install"));
         assert!(failure_hint("invalid api key for provider").unwrap().contains("auth set"));
-        assert!(failure_hint("另一个 arcdeck（pid 42）正在使用交互会话目录").unwrap().contains("关掉"));
+        assert!(failure_hint("另一个 saiku（pid 42）正在使用交互会话目录").unwrap().contains("关掉"));
         assert_eq!(failure_hint("内核在启动时崩了"), None, "认不出就只显示原文，不编命令");
     }
 

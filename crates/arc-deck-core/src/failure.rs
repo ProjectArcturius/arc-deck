@@ -18,7 +18,7 @@
 pub struct FailureClass {
     /// 稳定的原因码。落在 `status.json` 的 `last_error.code` 与 `result.json` 的 `blockers[].code`。
     pub code: &'static str,
-    /// 调度者能不能靠「再派一次」解决。**是建议，不是自动动作**：Arc Deck 自己
+    /// 调度者能不能靠「再派一次」解决。**是建议，不是自动动作**：Saiku 自己
     /// 不因为这一条去重试（§6.5.4 的重试只针对卡死与 DSML 泄漏）。
     pub retryable: bool,
 }

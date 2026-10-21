@@ -2,10 +2,10 @@
 #
 # 为什么需要它：TUI 的单测走 ratatui 的 TestBackend，证明不了「在真终端里能起、
 # 能打字、能提交」。这个脚本用 AttachConsole + ReadConsoleOutputCharacter +
-# WriteConsoleInputW 驱动真的 `arcdeck` 进程，把「可用」变成几条可复现的断言。
+# WriteConsoleInputW 驱动真的 `saiku` 进程，把「可用」变成几条可复现的断言。
 #
 # 用法（Windows PowerShell 5.1；脚本含中文，必须带 BOM）：
-#   powershell -File console-probe.ps1 -Exe D:\arcdeck\target-main\release\arcdeck.exe
+#   powershell -File console-probe.ps1 -Exe D:\arcdeck\target-main\release\saiku.exe
 #   powershell -File console-probe.ps1 -Exe ... -Submit     # 同一会话真发两轮，消耗两次小配额
 #   powershell -File console-probe.ps1 -Exe ... -Cancel     # 发一条长的再 Esc，消耗一次小配额
 #   powershell -File console-probe.ps1 -Exe ... -Resume     # 新进程里打开最近的会话（先跑过 -Cancel），不耗配额
@@ -22,7 +22,7 @@
 param(
     [Parameter(Mandatory=$true)][string]$Exe,
     [string]$WorkDir = "",
-    [string]$Log = (Join-Path $env:TEMP "arcdeck-console-probe.log"),
+    [string]$Log = (Join-Path $env:TEMP "saiku-console-probe.log"),
     [switch]$Submit,
     [switch]$Cancel,
     [switch]$Resume
@@ -154,12 +154,12 @@ function Send-Key($vk, $ch, $ctrl) {
     Start-Sleep -Milliseconds 400
 }
 
-# 断言中途出错也要收掉 TUI：留一个隐藏的 arcdeck 在后台，它会一直占着交互会话目录的锁
-#（实测踩过：下一次启动被「另一个 arcdeck 正在使用」拒绝）。
+# 断言中途出错也要收掉 TUI：留一个隐藏的 saiku 在后台，它会一直占着交互会话目录的锁
+#（实测踩过：下一次启动被「另一个 saiku 正在使用」拒绝）。
 try {
 $checks = [ordered]@{}
 $screenHome = Snapshot "home"
-$checks.home_has_brand = $screenHome.Contains("Arc Deck")
+$checks.home_has_brand = $screenHome.Contains("Saiku")
 
 # 交互内核在后台起（几秒到几十秒）；就绪之前提交会排队，但探针要的是「就绪」这个事实。
 # 「就绪」不再有通知（2026-10-20 去掉了常驻通知行）：页脚右边的「内核启动中」消失、
@@ -168,7 +168,7 @@ $ready = $false
 for ($i = 0; $i -lt 60; $i++) {
     $now = Screen
     if ($now.Contains("内核不可用") -or $now.Contains("交互会话不可用")) { break }
-    if ($now.Contains("Arc Deck") -and -not $now.Contains("内核启动中")) { $ready = $true; break }
+    if ($now.Contains("Saiku") -and -not $now.Contains("内核启动中")) { $ready = $true; break }
     Start-Sleep -Seconds 1
 }
 $checks.kernel_ready = $ready
@@ -361,7 +361,7 @@ $checks.quit = $process.HasExited
 # 交互内核是 TUI 拉起的 node 子进程：退出后不该留下（参 AGENTS 的 Windows 进程规则）。
 Start-Sleep -Seconds 2
 $kernels = @(Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -and $_.CommandLine.Contains("--profile web") -and $_.CommandLine.Contains("arcdeck") })
+    Where-Object { $_.CommandLine -and $_.CommandLine.Contains("--profile web") -and $_.CommandLine.Contains("saiku") })
 $checks.no_kernel_left = ($kernels.Count -eq 0)
 
 $json = $checks | ConvertTo-Json

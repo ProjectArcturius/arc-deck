@@ -1,5 +1,5 @@
 ﻿<#
-  Screenshot the Arc Deck window by its own rectangle, not the whole screen.
+  Screenshot the Saiku Deck window by its own rectangle, not the whole screen.
 
   Why this exists: a full-screen capture grabs whatever is on top, and this machine
   sometimes runs a full-screen game that refuses to give up the foreground --
@@ -8,7 +8,7 @@
   the app regressed.
 
   So instead of competing for the foreground:
-    1. put the Arc Deck window at the top of the Z order with HWND_TOPMOST
+    1. put the Saiku Deck window at the top of the Z order with HWND_TOPMOST
     2. capture only its rectangle
     3. restore the previous Z order
 
@@ -49,7 +49,7 @@ public class Win {
       if (p.ProcessName != "ApplicationFrameHost") continue;
       var hh = p.MainWindowHandle; if (hh == IntPtr.Zero) continue;
       var t = new System.Text.StringBuilder(512); GetWindowTextW(hh, t, 512);
-      if (t.ToString().Contains("Arc Deck")) return hh;
+      if (t.ToString().Contains("Saiku Deck")) return hh;
     }
     return IntPtr.Zero;
   }
@@ -80,7 +80,7 @@ public class Win {
 "@
 
 $h = [Win]::Find()
-if ($h -eq [IntPtr]::Zero) { Write-Error "Arc Deck window not found"; exit 1 }
+if ($h -eq [IntPtr]::Zero) { Write-Error "Saiku Deck window not found"; exit 1 }
 
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms

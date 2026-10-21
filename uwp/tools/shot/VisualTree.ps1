@@ -1,5 +1,5 @@
 ﻿<#
-  Walk the visual tree of the Arc Deck window and print each element's type, name
+  Walk the visual tree of the Saiku Deck window and print each element's type, name
   and actual size.
 
   Why: when a layout problem resists the usual fixes, the only reliable move is to
@@ -24,8 +24,8 @@ $AE = [System.Windows.Automation.AutomationElement]
 $TS = [System.Windows.Automation.TreeScope]
 
 $win = $AE::RootElement.FindFirst($TS::Children,
-  (New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, "Arc Deck")))
-if ($null -eq $win) { Write-Error "Arc Deck window not found"; exit 1 }
+  (New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, "Saiku Deck")))
+if ($null -eq $win) { Write-Error "Saiku Deck window not found"; exit 1 }
 
 # Walk the RAW view: the control view that Uia.ps1 uses hides layout-only elements
 # such as ScrollViewer, which is exactly what we need to see here.

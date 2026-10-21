@@ -150,7 +150,7 @@ pub struct TaskResult {
     pub runtime_exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changes: Vec<ChangeRecord>,
-    /// Arc Deck 自己从 git 采集的提交（`<sha> <标题>`），相对启动配置的 `git_base`。
+    /// Saiku 自己从 git 采集的提交（`<sha> <标题>`），相对启动配置的 `git_base`。
     /// 不是模型自报。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commits: Vec<String>,

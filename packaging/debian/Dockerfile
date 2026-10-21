@@ -5,4 +5,4 @@ WORKDIR /src
 COPY . .
 RUN cargo build --release --locked --no-default-features -p arc-deck-cli && \
     cargo test --locked -p arc-deck-core -p arc-deck-dsh -p arc-deck-tui -p arc-deck-cli --features arc-deck-cli/test-runtime
-CMD ["bash", "packaging/debian/build.sh", "/src/target/release/arcdeck", "/out"]
+CMD ["bash", "packaging/debian/build.sh", "/src/target/release/saiku", "/out"]

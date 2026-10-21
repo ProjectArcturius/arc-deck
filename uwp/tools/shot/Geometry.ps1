@@ -46,7 +46,7 @@ public class Geo {
       if (p.ProcessName != "ApplicationFrameHost") continue;
       var hh = p.MainWindowHandle; if (hh == IntPtr.Zero) continue;
       var t = new StringBuilder(512); GetWindowTextW(hh, t, 512);
-      if (t.ToString().Contains("Arc Deck")) return hh;
+      if (t.ToString().Contains("Saiku Deck")) return hh;
     }
     return IntPtr.Zero;
   }
@@ -66,8 +66,8 @@ public class Geo {
 $AE = [System.Windows.Automation.AutomationElement]
 $TS = [System.Windows.Automation.TreeScope]
 $win = $AE::RootElement.FindFirst($TS::Children,
-  (New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, "Arc Deck")))
-if ($null -eq $win) { Write-Error "Arc Deck window not found"; exit 1 }
+  (New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, "Saiku Deck")))
+if ($null -eq $win) { Write-Error "Saiku Deck window not found"; exit 1 }
 
 function Show($el, $what) {
   if ($null -eq $el) { "  {0,-22} NOT FOUND" -f $what; return }

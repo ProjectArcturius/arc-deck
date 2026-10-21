@@ -1,4 +1,4 @@
-// Arc Deck · 输入模型
+// Saiku Deck · 输入模型
 //
 // 平台无关的输入事件。Win32 侧把 `WM_*` / `WM_IME_*` 翻译成这些变体，App 侧只
 // 认识这一套 —— 于是 App 逻辑与「IME 走 IMM32 还是 TSF」完全解耦。
@@ -25,7 +25,7 @@ pub struct Modifiers {
     pub alt: bool,
 }
 
-/// 逻辑按键 —— 只列 Arc Deck 真正用到的。
+/// 逻辑按键 —— 只列 Saiku Deck 真正用到的。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
     Escape,

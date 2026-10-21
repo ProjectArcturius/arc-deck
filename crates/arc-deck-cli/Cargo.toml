@@ -5,10 +5,10 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Arc Deck headless worker 命令"
+description = "Saiku headless worker 命令"
 
 [[bin]]
-name = "arcdeck"
+name = "saiku"
 path = "src/main.rs"
 
 # 这些套件直接依赖夹具实现；默认构建不编译夹具，不能让 all-targets 反向要求它。

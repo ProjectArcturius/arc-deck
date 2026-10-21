@@ -1,5 +1,5 @@
 ﻿<#
-  Resize the Arc Deck window with the Windows snap shortcuts.
+  Resize the Saiku Deck window with the Windows snap shortcuts.
 
   Why not SetWindowPos: the window belongs to ApplicationFrameHost and SetWindowPos
   reports success while the size does not change -- verified on this machine, both
@@ -43,7 +43,7 @@ public class Snap {
       if (p.ProcessName != "ApplicationFrameHost") continue;
       var hh = p.MainWindowHandle; if (hh == IntPtr.Zero) continue;
       var t = new System.Text.StringBuilder(512); GetWindowTextW(hh, t, 512);
-      if (t.ToString().Contains("Arc Deck")) return hh;
+      if (t.ToString().Contains("Saiku Deck")) return hh;
     }
     return IntPtr.Zero;
   }
@@ -80,14 +80,14 @@ public class Snap {
 "@
 
 $h = [Snap]::Find()
-if ($h -eq [IntPtr]::Zero) { Write-Error "Arc Deck window not found"; exit 1 }
+if ($h -eq [IntPtr]::Zero) { Write-Error "Saiku Deck window not found"; exit 1 }
 
 "before: $([Snap]::Rect($h))"
 $fg = [Snap]::Focus()
 "foreground after focus attempt: [$fg]"
 
-if ($fg -notlike "*Arc Deck*") {
-  Write-Error "cannot focus Arc Deck (foreground is [$fg]) -- another app is holding it; snap keys would go to the wrong window"
+if ($fg -notlike "*Saiku Deck*") {
+  Write-Error "cannot focus Saiku Deck (foreground is [$fg]) -- another app is holding it; snap keys would go to the wrong window"
   exit 2
 }
 

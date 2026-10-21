@@ -34,7 +34,7 @@ pub struct TaskSpec {
     /// 谁派的这件任务（`claude` / `sol`，或某个任务 id）。缺席 = 没记录。
     ///
     /// 这**不是授权**，是派工关系的一条边。为什么是自由文本而不是 `parent_task_id`：
-    /// Arc Deck 里几乎全是工人，树的上两层（Claude Code、Codex）**不是 Arc Deck
+    /// Saiku 里几乎全是工人，树的上两层（Claude Code、Codex）**不是 Saiku
     /// 任务**，没有自己的 `status.json` —— 记任务 id 会指向一个查不到的东西。
     /// 用途是让外部监控程序画「任务书流向」，参 PRODUCT_PLAN §6.2 与 §6.5.1。
     #[serde(default, skip_serializing_if = "Option::is_none")]

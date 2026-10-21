@@ -68,7 +68,7 @@ impl Permission {
         }
     }
 
-    /// 映射到 Arc Deck 的策略档（写法要能被 [`Profile::parse`] 认出来）。
+    /// 映射到 Saiku 的策略档（写法要能被 [`Profile::parse`] 认出来）。
     pub const fn profile(self) -> &'static str {
         match self {
             Self::Readonly => "workspace-readonly",
@@ -712,7 +712,7 @@ mod tests {
         ExecutionPlan::resolve(&cfg, &task)
     }
 
-    /// `arcdeck run` 生成的默认授权（`commands.rs`：读写路径留空、`network: true`）必须能落到执行层。
+    /// `saiku run` 生成的默认授权（`commands.rs`：读写路径留空、`network: true`）必须能落到执行层。
     /// 新加的三条「拒绝启动」规则任何一条误伤它，派工就全部 64 —— 包括正在用它开发本仓的工人。
     #[test]
     fn default_dispatch_shape_is_not_refused_by_the_execution_guard() {

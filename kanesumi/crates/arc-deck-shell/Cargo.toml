@@ -1,6 +1,6 @@
 [package]
 name = "arc-deck-shell"
-description = "Arc Deck · 渲染契约与平台外壳（App trait / Scene 命令 / 输入 / IME / 事件循环）"
+description = "Saiku Deck · 渲染契约与平台外壳（App trait / Scene 命令 / 输入 / IME / 事件循环）"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

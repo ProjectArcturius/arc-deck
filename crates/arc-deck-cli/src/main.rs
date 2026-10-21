@@ -1,9 +1,9 @@
-//! Arc Deck headless worker 命令。
+//! Saiku headless worker 命令。
 //!
 //! 两个入口：
 //!
-//! - `arc-deck worker run ...` —— 公开命令，见 `args.rs` 的用法文本。
-//! - `arc-deck __fixture-sdk ...` —— 隐藏子命令，把自己作为**假 SDK 对端**
+//! - `saiku worker run ...` —— 公开命令，见 `args.rs` 的用法文本。
+//! - `saiku __fixture-sdk ...` —— 隐藏子命令，把自己作为**假 SDK 对端**
 //!   启动。它只在 `test-runtime` feature 下存在。
 //!
 //! 为什么假对端是「重新执行自身」而不是另一个二进制：文档里的离线验收只有
@@ -35,13 +35,20 @@ async fn main() -> ExitCode {
         }
     };
 
+    if matches!(command, args::Command::Tui | args::Command::Ops(_) | args::Command::WorkerRun(_)) {
+        if let Err(message) = migrate_legacy_dirs() {
+            eprintln!("saiku: {message}");
+            return ExitCode::from(EXIT_SPEC_ERROR as u8);
+        }
+    }
+
     match command {
         args::Command::Help => {
             print!("{}", args::USAGE);
             ExitCode::SUCCESS
         }
         args::Command::Version => {
-            println!("arcdeck {}", env!("CARGO_PKG_VERSION"));
+            println!("saiku {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
         args::Command::Tui => {
@@ -56,6 +63,22 @@ async fn main() -> ExitCode {
             ExitCode::from(code as u8)
         }
     }
+}
+
+/// 旧名 `arcdeck` 目录的一次性迁移（`userconfig::migrate_legacy_dirs`）。
+#[cfg(not(feature = "test-runtime"))]
+fn migrate_legacy_dirs() -> Result<(), String> {
+    for note in arc_deck_core::userconfig::migrate_legacy_dirs()? {
+        eprintln!("saiku: {note}");
+    }
+    Ok(())
+}
+
+/// 测试构建不迁移：集成测试拉起的二进制继承开发机的 `%APPDATA%`，迁移会在跑测试时
+/// 悄悄搬走开发者真实的配置、密钥与运行时。
+#[cfg(feature = "test-runtime")]
+fn migrate_legacy_dirs() -> Result<(), String> {
+    Ok(())
 }
 
 #[cfg(feature = "test-runtime")]

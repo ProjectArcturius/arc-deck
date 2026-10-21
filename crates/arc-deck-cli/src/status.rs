@@ -72,7 +72,7 @@ pub struct LastError {
     pub message: String,
     /// 能不能靠「再派一次」解决（调度者的下一个决定）。缺席 = false。
     ///
-    /// 是给调度者的**建议**，不是自动动作：Arc Deck 自己不会因为它去重试。
+    /// 是给调度者的**建议**，不是自动动作：Saiku 自己不会因为它去重试。
     /// 判定表在 [`arc_deck_core::failure::retryable`]。
     #[serde(default)]
     pub retryable: bool,
@@ -429,12 +429,12 @@ pub fn one_line(status: &StatusFile, health: &str, now: u64) -> String {
     let what = match health {
         "done" => match &status.last_error {
             Some(e) if status.state != "completed" => format!("{}: {}", e.code, clip(&e.message, 60)),
-            _ => format!("详情：arcdeck report {}", status.task_id),
+            _ => format!("详情：saiku report {}", status.task_id),
         },
         "dead" => match supervisor_liveness(status) {
             // 快路径：进程**确认**不在了。这条比「心跳过期」信息量更大，所以分开说 ——
-            // 它同时意味着需要有人去收运行时进程树（`arcdeck cancel` 会做）。
-            Liveness::Gone => "监工进程已不在（未写出终态，按 unknown 处理；`arcdeck cancel` 可收残余进程）".to_string(),
+            // 它同时意味着需要有人去收运行时进程树（`saiku cancel` 会做）。
+            Liveness::Gone => "监工进程已不在（未写出终态，按 unknown 处理；`saiku cancel` 可收残余进程）".to_string(),
             _ => format!(
                 "心跳停了 {}（监工没有回应，按 unknown 处理）",
                 human(now.saturating_sub(status.heartbeat_at) / 1000)
@@ -463,7 +463,7 @@ pub fn read(path: &Path) -> Option<StatusFile> {
 ///
 /// **为什么由派工方写**：工人是在预检（读配置、查运行时、取密钥）里死的，而预检
 /// 跑在第一个状态写手建立**之前** —— 它写不出自己的失败。没有这一条，一次配置错的
-/// 派工在状态面上完全不存在：`arcdeck status --all` 报「没有任务」，真正的原因
+/// 派工在状态面上完全不存在：`saiku status --all` 报「没有任务」，真正的原因
 /// 只躺在 `console.err` 里，调度者只能回去翻日志。那正是 §6.5 列的第四个问题
 /// （后台化漏了就静默消失）换了个形式。
 #[derive(Debug, Clone)]

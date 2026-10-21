@@ -142,7 +142,7 @@ namespace ArcDeck
 
         private static Session Session_ArcDeckIme()
         {
-            var s = Make("s1", "Arc Deck 骨架与 IME 验证", "Projects/arc-deck",
+            var s = Make("s1", "Saiku Deck 骨架与 IME 验证", "Projects/arc-deck",
                 DateTimeOffset.Now.AddMinutes(-3), 24,
                 "微软拼音在自研 Win32 事件循环里逐键推进组合串，通路成立。");
 

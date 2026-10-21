@@ -1,6 +1,6 @@
-//! `arcdeck serve --stdio`：把会话服务的消息（`arc_deck_core::service`）按行搬到 stdin / stdout。
+//! `saiku serve --stdio`：把会话服务的消息（`arc_deck_core::service`）按行搬到 stdin / stdout。
 //!
-//! 这是 GUI「热插拔」的第一种接法（docs/GUI_PLUGGABLE.md §3）：GUI 进程拉起 `arcdeck serve --stdio`
+//! 这是 GUI「热插拔」的第一种接法（docs/GUI_PLUGGABLE.md §3）：GUI 进程拉起 `saiku serve --stdio`
 //! 作为子进程，一行一条 JSON。选它先做的理由：
 //!
 //! - **不需要发现与鉴权**：管道只连着拉起它的那个进程，没有端口、没有 socket 权限要设。
@@ -62,7 +62,7 @@ pub(crate) fn interactive_persona(cfg: &UserConfig, home: &Path, agent: AgentId,
     if !cfg.personalization.enabled {
         return Ok(String::new());
     }
-    let (agents, prompts) = crate::commands::write_embedded_agents(&home.join("arcdeck-agents"))
+    let (agents, prompts) = crate::commands::write_embedded_agents(&home.join("saiku-agents"))
         .map_err(|error| error.message)?;
     let registry = arc_deck_core::agent::AgentRegistry::load(&agents, &prompts).map_err(|error| error.message)?;
     let prompt = registry
@@ -145,7 +145,7 @@ pub(crate) async fn cmd_serve(argv: &[String]) -> Result<i32, SpecError> {
         // 共享 socket 的那种（多个前端同时连一个后端）是设计里的第二步，还没实现 —— 明说，不假装。
         return Err(SpecError::new(
             code::CONFIG_INVALID,
-            "目前只有 `arcdeck serve --stdio`（GUI 拉起子进程、按行收发）；共享 socket 模式见 docs/GUI_PLUGGABLE.md，尚未实现",
+            "目前只有 `saiku serve --stdio`（GUI 拉起子进程、按行收发）；共享 socket 模式见 docs/GUI_PLUGGABLE.md，尚未实现",
         ));
     }
     let workspace = match workspace {
@@ -243,9 +243,9 @@ mod tests {
     #[test]
     fn the_interactive_persona_follows_the_personalization_switch() {
         let home = tempfile::tempdir().unwrap();
-        let mut cfg = UserConfig::parse(&arc_deck_core::userconfig::starter_config(), Path::new("arcdeck.json")).unwrap();
+        let mut cfg = UserConfig::parse(&arc_deck_core::userconfig::starter_config(), Path::new("saiku.json")).unwrap();
         assert_eq!(interactive_persona(&cfg, home.path(), AgentId::Echo, Mode::Build).unwrap(), "");
-        assert!(!home.path().join("arcdeck-agents").exists(), "关着时连文件都不写");
+        assert!(!home.path().join("saiku-agents").exists(), "关着时连文件都不写");
 
         cfg.personalization.enabled = true;
         let echo = interactive_persona(&cfg, home.path(), AgentId::Echo, Mode::Build).unwrap();

@@ -42,7 +42,7 @@ public class Vw {
       if (p.ProcessName != "ApplicationFrameHost") continue;
       var hh = p.MainWindowHandle; if (hh == IntPtr.Zero) continue;
       var t = new System.Text.StringBuilder(512); GetWindowTextW(hh, t, 512);
-      if (t.ToString().Contains("Arc Deck")) return hh;
+      if (t.ToString().Contains("Saiku Deck")) return hh;
     }
     return IntPtr.Zero;
   }
@@ -70,7 +70,7 @@ public class Vw {
 "@
 
 $h = [Vw]::Find()
-if ($h -eq [IntPtr]::Zero) { Write-Error "Arc Deck window not found"; exit 1 }
+if ($h -eq [IntPtr]::Zero) { Write-Error "Saiku Deck window not found"; exit 1 }
 
 $wr = ([Vw]::WindowRect($h) -split ',') | ForEach-Object { [int]$_ }
 $winX = $wr[0]; $winY = $wr[1]
@@ -87,7 +87,7 @@ $imgW = [int]$Matches[1]; $imgH = [int]$Matches[2]
 $AE = [System.Windows.Automation.AutomationElement]
 $TS = [System.Windows.Automation.TreeScope]
 $win = $AE::RootElement.FindFirst($TS::Children,
-  (New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, "Arc Deck")))
+  (New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, "Saiku Deck")))
 $all = $win.FindAll($TS::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
 
 $bmp = New-Object System.Drawing.Bitmap($Out)

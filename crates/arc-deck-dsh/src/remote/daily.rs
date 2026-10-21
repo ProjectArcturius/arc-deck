@@ -43,7 +43,7 @@ async fn remote_live_cancel_tool_then_immediately_prompt() {
             "models": {"test-model": {"contextWindow": 32768}}
         }}
     })).unwrap();
-    if let Some(path) = std::env::var_os("ARCDECK_DSH_RUNTIME_DIR") {
+    if let Some(path) = std::env::var_os("SAIKU_DSH_RUNTIME_DIR") {
         cfg.runtime.dir = Some(path.into());
     }
     let home = dir.path().join("home");

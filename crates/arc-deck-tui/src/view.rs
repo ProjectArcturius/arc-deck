@@ -725,7 +725,7 @@ fn sidebar(frame: &mut Frame, app: &App, area: Rect, t: &Theme) {
         }
         footer.push(Line::from(vec![
             Span::styled("● ", Style::default().fg(ok(t))),
-            Span::styled("Arc Deck ", Style::default().fg(text(t)).add_modifier(Modifier::BOLD)),
+            Span::styled("Saiku ", Style::default().fg(text(t)).add_modifier(Modifier::BOLD)),
             Span::styled(format!("v{}", env!("CARGO_PKG_VERSION")), Style::default().fg(muted(t))),
         ]));
         let footer = wrap(footer, inner.width as usize);
@@ -902,7 +902,7 @@ fn body_lines(app: &App, t: &Theme, width: u16) -> Vec<Line<'static>> {
     if let Some(r) = &d.result {
         lines.push(Line::raw(""));
         lines.push(Line::styled(
-            "Arc Deck 采集的事实",
+            "Saiku 采集的事实",
             Style::default().fg(accent(t)),
         ));
         lines.push(Line::raw(format!("终态：{}", r.status.as_str())));
@@ -954,7 +954,7 @@ fn body_lines(app: &App, t: &Theme, width: u16) -> Vec<Line<'static>> {
 
 /// Assistant Markdown, or nothing when this run has no result file.
 ///
-/// `final_text` is the model's own statement; `result.summary` is Arc Deck's fallback
+/// `final_text` is the model's own statement; `result.summary` is Saiku's fallback
 /// for a worker that never wrote one. That is the same choice the old line-by-line
 /// renderer made, kept so the fallback does not silently disappear with the rewrite.
 fn statement_lines(app: &App, t: &Theme, width: u16) -> Vec<Line<'static>> {
@@ -2573,7 +2573,7 @@ mod tests {
             .join("\n");
         assert!(text.contains("exit 101"));
         assert_eq!(text.matches("第0行中文结果").count(), 1);
-        assert!(text.contains("Arc Deck 采集的事实"));
+        assert!(text.contains("Saiku 采集的事实"));
         assert!(text.contains("模型的陈述"));
     }
 
@@ -3294,7 +3294,7 @@ mod tests {
             "不该有「你」这一行"
         );
         assert!(
-            lines.iter().all(|line| line.to_string() != "Arc Deck"),
+            lines.iter().all(|line| line.to_string() != "Saiku"),
             "助手正文不该有角色标签"
         );
         // 用户块的行尾留白也带背景色，才像一块面板。

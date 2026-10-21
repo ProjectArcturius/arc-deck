@@ -41,10 +41,10 @@ pub struct WorkerArgs {
 }
 
 pub const USAGE: &str = "\
-arcdeck —— Arc Deck（DSH 之上的编码 Agent）
+saiku —— Saiku（DSH 之上的编码 Agent）
 
-  arcdeck                               当前目录进 TUI（多轮会话、恢复、取消；/runs 看工人运行）
-  arcdeck run <任务书.md|.json|-> [选项] 执行一件任务（前台：stdout 是 JSONL，退出码 = 终态）
+  saiku                               当前目录进 TUI（多轮会话、恢复、取消；/runs 看工人运行）
+  saiku run <任务书.md|.json|-> [选项] 执行一件任务（前台：stdout 是 JSONL，退出码 = 终态）
       --detach                          分离运行；等工人接住（写出状态）才返回，接不住就报出原因
       --prompt <原文|->                 明确作为指令；- 从 stdin 读文本（不按任务书解析）
       --id <ID>                         任务 ID（缺省取任务书文件名）
@@ -59,23 +59,23 @@ arcdeck —— Arc Deck（DSH 之上的编码 Agent）
       --format <jsonl|text>             stdout 形态：工人模式 jsonl，一般模式 text
       --timeout <90|30m|2h>             墙钟预算
       --rerun                           同 ID 已有结论时重跑（旧记录改名保留）
-  arcdeck status [<id>…|--all] [--json] 每件任务一行；单件时退出码编码状态
-  arcdeck wait <id> [--timeout 30m]     等到终态，打印一行
-  arcdeck report <id> [--json]          紧凑回报（事实与模型陈述分开）
-  arcdeck usage [--json]                各任务的 token 用量与合计（只有 provider 报告的，无费用）
-  arcdeck logs <id> [--tail N] [--runtime|--console]
-  arcdeck cancel <id>                   请求取消并等待收尾；监工已死时按 runtime_pid 收进程树
-  arcdeck ls                            同 status --all
-  arcdeck auth set|ls|rm|import-opencode         凭据（与 OpenCode auth.json 同形）
-  arcdeck runtime install|status [--version V]   私有、钉版本的 DSH 运行时
-  arcdeck config init|path              用户配置 arcdeck.json
-  arcdeck serve --stdio [--permission L] [--workspace D]  给 GUI 用：会话服务按行走 stdin/stdout
+  saiku status [<id>…|--all] [--json] 每件任务一行；单件时退出码编码状态
+  saiku wait <id> [--timeout 30m]     等到终态，打印一行
+  saiku report <id> [--json]          紧凑回报（事实与模型陈述分开）
+  saiku usage [--json]                各任务的 token 用量与合计（只有 provider 报告的，无费用）
+  saiku logs <id> [--tail N] [--runtime|--console]
+  saiku cancel <id>                   请求取消并等待收尾；监工已死时按 runtime_pid 收进程树
+  saiku ls                            同 status --all
+  saiku auth set|ls|rm|import-opencode         凭据（与 OpenCode auth.json 同形）
+  saiku runtime install|status [--version V]   私有、钉版本的 DSH 运行时
+  saiku config init|path              用户配置 saiku.json
+  saiku serve --stdio [--permission L] [--workspace D]  给 GUI 用：会话服务按行走 stdin/stdout
 
 status / wait 的退出码：
   0 完成 · 1 失败 · 2 受阻 · 3 已取消 · 4 超时 · 5 未知（含进程已死）· 10 运行中 · 11 卡住 · 64 用法错
 
 底层入口（M1 契约，参数不变）：
-  arcdeck worker run --config <配置文件> --task <任务书|-> [选项]
+  saiku worker run --config <配置文件> --task <任务书|-> [选项]
 
 选项：
   --config <路径>       必需的启动配置（授权上限、运行时、状态目录）

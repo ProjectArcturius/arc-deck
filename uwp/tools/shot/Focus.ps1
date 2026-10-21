@@ -1,5 +1,5 @@
 ﻿<#
-  Bring the Arc Deck window to the foreground, maximised, then screenshot it.
+  Bring the Saiku Deck window to the foreground, maximised, then screenshot it.
 
   Why this exists: a full-screen screenshot captures whatever is on top, and this
   machine sometimes has a game running full-screen. The earlier captures silently
@@ -34,7 +34,7 @@ public class Fg {
       if (p.ProcessName != "ApplicationFrameHost") continue;
       var hh = p.MainWindowHandle; if (hh == IntPtr.Zero) continue;
       var t = new System.Text.StringBuilder(512); GetWindowTextW(hh, t, 512);
-      if (t.ToString().Contains("Arc Deck")) return hh;
+      if (t.ToString().Contains("Saiku Deck")) return hh;
     }
     return IntPtr.Zero;
   }
@@ -102,8 +102,8 @@ if ($Out) {
   $g.Dispose(); $bmp.Dispose()
 
   $fgTitle = [Fg]::Title([Fg]::GetForegroundWindow())
-  if ($fgTitle -notlike "*Arc Deck*") {
-    "WARNING: foreground is [$fgTitle], not Arc Deck -- the capture is of the wrong window"
+  if ($fgTitle -notlike "*Saiku Deck*") {
+    "WARNING: foreground is [$fgTitle], not Saiku Deck -- the capture is of the wrong window"
   } else {
     "saved $Out (foreground confirmed: $fgTitle)"
   }

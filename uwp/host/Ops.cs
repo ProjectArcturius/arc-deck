@@ -126,7 +126,7 @@ internal static class Ops
             {
                 found = false,
                 command = "dsh --version",
-                hint = "PATH 里没有 dsh；先 arcdeck runtime install 或把 dsh 放进 PATH",
+                hint = "PATH 里没有 dsh；先 saiku runtime install 或把 dsh 放进 PATH",
             };
         }
 

@@ -1,5 +1,5 @@
 ﻿<#
-  Dump the Arc Deck automation tree WITH screen rectangles.
+  Dump the Saiku Deck automation tree WITH screen rectangles.
 
   Why: Uia.ps1 -List prints names and control types, which tells you an element
   exists but not where it is -- so you cannot tell "the command bar rendered but is
@@ -23,8 +23,8 @@ $AE = [System.Windows.Automation.AutomationElement]
 $TS = [System.Windows.Automation.TreeScope]
 
 $win = $AE::RootElement.FindFirst($TS::Children,
-  (New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, "Arc Deck")))
-if ($null -eq $win) { Write-Error "Arc Deck window not found"; exit 1 }
+  (New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, "Saiku Deck")))
+if ($null -eq $win) { Write-Error "Saiku Deck window not found"; exit 1 }
 
 $all = $win.FindAll($TS::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
 

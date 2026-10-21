@@ -44,11 +44,11 @@ impl RuntimeLayout {
     pub fn check(&self) -> Result<(), String> {
         match self.installed_version() {
             None => Err(format!(
-                "DSH 运行时未安装：{}。先运行 `arcdeck runtime install`",
+                "DSH 运行时未安装：{}。先运行 `saiku runtime install`",
                 self.dir.display()
             )),
             Some(v) if v != self.version => Err(format!(
-                "运行时目录里是 DSH {v}，但配置钉的是 {}；重新运行 `arcdeck runtime install`",
+                "运行时目录里是 DSH {v}，但配置钉的是 {}；重新运行 `saiku runtime install`",
                 self.version
             )),
             Some(_) if !self.entry().is_file() => {
@@ -63,9 +63,9 @@ impl RuntimeLayout {
         std::fs::create_dir_all(&self.dir)
             .map_err(|e| format!("建目录 {} 失败：{e}", self.dir.display()))?;
         let manifest = json!({
-            "name": "arcdeck-dsh-runtime",
+            "name": "saiku-dsh-runtime",
             "private": true,
-            "description": "Arc Deck 私有的 DSH 运行时；版本由 arcdeck 钉住，不要手改",
+            "description": "Saiku 私有的 DSH 运行时；版本由 saiku 钉住，不要手改",
             "dependencies": { "@deepseek-ai/dsh": self.version },
         });
         std::fs::write(
@@ -92,7 +92,7 @@ impl RuntimeLayout {
 /// 每任务 patch 需要的输入。
 pub struct PatchInput<'a> {
     pub route: &'a RouteSpec,
-    /// 进 persona 后缀的全文（Arc Deck 的 Agent 提示词 + 工人守则）。
+    /// 进 persona 后缀的全文（Saiku 的 Agent 提示词 + 工人守则）。
     pub persona_suffix: &'a str,
     pub session_log_upload: bool,
     /// 由 `EffectivePolicy::execution_guard` 算出的执行层限制。
@@ -167,7 +167,7 @@ pub fn render_patch_with_routes(input: &PatchInput<'_>, extra_routes: &[RouteSpe
             "sandbox": guard.sandbox_mode(),
             "approval": guard.approval.as_str(),
             "name": level,
-            "description": "Arc Deck 本次运行的授权级别；只能由启动配置与任务书收紧",
+            "description": "Saiku 本次运行的授权级别；只能由启动配置与任务书收紧",
         }),
     );
     rows.push(json!({ "id": "permission", "config": { "presets": Value::Object(presets) } }));
@@ -181,7 +181,7 @@ pub fn render_patch_with_routes(input: &PatchInput<'_>, extra_routes: &[RouteSpe
         }));
     }
 
-    // Arc Deck 的 Plan 由自己管：DSH 的 plan-mode 是**协作状态**，官方 README 就写着
+    // Saiku 的 Plan 由自己管：DSH 的 plan-mode 是**协作状态**，官方 README 就写着
     // 「It does not restrict the agent: every tool stays callable」，它的出口
     // `exit_plan_mode` 又要一个人工评审通道 —— headless 没有（§5.3：不得不经适配直接
     // 要求 headless 调用其人工评审工具）。这里改由沙箱 + 提示词共同承担。
@@ -320,7 +320,7 @@ mod tests {
             headers: BTreeMap::from([("x-opencode-session".to_string(), "t1".to_string())]),
             models: vec![RouteModel { id: "deepseek-v4.1-flash".into(), name: None, context_window: None }],
             display_name: Some("OpenCode Go".into()),
-            key_env: "ARCDECK_KEY_OPENCODE_GO".into(),
+            key_env: "SAIKU_KEY_OPENCODE_GO".into(),
             key_source: "auth".into(),
         }
     }
@@ -464,7 +464,7 @@ mod tests {
         let pi = rows.iter().find(|r| r["id"] == "llm-pi-ai").unwrap();
         let p = &pi["config"]["providers"]["opencode-go"];
         assert_eq!(p["api"], "anthropic-messages");
-        assert_eq!(p["apiKeyEnv"], "ARCDECK_KEY_OPENCODE_GO");
+        assert_eq!(p["apiKeyEnv"], "SAIKU_KEY_OPENCODE_GO");
         assert_eq!(p["headers"]["x-opencode-session"], "t1");
         assert_eq!(p["models"][0]["id"], "deepseek-v4.1-flash");
         let sp = rows.iter().find(|r| r["id"] == "system-prompt").unwrap();
@@ -476,7 +476,7 @@ mod tests {
         let mut route = pi_route();
         route.adapter = "deepseek-official".into();
         route.provider_id = "deepseek".into();
-        route.key_env = "ARCDECK_KEY_DEEPSEEK".into();
+        route.key_env = "SAIKU_KEY_DEEPSEEK".into();
         route.base_url = None;
         let plan = resolve(
             "workspace-development", "echo", None, &["."], &["."], true, false, false, Value::Null, None,
@@ -494,7 +494,7 @@ mod tests {
         let rows = v.as_array().unwrap();
         assert!(!rows.iter().any(|r| r["id"] == "session-log-deepseek"));
         let ds = rows.iter().find(|r| r["id"] == "llm-deepseek").unwrap();
-        assert_eq!(ds["config"]["apiKeyEnv"], "ARCDECK_KEY_DEEPSEEK");
+        assert_eq!(ds["config"]["apiKeyEnv"], "SAIKU_KEY_DEEPSEEK");
         assert!(!rows.iter().any(|r| r["id"] == "llm-pi-ai"));
     }
 
@@ -883,7 +883,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let layout = RuntimeLayout::new(dir.path(), "0.2.1-alpha.2");
         let err = layout.check().unwrap_err();
-        assert!(err.contains("arcdeck runtime install"), "{err}");
+        assert!(err.contains("saiku runtime install"), "{err}");
     }
 
     /// 反解与正向映射必须互为逆（除 `confirm`：它与 `workspace` 同档，档名里不含这条信息）。

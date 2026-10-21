@@ -196,7 +196,7 @@ impl RemoteMux {
         let host = origin.to_string();
 
         let thread = std::thread::Builder::new()
-            .name("arcdeck-dsh-mux".into())
+            .name("saiku-dsh-mux".into())
             .spawn(move || run_connection(thread_shared, host, port, request, outbound_rx, ready_tx))
             .map_err(|e| RemoteError::Io(format!("起 mux 线程失败：{e}")))?;
 
@@ -237,7 +237,7 @@ impl RemoteMux {
         }
 
         let stream_id = format!(
-            "arcdeck-{}-{}",
+            "saiku-{}-{}",
             std::process::id(),
             self.shared.next_id.fetch_add(1, Ordering::SeqCst)
         );

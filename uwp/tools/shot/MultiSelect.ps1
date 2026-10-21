@@ -29,8 +29,8 @@ function Find-All($root, $type) {
 }
 
 $win = $AE::RootElement.FindFirst($TS::Children,
-  (New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, "Arc Deck")))
-if ($null -eq $win) { Write-Error "Arc Deck window not found"; exit 1 }
+  (New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, "Saiku Deck")))
+if ($null -eq $win) { Write-Error "Saiku Deck window not found"; exit 1 }
 
 # 按 AutomationId 找 SessionList。找不到就按类型找第一个 List —— 依赖 Id 太脆，
 # 而这个页面上只有一个真正承载会话的 List。

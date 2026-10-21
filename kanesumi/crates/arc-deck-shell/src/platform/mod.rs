@@ -1,4 +1,4 @@
-// Arc Deck · Win32 平台外壳
+// Saiku Deck · Win32 平台外壳
 //
 // 职责（与 Kanesumi `kanesumi-harness::platform` 的 Linux 实现同构）：
 //

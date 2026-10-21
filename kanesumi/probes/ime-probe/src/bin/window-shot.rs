@@ -1,4 +1,4 @@
-// Arc Deck · 窗口截图
+// Saiku Deck · 窗口截图
 //
 // 为什么需要它：输入链路的验证只到「App 收到事件」为止，而「事件是否真的画到
 // 屏幕上」是另一段路径（Scene 构建 → 光栅化）。用 PrintWindow 抓窗口像素，
@@ -96,7 +96,7 @@ fn main() {
     unsafe {
         let hwnd = FindWindowW(DEFAULT_CLASS.as_ptr(), std::ptr::null());
         if hwnd == 0 {
-            eprintln!("未找到 Arc Deck 窗口");
+            eprintln!("未找到 Saiku Deck 窗口");
             std::process::exit(1);
         }
 

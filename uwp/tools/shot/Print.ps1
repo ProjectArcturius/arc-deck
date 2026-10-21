@@ -1,5 +1,5 @@
 ﻿<#
-  Capture the Arc Deck window into a PNG.
+  Capture the Saiku Deck window into a PNG.
 
   Method: PrintWindow with PW_RENDERFULLCONTENT.
 
@@ -50,7 +50,7 @@ public class Pw {
       if (p.ProcessName != "ApplicationFrameHost") continue;
       var hh = p.MainWindowHandle; if (hh == IntPtr.Zero) continue;
       var t = new System.Text.StringBuilder(512); GetWindowTextW(hh, t, 512);
-      if (t.ToString().Contains("Arc Deck")) return hh;
+      if (t.ToString().Contains("Saiku Deck")) return hh;
     }
     return IntPtr.Zero;
   }
@@ -80,7 +80,7 @@ public class Pw {
 "@
 
 $h = [Pw]::Find()
-if ($h -eq [IntPtr]::Zero) { Write-Error "Arc Deck window not found"; exit 1 }
+if ($h -eq [IntPtr]::Zero) { Write-Error "Saiku Deck window not found"; exit 1 }
 "window: [$([Pw]::Title($h))] visible=$([Pw]::IsWindowVisible($h))"
 
 $size = [Pw]::Grab($h, $Out)

@@ -1,10 +1,10 @@
-//! 用户级配置 `arcdeck.json` 与标准目录（PRODUCT_PLAN §6.0）。
+//! 用户级配置 `saiku.json` 与标准目录（PRODUCT_PLAN §6.0）。
 //!
-//! 查找顺序：`--config` → `$ARCDECK_CONFIG` → `<配置目录>/arcdeck/arcdeck.json`。
+//! 查找顺序：`--config` → `$SAIKU_CONFIG` → `<配置目录>/saiku/saiku.json`。
 //! **永远不从 workspace 里找** —— 任务书与工作区文件不得扩大启动时授权。
 //!
 //! 这份配置是调度者（主控）那一侧的东西：模型路由、供应商、沙箱档、是否允许提交、
-//! worktree 模板。`arcdeck run` 把它与任务书一起物化成 M1 的启动配置与任务书，
+//! worktree 模板。`saiku run` 把它与任务书一起物化成 M1 的启动配置与任务书，
 //! 落在任务状态目录里 —— 这样每次运行实际用了什么都留档可查。
 
 use std::collections::BTreeMap;
@@ -30,12 +30,12 @@ pub const PINNED_DSH_VERSION: &str = "0.2.1-alpha.2";
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Personalization {
-    /// 缺省 **false**：一般模式下不注入任何 Arc Deck 文本。
+    /// 缺省 **false**：一般模式下不注入任何 Saiku 文本。
     #[serde(default)]
     pub enabled: bool,
 }
 
-/// `arcdeck.json`。
+/// `saiku.json`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UserConfig {
@@ -55,7 +55,7 @@ pub struct UserConfig {
     pub provider: BTreeMap<String, ProviderConfig>,
     #[serde(default)]
     pub runtime: RuntimeConfig,
-    /// 任务状态目录；省略时 `<数据目录>/arcdeck/state`。
+    /// 任务状态目录；省略时 `<数据目录>/saiku/state`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_root: Option<PathBuf>,
     #[serde(default)]
@@ -73,7 +73,7 @@ pub struct RuntimeConfig {
     /// 省略时 [`PINNED_DSH_VERSION`]。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dsh_version: Option<String>,
-    /// 运行时目录；省略时 `<数据目录>/arcdeck/runtime/dsh-<版本>`。
+    /// 运行时目录；省略时 `<数据目录>/saiku/runtime/dsh-<版本>`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<PathBuf>,
     /// node 可执行文件；省略时用 PATH 上的 `node`。
@@ -179,7 +179,7 @@ impl UserConfig {
             let e = e.to_string();
             SpecError::new(
                 code::CONFIG_INVALID,
-                format!("{} 不是合法的 arcdeck.json —— {e}{}", origin.display(), renamed_field_hint(&e)),
+                format!("{} 不是合法的 saiku.json —— {e}{}", origin.display(), renamed_field_hint(&e)),
             )
         })?;
         crate::provider::split_model(&config.model)?;
@@ -193,16 +193,16 @@ impl UserConfig {
     pub fn locate_and_load(explicit: Option<&Path>) -> SpecResult<(Self, PathBuf)> {
         let path = match explicit {
             Some(p) => p.to_path_buf(),
-            None => match std::env::var_os("ARCDECK_CONFIG") {
+            None => match std::env::var_os("SAIKU_CONFIG") {
                 Some(p) if !p.is_empty() => PathBuf::from(p),
-                _ => config_dir().join("arcdeck").join("arcdeck.json"),
+                _ => config_dir().join("saiku").join("saiku.json"),
             },
         };
         if !path.is_file() {
             return Err(SpecError::new(
                 code::CONFIG_MISSING,
                 format!(
-                    "找不到 arcdeck 配置：{}。用 `arcdeck config init` 生成一份，或用 --config / $ARCDECK_CONFIG 指定",
+                    "找不到 saiku 配置：{}。用 `saiku config init` 生成一份，或用 --config / $SAIKU_CONFIG 指定",
                     path.display()
                 ),
             ));
@@ -295,18 +295,67 @@ pub fn home_dir() -> PathBuf {
 }
 
 pub fn auth_path() -> PathBuf {
-    data_dir().join("arcdeck").join("auth.json")
+    data_dir().join("saiku").join("auth.json")
 }
 
 pub fn default_state_root() -> PathBuf {
-    local_data_dir().join("arcdeck").join("state")
+    local_data_dir().join("saiku").join("state")
 }
 
 pub fn default_runtime_dir(version: &str) -> PathBuf {
-    local_data_dir().join("arcdeck").join("runtime").join(format!("dsh-{version}"))
+    local_data_dir().join("saiku").join("runtime").join(format!("dsh-{version}"))
 }
 
-/// OpenCode 的 auth.json 位置（用于 `arcdeck auth import-opencode`）。
+/// 产品 2026-10-21 由 Arc Deck 改名为 Saiku（`arcdeck` 这个名字已有人用）。改名前的
+/// 安装把配置、密钥、运行时、会话都放在 `<基目录>/arcdeck` 下 —— 不搬的话升级后
+/// 「找不到配置」「密钥缺失」，而且旧目录名正好撞上那个同名产品。
+const LEGACY_APP_DIR: &str = "arcdeck";
+
+/// 把旧名目录一次性搬到 `saiku` 下。只在新目录**还不存在**时搬：新旧都在说明用户
+/// 已经手动处理过，这时不猜谁新谁旧。返回给用户看的提示，每条一行。
+///
+/// 搬不动（典型是 Windows 上旧版 `arcdeck` 还开着、文件被占用）返回 `Err` ——
+/// 调用方不能继续：继续跑会建出空的新目录，下次就再也不会迁移了。
+pub fn migrate_legacy_dirs() -> Result<Vec<String>, String> {
+    let mut bases = vec![config_dir(), data_dir(), local_data_dir()];
+    bases.dedup();
+    migrate_legacy_in(&bases)
+}
+
+fn migrate_legacy_in(bases: &[PathBuf]) -> Result<Vec<String>, String> {
+    let mut notes = Vec::new();
+    for base in bases {
+        let old = base.join(LEGACY_APP_DIR);
+        let new = base.join("saiku");
+        if !old.is_dir() || new.exists() {
+            continue;
+        }
+        std::fs::rename(&old, &new).map_err(|e| {
+            format!(
+                "旧目录 {} 没能改名为 {}：{e}。先关掉所有正在运行的 arcdeck（含 TUI 与工人）再重试",
+                old.display(),
+                new.display()
+            )
+        })?;
+        notes.push(format!("已把 {} 迁到 {}", old.display(), new.display()));
+        // 目录里以旧名命名的文件：配置本身，以及交互会话目录里的锁、内核 pid 与补丁标记
+        //（launch.rs 按新名字找它们，留着旧名就认不出上一个进程）。
+        for (dir, from, to) in [
+            (new.clone(), "arcdeck.json", "saiku.json"),
+            (new.join("dsh-home"), "arcdeck.lock", "saiku.lock"),
+            (new.join("dsh-home"), "arcdeck.kernel", "saiku.kernel"),
+            (new.join("dsh-home"), "arcdeck-web-patch.json", "saiku-web-patch.json"),
+        ] {
+            let (from, to) = (dir.join(from), dir.join(to));
+            if from.is_file() && !to.exists() {
+                std::fs::rename(&from, &to).map_err(|e| format!("{} 没能改名：{e}", from.display()))?;
+            }
+        }
+    }
+    Ok(notes)
+}
+
+/// OpenCode 的 auth.json 位置（用于 `saiku auth import-opencode`）。
 pub fn opencode_auth_path() -> PathBuf {
     if let Some(p) = std::env::var_os("XDG_DATA_HOME").filter(|p| !p.is_empty()) {
         return PathBuf::from(p).join("opencode").join("auth.json");
@@ -317,6 +366,32 @@ pub fn opencode_auth_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_arcdeck_dirs_move_once_and_never_over_a_new_one() {
+        let roaming = tempfile::tempdir().unwrap();
+        let local = tempfile::tempdir().unwrap();
+        let old = roaming.path().join("arcdeck");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("arcdeck.json"), "{}").unwrap();
+        std::fs::write(old.join("auth.json"), "{}").unwrap();
+        let old_home = local.path().join("arcdeck").join("dsh-home");
+        std::fs::create_dir_all(&old_home).unwrap();
+        std::fs::write(old_home.join("arcdeck.lock"), "1").unwrap();
+
+        let bases = [roaming.path().to_path_buf(), local.path().to_path_buf()];
+        let notes = migrate_legacy_in(&bases).unwrap();
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        let new = roaming.path().join("saiku");
+        assert!(new.join("saiku.json").is_file() && new.join("auth.json").is_file());
+        assert!(!old.exists());
+        assert!(local.path().join("saiku").join("dsh-home").join("saiku.lock").is_file());
+
+        // 新旧并存时不动：用户已经自己处理过，不猜谁新谁旧。
+        std::fs::create_dir_all(&old).unwrap();
+        assert!(migrate_legacy_in(&bases).unwrap().is_empty());
+        assert!(old.exists());
+    }
 
     #[test]
     fn starter_config_parses() {

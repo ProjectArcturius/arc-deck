@@ -86,7 +86,7 @@ impl RemoteRpc {
             return Err(RemoteError::Protocol(format!("不是一个合法的 Remote 方法名：{method:?}")));
         }
         let rpc_id = format!(
-            "arcdeck-{}-{}",
+            "saiku-{}-{}",
             std::process::id(),
             self.next_id.fetch_add(1, Ordering::SeqCst)
         );

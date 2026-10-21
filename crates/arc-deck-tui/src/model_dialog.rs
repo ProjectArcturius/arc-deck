@@ -8,7 +8,7 @@
 //!
 //! 三处有意与上游不同：
 //! 1. **不做 provider 的连接 / 登录**。上游的 provider 对话框是 OAuth 与 API key 流程的入口，
-//!    Arc Deck 的 provider 与凭据来自用户配置与 `auth.json`（`arcdeck auth set`），
+//!    Saiku 的 provider 与凭据来自用户配置与 `auth.json`（`saiku auth set`），
 //!    在 TUI 里再做一个登录流程等于第二套真相。这里只做列表与跳转。
 //! 2. **当前项标记用 `●` 而不是只把文字染色**：终端的配色能力不确定，
 //!    而「哪个模型现在是当前」是这一屏最重要的信息，不该依赖颜色。

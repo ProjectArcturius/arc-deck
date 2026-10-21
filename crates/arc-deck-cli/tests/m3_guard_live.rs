@@ -1,4 +1,4 @@
-//! M3 的 live 验收：对**本机已安装的真实 DSH 运行时**组合 `--profile sdk` + Arc Deck
+//! M3 的 live 验收：对**本机已安装的真实 DSH 运行时**组合 `--profile sdk` + Saiku
 //! 生成的 patch，用 `--dump-config` 断言两件事：
 //!
 //! 1. DSH **接受**这份 patch（不报「这一行找不到」，退出码 0）；
@@ -36,14 +36,14 @@ fn entry() -> PathBuf {
     assert!(
         entry.is_file(),
         "本机没有钉住的 DSH 运行时（{PINNED_DSH_VERSION}）：找不到 {}。\
-         先运行 `arcdeck runtime install` 再跑这些 live 用例",
+         先运行 `saiku runtime install` 再跑这些 live 用例",
         entry.display()
     );
     entry
 }
 
 fn node() -> String {
-    std::env::var("ARCDECK_TEST_NODE").unwrap_or_else(|_| "node".to_string())
+    std::env::var("SAIKU_TEST_NODE").unwrap_or_else(|_| "node".to_string())
 }
 
 /// 造一份真实的启动配置 + 任务书，走到 `ExecutionGuard`。
@@ -113,8 +113,8 @@ fn route() -> RouteSpec {
         headers: Default::default(),
         models: vec![RouteModel { id: "m3-live-placeholder".into(), name: None, context_window: None }],
         display_name: None,
-        key_env: "ARCDECK_KEY_M3_LIVE".into(),
-        key_source: "env:ARCDECK_KEY_M3_LIVE".into(),
+        key_env: "SAIKU_KEY_M3_LIVE".into(),
+        key_source: "env:SAIKU_KEY_M3_LIVE".into(),
     }
 }
 
@@ -151,7 +151,7 @@ fn dump_config(patch: &str) -> (Dump, tempfile::TempDir) {
         .env("DSH_HOME", &home)
         .env("DSH_TELEMETRY_DISABLED", "1")
         .output()
-        .expect("跑不起 node —— 检查 node 是否在 PATH 上（或用 ARCDECK_TEST_NODE 指定）");
+        .expect("跑不起 node —— 检查 node 是否在 PATH 上（或用 SAIKU_TEST_NODE 指定）");
     (
         Dump {
             code: out.status.code(),
@@ -372,7 +372,7 @@ fn boot_and_initialize(patch: &str, workspace: &Path, stderr_stop: Option<&str>)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("拉不起 node —— 检查 node 是否在 PATH 上（或用 ARCDECK_TEST_NODE 指定）");
+        .expect("拉不起 node —— 检查 node 是否在 PATH 上（或用 SAIKU_TEST_NODE 指定）");
 
     let stdout = child.stdout.take().expect("stdout");
     let stderr = child.stderr.take().expect("stderr");

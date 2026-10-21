@@ -1,6 +1,6 @@
-// Arc Deck · 渲染契约：几何 + Scene 绘制命令
+// Saiku Deck · 渲染契约：几何 + Scene 绘制命令
 //
-// 这一层是 Arc Deck 的「圆心」—— 与平台无关、与 DSH 无关、与 Kanesumi 无关。
+// 这一层是 Saiku Deck 的「圆心」—— 与平台无关、与 DSH 无关、与 Kanesumi 无关。
 // 它刻意**镜像** Kanesumi 的 `kanesumi-canvas`：同样的八个 `SceneCommand` 变体、
 // 同样的画家算法（扁平 `Vec`，无保留视觉树）。这样将来若要直接消费上游
 // `kanesumi-canvas`，替换是逐变体一一对应的，不需要重写绘制路径。
@@ -153,7 +153,7 @@ pub enum SceneCommand {
 
     /// 空心描边矩形。线宽以像素计。
     ///
-    /// 注意：Arc Deck 的约定是**描边向内**（inside）—— 与 Kanesumi 一致，
+    /// 注意：Saiku Deck 的约定是**描边向内**（inside）—— 与 Kanesumi 一致，
     /// 也与「贴边」哲学一致：描边不侵占相邻元素的像素。
     StrokeRect { rect: Rect, color: Color, width: f32 },
 

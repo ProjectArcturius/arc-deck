@@ -1,11 +1,11 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
 
-[assembly: AssemblyTitle("Arc Deck")]
+[assembly: AssemblyTitle("Saiku Deck")]
 [assembly: AssemblyDescription("DeepSeek Harness 的 Windows 客户端")]
 [assembly: AssemblyConfiguration("")]
 [assembly: AssemblyCompany("Takahashi Rinta")]
-[assembly: AssemblyProduct("Arc Deck")]
+[assembly: AssemblyProduct("Saiku Deck")]
 [assembly: AssemblyCopyright("Copyright © 2026 Takahashi Rinta")]
 [assembly: AssemblyTrademark("")]
 [assembly: AssemblyCulture("")]

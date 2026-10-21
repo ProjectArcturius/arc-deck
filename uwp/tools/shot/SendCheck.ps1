@@ -11,11 +11,11 @@
   所以这里逐步断言并把每一步的结果打出来，而不是只报「成功/失败」。
 
   用法：
-    powershell.exe -File SendCheck.ps1 -Session "Arc Deck 骨架与 IME 验证" -Text "验收消息"
+    powershell.exe -File SendCheck.ps1 -Session "Saiku Deck 骨架与 IME 验证" -Text "验收消息"
 #>
 [CmdletBinding()]
 param(
-  [string]$Session = "Arc Deck 骨架与 IME 验证",
+  [string]$Session = "Saiku Deck 骨架与 IME 验证",
   [string]$Text = "发送通路验收",
   [string]$Out
 )
@@ -29,8 +29,8 @@ $CT = [System.Windows.Automation.ControlType]
 
 function Find-Window {
   $win = $AE::RootElement.FindFirst($TS::Children,
-    (New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, "Arc Deck")))
-  if ($null -eq $win) { throw "找不到 Arc Deck 窗口 —— 应用没在跑？" }
+    (New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, "Saiku Deck")))
+  if ($null -eq $win) { throw "找不到 Saiku Deck 窗口 —— 应用没在跑？" }
   return $win
 }
 

@@ -210,7 +210,7 @@ fn install_panic_hook() {
 /// `notepad` on Windows and `vi` elsewhere. Failure is reported, never fatal: the draft would
 /// otherwise be lost because the user's editor was mistyped.
 fn run_external_editor(draft: &str) -> io::Result<Option<String>> {
-    let path = std::env::temp_dir().join(format!("arcdeck-draft-{}.md", std::process::id()));
+    let path = std::env::temp_dir().join(format!("saiku-draft-{}.md", std::process::id()));
     std::fs::write(&path, draft)?;
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
@@ -244,7 +244,7 @@ fn run_external_editor(draft: &str) -> io::Result<Option<String>> {
 pub fn run(boot: Boot, requests: Sender<Request>, updates: Receiver<Update>) -> io::Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(io::Error::other(
-            "TUI 需要交互终端；脚本请用 arcdeck run / status",
+            "TUI 需要交互终端；脚本请用 saiku run / status",
         ));
     }
     let preferences = std::fs::read_to_string(&boot.preferences)

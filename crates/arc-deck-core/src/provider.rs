@@ -107,7 +107,7 @@ impl KeySource {
             KeySource::Literal => "配置里的字面值".into(),
             KeySource::Env(v) => format!("环境变量 {v}"),
             KeySource::File(p) => format!("文件 {}", p.display()),
-            KeySource::AuthStore => "arcdeck auth.json".into(),
+            KeySource::AuthStore => "saiku auth.json".into(),
         }
     }
 }
@@ -164,13 +164,13 @@ pub fn split_model(raw: &str) -> SpecResult<(String, String)> {
     }
 }
 
-/// 环境变量名：`ARCDECK_KEY_` + 大写、非字母数字换成 `_`。
+/// 环境变量名：`SAIKU_KEY_` + 大写、非字母数字换成 `_`。
 pub fn key_env_name(provider_id: &str) -> String {
     let tail: String = provider_id
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
         .collect();
-    format!("ARCDECK_KEY_{tail}")
+    format!("SAIKU_KEY_{tail}")
 }
 
 /// 解析路由。`providers` 是用户配置里的块；`task_id` 用来展开头部模板。
@@ -268,7 +268,7 @@ impl ResolvedRoute {
                 return Err(SpecError::new(
                     code::CONFIG_INVALID,
                     format!(
-                        "供应商 `{}` 的 apiKey 是字面值；请改用 `arcdeck auth set {}`（或 {{env:VAR}}），配置里不放密钥",
+                        "供应商 `{}` 的 apiKey 是字面值；请改用 `saiku auth set {}`（或 {{env:VAR}}），配置里不放密钥",
                         self.provider_id, self.provider_id
                     ),
                 ))
@@ -361,7 +361,7 @@ pub fn read_key(
             let store = AuthStore::load(auth_path)?;
             store.key(&route.provider_id).ok_or_else(|| {
                 missing(format!(
-                    "{} 里没有这一项；用 `arcdeck auth set {}` 写入",
+                    "{} 里没有这一项；用 `saiku auth set {}` 写入",
                     auth_path.display(),
                     route.provider_id
                 ))
@@ -444,7 +444,7 @@ mod tests {
     fn builtin_opencode_go_is_anthropic_messages_with_session_header() {
         let route = resolve("opencode-go/deepseek-v4.1-flash", &BTreeMap::new(), "t1").unwrap();
         assert_eq!(route.dsh_provider, "opencode-go");
-        assert_eq!(route.key_env, "ARCDECK_KEY_OPENCODE_GO");
+        assert_eq!(route.key_env, "SAIKU_KEY_OPENCODE_GO");
         assert_eq!(route.key_source, KeySource::AuthStore);
         match route.adapter {
             DshAdapter::PiAi { api, headers, models, .. } => {

@@ -2,7 +2,7 @@
 //!
 //! - **交互会话**：后台起 `arc_deck_dsh::remote::service`（独占一个 web 内核），
 //!   `Request::Session` / `Update::Session` 原样转发 —— 那组消息就是 GUI 将来经 IPC 用的那一份。
-//! - **独立运行**：内核起不来时的退路，以及 `/runs` 里看工人（与 `arcdeck status` 同一份事实）。
+//! - **独立运行**：内核起不来时的退路，以及 `/runs` 里看工人（与 `saiku status` 同一份事实）。
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
@@ -109,7 +109,7 @@ fn catalog_from_config(config: &UserConfig) -> Vec<catalog::Provider> {
 
 fn model_prefs_path() -> PathBuf {
     userconfig::data_dir()
-        .join("arcdeck")
+        .join("saiku")
         .join("model.json")
 }
 
@@ -147,7 +147,7 @@ pub async fn run() -> i32 {
         effort: loaded.effort,
         config_error: loaded.config_error,
         preferences: userconfig::data_dir()
-            .join("arcdeck")
+            .join("saiku")
             .join("tui-preferences.json"),
         personalization: loaded.config.as_ref().is_some_and(|cfg| cfg.personalization.enabled),
         catalog: loaded.catalog,
@@ -196,7 +196,7 @@ struct Backend {
     forward: JoinHandle<()>,
 }
 
-/// 起会话服务。起不来（运行时没装、密钥缺失、另一个 arcdeck 占着会话目录）就把原因
+/// 起会话服务。起不来（运行时没装、密钥缺失、另一个 saiku 占着会话目录）就把原因
 /// 作为 `Backend{Failed}` 发给界面 —— 界面据此退回独立请求，而不是对着一个死通道发消息。
 fn start_backend(
     cfg: Option<&UserConfig>,
@@ -214,7 +214,7 @@ fn start_backend(
         None
     };
     let Some(cfg) = cfg else {
-        return fail("没有可用的用户配置；先运行 `arcdeck config init`".into());
+        return fail("没有可用的用户配置；先运行 `saiku config init`".into());
     };
     let kernel_id = format!("tui-{}", std::process::id());
     let (handle, notes) = match crate::serve::spawn_service(cfg, workspace, permission, agent, mode, &kernel_id) {
@@ -425,7 +425,7 @@ async fn serve(
                 if !run.task.is_finished() {
                     if let Err(error) = cancel(&root, &run.id).await {
                         eprintln!(
-                            "退出时取消未确认：{error}；请检查 arcdeck status {}",
+                            "退出时取消未确认：{error}；请检查 saiku status {}",
                             run.id
                         );
                     }
@@ -435,7 +435,7 @@ async fn serve(
                     .await
                     .is_err()
                 {
-                    eprintln!("收尾仍在运行；请检查 arcdeck status {}", run.id);
+                    eprintln!("收尾仍在运行；请检查 saiku status {}", run.id);
                 }
             }
             for task in cancel_tasks {
@@ -910,7 +910,7 @@ mod tests {
         assert_eq!(providers[0].models[0].id, "vendor/model-1");
     }
 
-    /// `model.json` 与 `tui-preferences.json` 同目录（都在 Arc Deck 的数据目录里）。
+    /// `model.json` 与 `tui-preferences.json` 同目录（都在 Saiku 的数据目录里）。
     #[test]
     fn model_prefs_live_next_to_the_ui_preferences() {
         let prefs = model_prefs_path();
@@ -919,7 +919,7 @@ mod tests {
             Some("model.json")
         );
         let ui_prefs = userconfig::data_dir()
-            .join("arcdeck")
+            .join("saiku")
             .join("tui-preferences.json");
         assert_eq!(prefs.parent(), ui_prefs.parent());
     }

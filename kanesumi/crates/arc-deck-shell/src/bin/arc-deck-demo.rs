@@ -1,4 +1,4 @@
-// Arc Deck · 骨架 demo
+// Saiku Deck · 骨架 demo
 //
 // 用途有两个，都很具体：
 //
@@ -17,7 +17,7 @@ use arc_deck_shell::{
 // ── Kanesumi Design token（Rust/Ether 桌面调色板）─────────────────────
 // 正典：Ether/docs/KANESUMI_DESIGN.md
 // 注意：正典写「OLED 纯黑 #000000」，Android 扇区严格遵守，而 Ether 桌面用
-// #1A1A1A。Arc Deck 跟随桌面扇区 —— 这个分歧必须在项目里显式记录，不能默认。
+// #1A1A1A。Saiku Deck 跟随桌面扇区 —— 这个分歧必须在项目里显式记录，不能默认。
 
 /// 背景 —— Ether 桌面取值。
 const BG: Color = Color::from_hex(0x1A1A1A);
@@ -94,7 +94,7 @@ impl DemoApp {
 
 impl App for DemoApp {
     fn config(&self) -> AppConfig {
-        AppConfig::new("io.github.arcdeck.demo", "Arc Deck · 骨架", 900.0, 420.0)
+        AppConfig::new("io.github.arcdeck.demo", "Saiku Deck · 骨架", 900.0, 420.0)
             .with_min_size(640.0, 320.0)
     }
 
@@ -116,7 +116,7 @@ impl App for DemoApp {
         // 不是独立 chrome，没有分割线，没有背板。
         scene.text(
             Point::new(pad, y),
-            "Arc Deck",
+            "Saiku Deck",
             28.0,
             ON_BG,
         );
@@ -289,7 +289,7 @@ impl App for DemoApp {
 
 fn main() {
     if let Err(e) = platform::run(Box::new(DemoApp::new())) {
-        eprintln!("Arc Deck 启动失败: {e}");
+        eprintln!("Saiku Deck 启动失败: {e}");
         std::process::exit(1);
     }
 }

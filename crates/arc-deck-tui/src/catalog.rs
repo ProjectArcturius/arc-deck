@@ -10,7 +10,7 @@
 //! 三处与上游的有意差异，理由写在各自的注释里：
 //! 1. `category` 放 provider 名（上游放分节名），所以 `description` 不重复 provider 名；
 //! 2. 搜索分支按模糊分数排序（上游在 fuzzysort 之后又按 release_date 重排一次，分数被丢掉）；
-//! 3. provider 之间只按 name 排序，不给某个 provider 提前（Arc Deck 的目录来自 DSH，不是内置的）。
+//! 3. provider 之间只按 name 排序，不给某个 provider 提前（Saiku 的目录来自 DSH，不是内置的）。
 
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
@@ -25,7 +25,7 @@ pub const RECENT_LIMIT: usize = 10;
 /// 一条路由 `provider_id/model_id`。
 ///
 /// 字段是 snake_case 而不是上游状态文件里的 `providerID`/`modelID`：这份偏好属于
-/// Arc Deck 自己的状态目录，不是 OpenCode 的 `model.json`，没有兼容负担。
+/// Saiku 自己的状态目录，不是 OpenCode 的 `model.json`，没有兼容负担。
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ModelRef {
     pub provider_id: String,
@@ -83,7 +83,7 @@ pub struct Model {
     pub context_window: Option<u64>,
 }
 
-/// 本地偏好。收藏与最近是 Arc Deck 自己的状态，不写回 DSH（§7.2）。
+/// 本地偏好。收藏与最近是 Saiku 自己的状态，不写回 DSH（§7.2）。
 ///
 /// 强度表的键是 `"provider/model"`。产品名是 **effort**（命名纪律见 §7.4），
 /// 上游给这块起的名字只在 `docs/PRODUCT_PLAN.md` 里出现，不落到代码里。
@@ -118,7 +118,7 @@ impl ModelPrefs {
     }
 
     /// `None` 表示跟随模型默认强度，实现方式是删掉这一条键 ——
-    /// 不写上游那个 `"default"` 哨兵值（那是它自己 UI 的约定，Arc Deck 的界面还没定）。
+    /// 不写上游那个 `"default"` 哨兵值（那是它自己 UI 的约定，Saiku 的界面还没定）。
     pub fn set_effort(&mut self, model: &ModelRef, effort: Option<&str>) {
         match effort {
             Some(value) => {
@@ -166,7 +166,7 @@ pub struct ModelOption {
     pub model: ModelRef,
     pub title: String,
     pub description: Option<String>,
-    /// provider 名。上游这里放的是分节名（"Favorites"/"Recent"），Arc Deck 改成 provider 名，
+    /// provider 名。上游这里放的是分节名（"Favorites"/"Recent"），Saiku 改成 provider 名，
     /// 因为 §7.2 要的是「provider 名作为副标题」，而分节顺序由本函数的输出顺序表达。
     pub category: Option<String>,
     pub footer: Option<String>,

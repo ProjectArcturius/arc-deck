@@ -19,7 +19,7 @@
 //!
 //! # 协议为什么选 `anthropic-messages`
 //!
-//! 它是 Arc Deck 现有路由的默认协议（`core::provider` 的 `opencode-go`），形状是三家里
+//! 它是 Saiku 现有路由的默认协议（`core::provider` 的 `opencode-go`），形状是三家里
 //! 最容易手写的（SSE + 一种事件模板），且 pi-ai 那份实现的解析逐行可读
 //! （`@earendil-works/pi-ai/dist/api/anthropic-messages.js`）。
 //!

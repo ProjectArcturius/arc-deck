@@ -28,7 +28,7 @@
 //! cargo test -p arc-deck-dsh --offline -- --ignored remote_live_
 //! ```
 //!
-//! 运行时不在默认位置时（换机器、CI）：`ARCDECK_DSH_RUNTIME_DIR=<目录>`，
+//! 运行时不在默认位置时（换机器、CI）：`SAIKU_DSH_RUNTIME_DIR=<目录>`，
 //! 或者照 `crates/arc-deck-cli/src/commands.rs` 的 `cmd_runtime` 用 `--config`
 //! 指一份配置 —— 这里只认环境变量，因为测试不该去解析用户的配置。
 
@@ -72,7 +72,7 @@ async fn start_kernel(test_name: &str) -> Option<(WebKernel, tempfile::TempDir)>
         }
     };
     let home = tempfile::Builder::new()
-        .prefix("arcdeck-remote-live-")
+        .prefix("saiku-remote-live-")
         .tempdir()
         .expect("建临时 DSH_HOME");
 
@@ -90,7 +90,7 @@ fn runtime_layout() -> Result<crate::runtime::RuntimeLayout, String> {
     use crate::runtime::RuntimeLayout;
 
     let version = arc_deck_core::userconfig::PINNED_DSH_VERSION.to_string();
-    let dir: PathBuf = match std::env::var_os("ARCDECK_DSH_RUNTIME_DIR") {
+    let dir: PathBuf = match std::env::var_os("SAIKU_DSH_RUNTIME_DIR") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
         _ => arc_deck_core::userconfig::default_runtime_dir(&version),
     };
@@ -258,7 +258,7 @@ async fn remote_live_a_missing_entry_fails_fast_with_a_readable_reason() {
         return;
     };
     let home = tempfile::Builder::new()
-        .prefix("arcdeck-remote-live-missing-")
+        .prefix("saiku-remote-live-missing-")
         .tempdir()
         .expect("建临时 DSH_HOME");
 

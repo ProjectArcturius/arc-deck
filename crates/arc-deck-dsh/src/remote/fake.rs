@@ -66,7 +66,7 @@ impl FakeMux {
         let thread_control = Arc::clone(&control);
         let thread_done = Arc::clone(&done);
         let thread = std::thread::Builder::new()
-            .name("arcdeck-dsh-fake-mux".into())
+            .name("saiku-dsh-fake-mux".into())
             .spawn(move || {
                 serve(listener, commands_rx, frames_tx, thread_control);
                 thread_done.store(true, Ordering::SeqCst);
@@ -266,7 +266,7 @@ impl FakeRpc {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let thread = std::thread::Builder::new()
-            .name("arcdeck-dsh-fake-rpc".into())
+            .name("saiku-dsh-fake-rpc".into())
             .spawn(move || {
                 use std::io::{Read, Write};
                 while !thread_stop.load(Ordering::SeqCst) {

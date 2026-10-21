@@ -1,4 +1,4 @@
-# Contrast probe regions for a 1550x830 Arc Deck capture, maximised window.
+# Contrast probe regions for a 1550x830 Saiku Deck capture, maximised window.
 # label,x,y,w,h   ('#' starts a comment)
 #
 # Crop tightly around ACTUAL glyphs. A window that is mostly background measures the

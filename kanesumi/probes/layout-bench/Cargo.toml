@@ -1,6 +1,6 @@
 [package]
 name = "layout-bench"
-description = "Arc Deck 探针 —— 流式文本排版性能（决定渲染管线设计）"
+description = "Saiku Deck 探针 —— 流式文本排版性能（决定渲染管线设计）"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Arc Deck terminal interface"
+description = "Saiku terminal interface"
 
 [dependencies]
 arc-deck-core = { path = "../arc-deck-core" }

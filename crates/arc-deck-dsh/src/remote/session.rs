@@ -83,7 +83,7 @@ impl SessionClient {
     /// 回执只表示「进了收件箱」，不表示答完了：要看 follow 流里的 `turn/end`。
     pub async fn prompt(&self, session_id: &str, text: &str) -> Result<String, RemoteError> {
         let request_id = format!(
-            "arcdeck-{}-{}-{}",
+            "saiku-{}-{}-{}",
             std::process::id(),
             // requestId 会落入会话历史。内核重连会重建 SessionClient；旧的实例计数器
             // 从 1 重来，DSH 会把新消息去重并回 accepted=true，前端于是一直转扫描条。

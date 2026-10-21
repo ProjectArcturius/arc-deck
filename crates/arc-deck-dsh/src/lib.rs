@@ -1,4 +1,4 @@
-//! Arc Deck 的 DSH 适配层。
+//! Saiku 的 DSH 适配层。
 //!
 //! 这一层负责与运行时说话，并把它的事件折成产品视图；它**不**决定任务是否
 //! 完成 —— 那件事由 `arc-deck-cli` 的 worker 按规则判定（参 PRODUCT_PLAN §6.3）。

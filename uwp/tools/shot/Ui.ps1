@@ -1,7 +1,7 @@
 <#
   Click + screenshot helper. Run with Windows PowerShell 5.1, NOT pwsh.
 
-  Why this exists: Arc Deck is a UWP app, so its window belongs to
+  Why this exists: Saiku Deck is a UWP app, so its window belongs to
   ApplicationFrameHost, and this machine runs at DPI 120 (125%). The window
   rect is in physical pixels, the window content is laid out in 96-DPI logical
   pixels, and the saved screenshot is physical pixels again. Guessing a click
@@ -47,7 +47,7 @@ public class Ui {
       if (p.ProcessName != "ApplicationFrameHost") continue;
       var hh = p.MainWindowHandle; if (hh == IntPtr.Zero) continue;
       var t = new System.Text.StringBuilder(512); GetWindowTextW(hh, t, 512);
-      if (t.ToString().Contains("Arc Deck")) return hh;
+      if (t.ToString().Contains("Saiku Deck")) return hh;
     }
     return IntPtr.Zero;
   }

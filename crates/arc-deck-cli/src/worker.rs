@@ -242,7 +242,7 @@ fn dsh_runtime_command(input: DshCommandInput<'_>) -> Result<RuntimeCommand, Spe
         return Err(SpecError::new(
             code::RUNTIME_ENTRY_MISSING,
             format!(
-                "DSH 入口不存在：{}。先运行 `arcdeck runtime install`",
+                "DSH 入口不存在：{}。先运行 `saiku runtime install`",
                 input.entry.display()
             ),
         ));
@@ -259,7 +259,7 @@ fn dsh_runtime_command(input: DshCommandInput<'_>) -> Result<RuntimeCommand, Spe
     let startup = Permission::from_sandbox(input.sandbox)?;
     let guard = input.plan.policy.execution_guard(startup)?;
     for note in &guard.recorded {
-        eprintln!("arcdeck: 授权缺口（已留档，执行层不拦）—— {note}");
+        eprintln!("saiku: 授权缺口（已留档，执行层不拦）—— {note}");
     }
 
     let mut persona = input.system_prompt.text();
@@ -1015,7 +1015,7 @@ fn git_lines(workspace: &Path, args: &[&str]) -> Option<Vec<String>> {
     )
 }
 
-/// 回报里「Arc Deck 采集的事实」：提交、相对基线的变更、未提交文件。不信模型自报。
+/// 回报里「Saiku 采集的事实」：提交、相对基线的变更、未提交文件。不信模型自报。
 fn collect_git_facts(prepared: &Prepared, result: &mut TaskResult) {
     let Some(base) = &prepared.config.git_base else { return };
     let ws = &prepared.plan.workspace;
@@ -1134,7 +1134,7 @@ struct AnnounceState {
 /// 用不到。为什么要留：产品事件是**投影之后**的形状，「协议到底长什么样」只能看原始
 /// 帧 —— 而 §9.2 要求原始事件保留可诊断信息，在核实之前那条一直没有落地。
 ///
-/// 打开：`ARCDECK_RAW_EVENTS=<路径>`。写失败不改任务结论 —— 它是证据，不是判据。
+/// 打开：`SAIKU_RAW_EVENTS=<路径>`。写失败不改任务结论 —— 它是证据，不是判据。
 ///
 /// 走进程级单例而不是层层传参：它是一条**与任务逻辑无关的诊断旁路**，为了它去改
 /// 三个函数签名只会让主路径更难读。
@@ -1142,13 +1142,13 @@ fn raw_log(value: &Value) {
     use std::sync::{Mutex, OnceLock};
     static LOG: OnceLock<Mutex<Option<std::io::BufWriter<std::fs::File>>>> = OnceLock::new();
     let log = LOG.get_or_init(|| {
-        let writer = std::env::var_os("ARCDECK_RAW_EVENTS")
+        let writer = std::env::var_os("SAIKU_RAW_EVENTS")
             .filter(|p| !p.is_empty())
             .and_then(|path| match std::fs::File::create(&path) {
                 Ok(file) => Some(std::io::BufWriter::new(file)),
                 Err(e) => {
                     eprintln!(
-                        "arcdeck: 打不开原始事件日志 {}：{e}",
+                        "saiku: 打不开原始事件日志 {}：{e}",
                         std::path::Path::new(&path).display()
                     );
                     None

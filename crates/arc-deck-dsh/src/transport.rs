@@ -210,7 +210,7 @@ async fn dispatch_line(
             let reply = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id,
-                "error": { "code": -32601, "message": "Arc Deck 客户端不提供任何服务端请求方法" },
+                "error": { "code": -32601, "message": "Saiku 客户端不提供任何服务端请求方法" },
             });
             let mut text = serde_json::to_string(&reply).unwrap_or_default();
             text.push('\n');

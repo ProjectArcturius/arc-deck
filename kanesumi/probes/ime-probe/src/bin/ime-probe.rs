@@ -1,4 +1,4 @@
-// Arc Deck · IME 组合验证（真实输入队列）
+// Saiku Deck · IME 组合验证（真实输入队列）
 //
 // 与 input-probe 的分工：
 //
@@ -141,13 +141,13 @@ fn tap_vk(vk: u16) -> u32 {
 }
 
 fn main() {
-    println!("Arc Deck · IME 组合验证（SendInput 真实输入队列）");
+    println!("Saiku Deck · IME 组合验证（SendInput 真实输入队列）");
     println!("================================================");
 
     // SAFETY: 标准 Win32 查询；句柄使用前判空。
     let hwnd = unsafe { FindWindowW(CLASS_NAME.as_ptr(), std::ptr::null()) };
     if hwnd == 0 {
-        eprintln!("未找到 Arc Deck 窗口 —— 请先启动 arc-deck-demo.exe");
+        eprintln!("未找到 Saiku Deck 窗口 —— 请先启动 arc-deck-demo.exe");
         std::process::exit(1);
     }
     println!("目标窗口: {hwnd:#x}");

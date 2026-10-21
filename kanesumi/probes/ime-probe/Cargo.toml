@@ -1,6 +1,6 @@
 [package]
 name = "ime-probe"
-description = "Arc Deck 探针 —— Win32/IMM32 中文 IME 可行性验证（否决性）"
+description = "Saiku Deck 探针 —— Win32/IMM32 中文 IME 可行性验证（否决性）"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
