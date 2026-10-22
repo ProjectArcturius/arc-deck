@@ -1,5 +1,16 @@
 # AGENTS.md — Saiku
 
+<!-- BEGIN workbench-pointer · v1 · 勿手改本块（由 GuitaristRin/Projects 统一维护；改模板请改 templates/repo-AGENTS-block.md） -->
+> **本文件只写本仓特有的规则。跨仓通用约定不在本仓重复**，唯一真源是工作台文档库：
+> - Windows：`%USERPROFILE%\Documents\Projects\AGENTS.md`
+> - Linux：`~/projects/AGENTS.md` → `~/projects/Arcturius/AGENTS.md`（按序取第一个存在的）
+> - 远端：<https://github.com/GuitaristRin/Projects/blob/main/AGENTS.md>
+>
+> 动手之前先读它。**读不到就在报告里写明「工作台未读到」**，然后按本文件执行，不要猜。
+> 新发现的通用规则先回流工作台（`docs/09-回流与同步.md`），本文件只留引用，不抄正文。
+> 冲突优先级：用户当前明确指令 > 本仓特有规则 > 工作台通用规则。
+<!-- END workbench-pointer -->
+
 **命名（2026-10-21）**：产品原名 Arc Deck，因 `arcdeck` 已有人用而改名。产品与可执行文件叫 **Saiku**（`saiku`，取日文「細工」），
 桌面 GUI（Windows 的 UWP、Linux 的 Kanesumi）统称 **Saiku Deck**，仓库是 `ProjectArcturius/saiku`。用户目录与环境变量随之改为
 `saiku` / `SAIKU_*`，`saiku` 首次运行时把旧的 `arcdeck` 目录搬过来（`userconfig::migrate_legacy_dirs`）。
